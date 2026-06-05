@@ -108,7 +108,7 @@ impl Pal {
             #[cfg(target_os = "linux")]
             {
                 if session.is_wayland() {
-                    Box::new(clipboard::WaylandClipboard)
+                    Box::new(clipboard::WaylandClipboard::default())
                 } else {
                     Box::new(clipboard::ArboardClipboard)
                 }
