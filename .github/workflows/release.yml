@@ -86,6 +86,7 @@ jobs:
             libssl-dev \
             patchelf \
             libfuse2 \
+            xdg-utils \
             build-essential curl wget file
 
       - name: Setup Node
