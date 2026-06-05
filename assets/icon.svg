@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bgB" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b1e26"/>
+      <stop offset="1" stop-color="#0f1014"/>
+    </linearGradient>
+    <linearGradient id="ghB" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8aa0ff"/>
+      <stop offset="1" stop-color="#6d5bff"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgB)"/>
+  <!-- ghost whose body narrows into a pen nib -->
+  <path d="M150 236 a106 106 0 0 1 212 0 V330 Q362 360 300 372 L268 432 Q256 448 244 432 L212 372 Q150 360 150 330 Z" fill="url(#ghB)"/>
+  <!-- nib slit + tip -->
+  <line x1="256" y1="374" x2="256" y2="426" stroke="#1b1e26" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="256" cy="378" r="9" fill="#1b1e26"/>
+  <!-- eyes -->
+  <circle cx="222" cy="250" r="15" fill="#ffffff"/>
+  <circle cx="290" cy="250" r="15" fill="#ffffff"/>
+</svg>

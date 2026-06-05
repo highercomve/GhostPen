@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bgC" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef1f8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgC)"/>
+  <!-- line-art ghost -->
+  <path d="M150 252 a106 106 0 0 1 212 0 V374 q-26.5 36 -53 0 q-26.5 -36 -53 0 q-26.5 36 -53 0 q-26.5 -36 -53 0 Z"
+        fill="none" stroke="#3b6cff" stroke-width="20" stroke-linejoin="round"/>
+  <!-- eyes -->
+  <circle cx="222" cy="250" r="14" fill="#3b6cff"/>
+  <circle cx="300" cy="250" r="14" fill="#3b6cff"/>
+  <!-- pen nib tail descending from the ghost -->
+  <path d="M261 300 L330 369 L300 399 L231 330 Z" fill="#3b6cff"/>
+  <path d="M330 369 l24 10 -10 -24 Z" fill="#16213e"/>
+  <line x1="252" y1="321" x2="309" y2="378" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+</svg>
