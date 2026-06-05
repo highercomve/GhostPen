@@ -50,7 +50,7 @@ jobs:
     steps:
       - name: Create draft release
         id: create-release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         with:
@@ -123,7 +123,7 @@ jobs:
             args: "--target aarch64-pc-windows-msvc"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux system dependencies
         if: startsWith(matrix.os, 'ubuntu')
@@ -142,7 +142,7 @@ jobs:
             build-essential curl wget file
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -181,7 +181,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Flip draft to published
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         with:
