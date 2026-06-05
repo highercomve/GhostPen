@@ -117,8 +117,8 @@ and calls that "original." Step 1 must run **before** step 2.
 | Shell / windowing | Tauri v2 | Small binary, native webview, Rust backend. As specified. |
 | Backend | Rust | Native OS APIs for input/clipboard; one binary per OS. |
 | Frontend | React + TS + Tailwind | As specified; overlay is trivial UI. |
-| Clipboard (all OS) | **arboard 3** (primary) | Single backend covering Win/macOS/**X11 + Wayland**. Removes the X11 gap. |
-| Clipboard (Wayland fallback) | **wl-clipboard-rs 0.8** | Only if arboard misbehaves on a given compositor; selected at runtime, not compile time. |
+| Clipboard (X11/macOS/Win) | **arboard 3** | arboard is X11-only (`x11rb`); fine off Wayland. |
+| Clipboard (Wayland) | **wl-clipboard-rs 0.9** | Native Wayland clipboard, selected at runtime by `detect_session()`. Required: arboard loses writes through the XWayland bridge on wlroots (ADR-002 POC). Persistent serve thread keeps the value. |
 | Input synthesis | **enigo 0.3** (Win/macOS/X11 + Wayland-libei) | Primary. |
 | Input fallback (Wayland) | **ydotool / wtype** (external) | When the compositor lacks libei. Probed at startup. |
 | Hotkey (Win/macOS/X11) | tauri-plugin-global-shortcut 2 | In-process. |
@@ -128,9 +128,10 @@ and calls that "original." Step 1 must run **before** step 2.
 | Secrets (hardening) | keyring crate | Move API keys out of plaintext. |
 | HTTP | reqwest 0.12 + tokio | With **enforced timeouts**. |
 
-**Key stack change vs plan:** clipboard becomes **arboard everywhere** (runtime-fallback to
-wl-clipboard-rs on Wayland) instead of `cfg`-split arboard/wl-clipboard. This is the single
-biggest correctness improvement and it simplifies the code.
+**Key stack change vs plan:** clipboard is **arboard off Wayland, wl-clipboard-rs on Wayland**,
+chosen at runtime by `detect_session()` behind the one `Clipboard` trait (not a `cfg` split).
+The Hyprland POC (ADR-002) showed arboard's X11 path loses writes on wlroots, so the Wayland
+backend is mandatory there, with a persistent serve thread for clipboard ownership.
 
 ## Architectural Patterns
 
@@ -159,15 +160,24 @@ biggest correctness improvement and it simplifies the code.
 - **Consequences**: One extra indirection (trait objects / enum dispatch). Massive payoff in
   testability and platform isolation. Enables capability probing and graceful fallback.
 
-### ADR-002: arboard as the single clipboard backend
-- **Status**: Accepted (pending POC confirmation on Hyprland — see Risk Register)
+### ADR-002: arboard primary, wl-clipboard-rs on Wayland
+- **Status**: Accepted — POC ran on Hyprland 2026-06-05; the Wayland fallback is now active.
 - **Context**: Plan used `wl-clipboard-rs` for all of Linux, which **does not work on X11**,
   contradicting the support matrix.
-- **Decision**: Use arboard on every OS. On Wayland, if arboard fails a POC smoke test,
-  fall back to wl-clipboard-rs behind the same `Clipboard` trait (selected at runtime).
-- **Consequences**: Removes the X11 breakage and one code path. The Wayland "clipboard is
-  cleared when the owning client exits" caveat is moot because GhostPen is a long-lived
-  daemon that retains ownership.
+- **Decision**: Use arboard on X11/macOS/Windows. On **Wayland**, use `wl-clipboard-rs`
+  behind the same `Clipboard` trait, **selected at runtime** by `detect_session()`.
+- **POC finding (Hyprland)**: arboard is built X11-only (`x11rb`), so on a Wayland session it
+  reads/writes the **X11 clipboard via XWayland** and writes are lost across Hyprland's
+  X11↔Wayland bridge — `wl-paste` returns "Nothing is copied" after a write. The
+  per-call create/drop pattern compounds this: dropping the source destroys the selection.
+- **Decision detail**: `WaylandClipboard::write_text` serves the selection from a **detached
+  thread** (`wl-clipboard-rs` `foreground(true)` + `ServeRequests::Unlimited`) so the value
+  persists for the daemon's lifetime (until another app copies, which supersedes it). No
+  `fork()` (unsafe in our multithreaded process); no `wl-copy` CLI.
+- **Consequences**: Removes the X11 breakage and the Wayland write loss. The "clipboard is
+  cleared when the owning client exits" caveat is handled by the long-lived serve thread —
+  the ADR's original assumption that the daemon "retains ownership" is now actually true in
+  code (it was not: the prior per-call arboard handle dropped ownership immediately).
 
 ### ADR-003: Clipboard snapshot before synthetic copy
 - **Status**: Accepted

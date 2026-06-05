@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { listen } from "@tauri-apps/api/event";
 import LevelBar from "./LevelBar";
 import {
   Status,
@@ -59,10 +60,22 @@ export default function Menu() {
     refresh();
   }, [refresh]);
 
-  // Re-read selection/status whenever the window regains focus (a fresh trigger).
+  // A fresh trigger (hotkey / --trigger / tray) resets to the menu and re-reads the selection.
+  // This is driven by an explicit event from the backend, NOT window focus — otherwise simply
+  // regaining focus (e.g. after the AI call completes) would wipe the result the user wants.
+  useEffect(() => {
+    const unlisten = listen("ghostpen://show", () => {
+      setView({ kind: "menu" });
+      refresh();
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [refresh]);
+
+  // Plain focus just refreshes the selection/status; it must not change the current view.
   useEffect(() => {
     const onFocus = () => {
-      setView({ kind: "menu" });
       refresh();
     };
     window.addEventListener("focus", onFocus);

@@ -222,6 +222,9 @@ fn trigger_menu_flow(app: &AppHandle) {
         }
     }
     show_main(app);
+    // Tell the overlay this is a fresh trigger: reset to the menu and re-read the selection.
+    // (Distinguishes a real trigger from a mere window-focus event — see Menu.tsx.)
+    let _ = app.emit("ghostpen://show", ());
 }
 
 // ---- action resolution ---------------------------------------------------------------
@@ -288,7 +291,7 @@ fn get_status(app: AppHandle) -> Status {
         .unwrap_or_else(|| ("(none)".into(), "(none)".into()));
     Status {
         session: pal.session.label().into(),
-        clipboard_backend: "arboard".into(),
+        clipboard_backend: pal.clipboard_backend_name().into(),
         input_available: pal.input.available(),
         use_synthetic: synthetic,
         manual_mode: !synthetic,
@@ -519,8 +522,24 @@ fn close_settings(app: AppHandle) {
 
 // ---- entrypoint ----------------------------------------------------------------------
 
+/// WebKitGTK's DMABUF renderer crashes with "Error 71 (Protocol error) dispatching to
+/// Wayland display" on wlroots compositors (Hyprland, Sway). Disable it before GTK/webview
+/// init. Only on Wayland, and only if the user hasn't set the variable themselves (so they
+/// can opt back into the DMABUF renderer / keep hardware accel on X11). See ADR notes.
+#[cfg(target_os = "linux")]
+fn apply_wayland_webkit_workaround() {
+    let on_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let already_set = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some();
+    if on_wayland && !already_set {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    apply_wayland_webkit_workaround();
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();

@@ -102,10 +102,35 @@ pub struct Pal {
 impl Pal {
     pub fn detect() -> Self {
         let session = detect_session();
+        // Wayland needs the native clipboard (arboard is X11-only and loses writes through the
+        // XWayland bridge); everything else uses arboard.
+        let clipboard: Box<dyn ClipboardBackend> = {
+            #[cfg(target_os = "linux")]
+            {
+                if session.is_wayland() {
+                    Box::new(clipboard::WaylandClipboard)
+                } else {
+                    Box::new(clipboard::ArboardClipboard)
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Box::new(clipboard::ArboardClipboard)
+            }
+        };
         Pal {
             session,
-            clipboard: Box::new(clipboard::ArboardClipboard::default()),
+            clipboard,
             input: Box::new(input::EnigoInput::new()),
+        }
+    }
+
+    /// Human-readable name of the active clipboard backend (for status display).
+    pub fn clipboard_backend_name(&self) -> &'static str {
+        if self.session.is_wayland() {
+            "wl-clipboard-rs"
+        } else {
+            "arboard"
         }
     }
 

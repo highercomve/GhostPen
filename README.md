@@ -93,7 +93,15 @@ npm install                    # JS dependencies
 
 npm run tauri dev              # run in development (hot reload)
 npm run tauri build            # production bundles → src-tauri/target/release/bundle/
+npm run bundle:appimage        # AppImage only (sets NO_STRIP — see note below)
 ```
+
+> **Arch Linux / AppImage:** the `linuxdeploy` tool bundled by Tauri ships an old `strip`
+> that can't parse the `.relr.dyn` section (`unknown type [0x13]`) in libraries built with
+> Arch's current toolchain, so `tauri build`/`tauri bundle` fails with
+> `failed to run linuxdeploy`. The release binary is already stripped, so just skip
+> linuxdeploy's strip pass with `NO_STRIP=true` (use `npm run bundle:appimage`, or prefix
+> any bundle command: `NO_STRIP=true npm run tauri build`).
 
 Run the backend tests with:
 
