@@ -1,6 +1,6 @@
 [package]
 name = "ghostpen"
-version = "0.1.0"
+version = "0.1.1"
 description = "GhostPen — AI text editing overlay"
 authors = ["GhostPen"]
 edition = "2021"

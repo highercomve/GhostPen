@@ -1,5 +1,11 @@
 <a name="unreleased"></a>
 
+<a name="v0.1.1"></a>
+## [v0.1.1] - 2026-06-05
+### Bug Fixes
+
+- prevent UI freeze after a manual-mode result; taller menu
+
 <a name="v0.1.0"></a>
 ## v0.1.0 - 2026-06-05
 ### Features
@@ -11,3 +17,5 @@
 ### Continuous Integration
 
 - add multi-platform release workflow; fix bundle scripts
+
+[v0.1.1]: https://github.com/highercomve/GhostPen/compare/v0.1.0...v0.1.1
