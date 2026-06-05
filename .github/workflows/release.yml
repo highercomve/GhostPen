@@ -1,6 +1,6 @@
 name: Release
 
-# Build GhostPen for every target and publish the bundles to a GitHub Release.
+# Build GhostPen for every target and publish the bundles to a single GitHub Release.
 #
 # Coverage (all x86_64 + arm64):
 #   - macOS         .app / .dmg      (aarch64 + x86_64, both built on the Apple-Silicon runner)
@@ -10,6 +10,14 @@ name: Release
 # Linux "targets": "all" in tauri.conf.json already produces deb + rpm + appimage in one build.
 #
 # Trigger: push a tag like `v0.1.0`, or run manually (workflow_dispatch) with a tag input.
+#
+# Why three jobs instead of running tauri-action inside the matrix:
+#   tauri-action looks up the target release *by tag*, but the GitHub API does not return
+#   DRAFT releases by tag. So a matrix of N jobs each fail the lookup and each create their
+#   own draft, fragmenting assets across N invisible drafts. Instead:
+#     1. create-release  → make ONE draft release, export its id.
+#     2. build           → every matrix job uploads its bundles into that release by id.
+#     3. publish-release → flip the draft to published once all uploads succeed.
 
 on:
   push:
@@ -31,8 +39,52 @@ permissions:
   contents: write # needed to create the release and upload assets
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Create a single draft release that every build job uploads into.
+  # ---------------------------------------------------------------------------
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+    steps:
+      - name: Create draft release
+        id: create-release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            // Reuse an existing (draft or published) release for this tag if one already
+            // exists — keeps re-runs idempotent instead of stacking duplicates.
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = releases.find((r) => r.tag_name === tag);
+            if (existing) {
+              core.info(`Reusing existing release ${existing.id} for ${tag}`);
+              return existing.id;
+            }
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `GhostPen ${tag}`,
+              body: "Automated build. See the assets below for your platform.",
+              draft: true,
+              prerelease: false,
+            });
+            core.info(`Created draft release ${data.id} for ${tag}`);
+            return data.id;
+
+  # ---------------------------------------------------------------------------
+  # 2. Build every target and upload its bundles into the draft release.
+  # ---------------------------------------------------------------------------
   build:
     name: ${{ matrix.label }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -109,16 +161,36 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and release
+      - name: Build and upload bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # WebKitGTK DMABUF renderer crashes on some setups; harmless to set on CI.
           NO_STRIP: "true"
         with:
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: "GhostPen ${{ github.event.inputs.tag || github.ref_name }}"
-          releaseBody: "Automated build. See the assets below for your platform."
-          releaseDraft: true
-          prerelease: false
+          # Upload into the one draft release created above — no per-job release creation.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+
+  # ---------------------------------------------------------------------------
+  # 3. Publish the release once every platform has uploaded successfully.
+  # ---------------------------------------------------------------------------
+  publish-release:
+    name: Publish release
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Flip draft to published
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: Number(process.env.RELEASE_ID),
+              draft: false,
+              prerelease: false,
+            });
+            core.info(`Published release ${process.env.RELEASE_ID}`);
