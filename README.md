@@ -1,4 +1,12 @@
+<div align="center">
+
+<img src="assets/icon.svg" alt="GhostPen" width="120" height="120" />
+
 # GhostPen
+
+**AI-driven text editing, anywhere on your desktop.**
+
+</div>
 
 A cross-platform desktop app for AI-driven text editing. Highlight text anywhere, trigger
 GhostPen, pick an action (proofread, rewrite, translate, …), and the result is pasted back
@@ -13,6 +21,22 @@ Built with **Tauri v2** (Rust backend + React/TypeScript frontend).
 > Design docs: [`.agents/plan.md`](./.agents/plan.md) (implementation plan),
 > [`.agents/architecture.md`](./.agents/architecture.md) (architecture + ADRs),
 > [`.agents/TODO.md`](./.agents/TODO.md) (build status).
+
+---
+
+## Screenshots
+
+Pick an action for the highlighted text (left); the result is rewritten and copied back (right):
+
+<p align="center">
+  <img src="docs/screenshots/menu.png" alt="GhostPen action menu over highlighted text" width="300" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/result.png" alt="GhostPen Professional rewrite result" width="300" />
+</p>
+
+The **Professional** preset turns a casual note —
+*"hey just wanted to let u know the thing ur asking about is done, lmk if u need anything else thx"* —
+into *"I have completed the item you requested. Please let me know if you require anything further."*
 
 ---
 
