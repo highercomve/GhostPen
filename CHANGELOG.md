@@ -2,9 +2,26 @@
 
 <a name="v0.1.1"></a>
 ## [v0.1.1] - 2026-06-05
+### Features
+
+- add GhostPen app icon (nib-ghost) and regenerate icon set
+
 ### Bug Fixes
 
 - prevent UI freeze after a manual-mode result; taller menu
+
+### Continuous Integration
+
+- install xdg-utils for the Linux AppImage bundle
+
+### Documentation
+
+- add logo and screenshots to README
+- reconcile plan + TODO with shipped state
+
+### Chores
+
+- add scripts/install-local.sh (build + install for Linux)
 
 <a name="v0.1.0"></a>
 ## v0.1.0 - 2026-06-05
