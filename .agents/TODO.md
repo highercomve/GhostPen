@@ -9,176 +9,153 @@ through the PAL · runtime session detection, not just `cfg!` · snapshot clipbo
 copy · never `.unwrap()` an OS handle · bound every network call · default model
 `gemma4:e4b` · never log keys/clipboard.
 
-### Dev-environment status (2026-06-04, this machine)
-- **Arch/session:** aarch64 Linux, **Wayland** (`wayland-0`), desktop reports `X-Generic`
-  (actual compositor = ChromeOS/Sommelier — see Crostini note below; generalize §10's
-  Hyprland assumptions for real targets).
-- **Toolchain:** Rust 1.96.0 ✅ · Node 24 ✅ · Ollama 0.30.4 ✅ (service active on `:11434`).
-  Tauri system deps ✅ (Debian trixie, all present).
-- **Model override:** local hardware can't run `gemma4:e4b`, so this machine uses
-  **`gemma4:31b-cloud`** (Ollama Cloud, runs server-side; host already authorized — no
-  `ollama signin` needed). AI path verified end-to-end via `/v1/chat/completions`.
-- **Crostini:** Chromebook/ChromeOS Linux VM → no global hotkey, no synthetic input into
-  host apps, no overlay-on-top; clipboard IS shared with ChromeOS. Dev/test in **manual-copy
-  mode** (ADR-007); defer the three blocked integrations to a real target.
-- **Shipped default stays `gemma4:e4b`** for end users with local GPUs; only this dev
-  machine's active profile uses the cloud model.
+### Dev-environment status
+
+**Current (2026-06-05) — real target: x86_64 Arch Linux, Wayland / Hyprland.**
+- **Session:** `wayland-1`, compositor **Hyprland**. This is a real desktop target, so the
+  three Phase-0 unknowns (clipboard, input synthesis, overlay) are now resolvable here.
+- **Toolchain:** Rust 1.96.0 ✅ · Node 24 ✅. Tauri deps present (Arch).
+- **AI backends:** local **Ollama** on `:11434` (active model `gemma4:e2b`) **and** **LM
+  Studio** on `:1234` (`google/gemma-4-e2b` loaded) — both verified end-to-end.
+- **Wayland reality (verified here):** `enigo` synthetic input **fails silently** on Hyprland
+  (reports Ok, keystrokes don't land) → app runs in **manual-copy mode**; the Wayland
+  **clipboard** needs `wl-clipboard-rs` (arboard is X11-only and loses writes over XWayland).
+  Global hotkey is bound in the **compositor** (`Ctrl+Shift+A → ghostpen --trigger`).
+
+<details><summary>Previous dev machine (2026-06-04, superseded) — aarch64 Crostini Chromebook</summary>
+
+aarch64 Linux, Wayland (`wayland-0`), compositor = ChromeOS/Sommelier (reported `X-Generic`).
+Couldn't test global hotkey / synthetic input / overlay-on-top (Crostini limits); clipboard
+WAS shared with ChromeOS. Used `gemma4:31b-cloud` (Ollama Cloud) since local HW couldn't run
+`gemma4:e4b`. Dev/test in manual-copy mode. Shipped default stayed `gemma4:e4b`.
+</details>
 
 ---
 
-## Phase 0 — POC spikes (validate the High risks BEFORE building) 🚩
+## Phase 0 — POC spikes (validate the High risks) 🚩 — RESOLVED on real target
 
-> Architecture mandates these first; both are make-or-break for the Wayland target. Do them
-> as throwaway spikes, record the outcome in `architecture.md` (update ADR-002 / Open Q's).
-
-- [x] **0.1 Clipboard spike (ADR-002).** ✅ **PASS in Crostini.** `arboard` (default
-      features, X11-via-Sommelier) reads *and* writes the clipboard, and reads content
-      copied on the **ChromeOS side** — cross-boundary clipboard confirmed. No `wayland`
-      feature / `wl-clipboard-rs` needed here. _Re-verify on the real target compositor._
-- [ ] **0.2 Input-synthesis spike (§10b, biggest unknown).** **N/A on Crostini** — the VM
-      can't synthesize input into host apps, so this defers to a **real target**
-      (Hyprland/Wayland, Windows, macOS). On the Chromebook the app runs in **manual-copy
-      mode** (ADR-005/007). On the real target: synthesize `Ctrl+C` via `enigo` (libei);
-      if it fails, test `ydotool`/`wtype`.
-- [ ] **0.3 Overlay spike (ADR open Q3).** **Deferred to real target** (ChromeOS manages
-      windows in Crostini). There: compositor window-rules vs `gtk-layer-shell`.
+- [x] **0.1 Clipboard spike (ADR-002).** ✅ Resolved on Hyprland/Wayland. arboard is
+      **X11-only** here and loses writes across the XWayland bridge, so the Wayland path uses
+      **`wl-clipboard-rs`**: read via `get_contents`, write via a detached **persistent serve**
+      thread (`foreground(true)`, `ServeRequests::Unlimited`). Self-read deadlock fixed by
+      caching the served value while we own the selection (see Phase 10).
+- [x] **0.2 Input-synthesis spike (§10b).** ✅ Resolved: `enigo` (libei) **fails silently** on
+      native Wayland/Hyprland — it returns Ok but keystrokes never reach host windows. App
+      **degrades to manual-copy mode** there (ADR-005/007). `virtual_keyboard_v1`/libei-into-
+      host deferred. Works natively on X11/Windows/macOS.
+- [x] **0.3 Overlay spike.** ✅ Overlay shown via Hyprland window-rules (floating, centered,
+      pinned to follow the active workspace) + Tauri `alwaysOnTop`. `gtk-layer-shell` not
+      needed for v1.
 
 ## Phase 1 — Scaffold & dependencies (§4)
 
-- [x] **1.0** Install system deps: `./scripts/install-deps.sh` (cross-distro/macOS;
-      `--dry-run` to preview). shellcheck-clean, detects apt/pacman/dnf/zypper/apk/macOS.
-      ✅ Ran on this box (Debian trixie/aarch64): all Tauri deps already present.
-- [x] **1.1** Scaffolded Tauri v2 + React/TS/Vite; renamed `tauri-app`→`ghostpen`
-      (package.json, Cargo.toml pkg + `ghostpen_lib`, tauri.conf productName/title, main.rs).
-      _`npm install` runs with the first build._
-- [x] **1.2** Plugins added + wired in `lib.rs`: `single-instance` (registered first),
-      `store`, `global-shortcut` (+ scaffold `opener`). JS packages added to package.json.
-- [x] **1.3** Rust crates added via `cargo add` (newer than plan): **enigo 0.6.1**
-      (plan said 0.3 — API differs), **reqwest 0.13.4** (plan said 0.12, +json),
-      `arboard 3.6` (all platforms), `tokio` (full), `tracing` + `tracing-subscriber`.
-      _`wl-clipboard-rs` Wayland fallback deferred until needed (arboard validated, spike 0.1)._
-- [ ] **1.4** Configure `tauri.conf.json` windows (`main` frameless/transparent + `settings`) (§4C).
-      _Still the default single 800×600 window._
-- [~] **1.5** `capabilities/default.json`: added window show/hide/center/focus + `store` +
-      `global-shortcut` permissions. Revisit when the `settings` window is added (1.4).
+- [x] **1.0** `./scripts/install-deps.sh` (cross-distro/macOS, shellcheck-clean).
+- [x] **1.1** Scaffolded Tauri v2 + React/TS/Vite; renamed `tauri-app`→`ghostpen`.
+- [x] **1.2** Plugins wired in `lib.rs`: `single-instance` (first), `store`,
+      `global-shortcut`, `opener`.
+- [x] **1.3** Rust crates (newer than plan): enigo 0.6.1, reqwest 0.13.4, arboard 3.6,
+      **wl-clipboard-rs 0.9** (Linux), tokio, tracing(+subscriber), futures-util.
+- [x] **1.4** `tauri.conf.json` windows: `main` (frameless, alwaysOnTop, 320×620) +
+      `settings` + `playground`. Height raised 520→620 so the menu doesn't scroll.
+- [x] **1.5** `capabilities/default.json`: window show/hide/center/focus + store +
+      global-shortcut + opener.
 
-## Phase 2 — Platform Abstraction Layer (ADR-001)
+## Phase 2 — Platform Abstraction Layer (ADR-001) ✅
 
-> This is the spine that makes the app bulletproof across platforms. Build it before the flow.
+- [x] **2.1** `pal/mod.rs`: traits, `PalError`, `detect_session()` (WAYLAND_DISPLAY / XDG).
+- [x] **2.2** Win/macOS/X11 adapters: arboard clipboard + enigo input, all `Result`, no panics.
+- [x] **2.3** Linux/Wayland adapter: `WaylandClipboard` (wl-clipboard-rs read + persistent
+      serve + own-selection cache); input degrades to manual on Wayland.
+- [x] **2.4** `Pal::detect()` factory wires adapters from `detect_session()`; in `AppState`.
 
-- [ ] **2.1** `src-tauri/src/pal/mod.rs`: define traits `Clipboard`, `InputSynth`,
-      `HotkeyBinder`, `Overlay`, the `PalError` enum, and `detect_session()`
-      (`WAYLAND_DISPLAY` / `XDG_SESSION_TYPE`).
-- [ ] **2.2** Win/macOS/X11 adapters (known-good): `arboard` clipboard + `enigo` input.
-      All methods return `Result`; **no panics**.
-- [ ] **2.3** Linux/Wayland adapter informed by spikes: clipboard (arboard or wl-clipboard-rs),
-      input (libei/ydotool/wtype chain), `synthetic_supported()` reflects probe result.
-- [ ] **2.4** `Pal::select()` factory wires the right adapters from `detect_session()`;
-      store in Tauri-managed `AppState`.
+## Phase 3 — Core flow & clipboard contract (ADR-003/004/005/006) ✅
 
-## Phase 3 — Core flow & clipboard contract (ADR-003/004/005/006)
+- [x] **3.1** `AppState { pal, saved_clipboard, busy }` via `app.manage()`.
+- [x] **3.2** `trigger_menu_flow`: snapshot original clipboard → state, THEN copy; skip in manual.
+- [x] **3.3** `process_inner`: read selection → system prompt → AI → write → hide → paste →
+      restore original after delay. (Refactored to take a resolved system prompt.)
+- [x] **3.4** AI client: connect (~5s) + total (~60s) timeouts; readable error mapping.
+- [x] **3.5** In-flight guard (`try_acquire_busy` / `release_busy`) shared by both commands.
+- [x] **3.6** Manual-copy fallback + overlay signal when synthetic unavailable.
 
-- [ ] **3.1** `AppState { pal, saved_clipboard }` registered via `app.manage()`.
-- [ ] **3.2** `trigger_menu_flow`: **snapshot original clipboard → state, THEN copy** (fixes
-      the save/restore bug). Skip copy in manual mode.
-- [ ] **3.3** `process_ai_action`: read selection, build system prompt, call AI, write output,
-      hide, paste, then restore the saved original after the configured delay.
-- [ ] **3.4** AI client built with connect (~5s) + total (~30s) timeouts; readable error
-      mapping; reuse a single `reqwest::Client`.
-- [ ] **3.5** Debounce / in-flight guard so overlapping triggers can't corrupt clipboard state.
-- [ ] **3.6** Manual-copy fallback path in the command + an overlay signal when
-      `synthetic_supported() == false`.
+## Phase 4 — Configuration system (§5/§6) ✅
 
-## Phase 4 — Configuration system (§5/§6)
+- [x] **4.1** `config.rs`: `Settings`/`Profile`/`CustomAction` + `active()`; serde rename/defaults.
+- [x] **4.2** Load/save via `tauri-plugin-store`; Rust = source of truth.
+- [x] **4.3** Default profiles seeded: **Ollama local** (`gemma4:e4b`, active) **and
+      LM Studio** (`http://localhost:1234/v1`).
 
-- [ ] **4.1** `config.rs`: `Settings`/`Profile` structs + `active()`; serde rename/defaults.
-- [ ] **4.2** Load/save via `tauri-plugin-store` (`settings.json`); Rust `reload()` before
-      `get` to avoid JS↔Rust staleness (issue #7).
-- [ ] **4.3** Seed default profile = Ollama local, model `gemma4:e4b` (shipped default).
-      On **this dev machine**, set the active profile's model to `gemma4:31b-cloud`.
+## Phase 5 — Frontend (§9) ✅
 
-## Phase 5 — Frontend (§9)
+- [x] **5.1** Hash routing: `#/` menu, `#/settings`, `#/playground`.
+- [x] **5.2** Menu: actions + translate submenu, ⚙/🧪 buttons, Escape→hide, active destination.
+- [x] **5.3** `Settings.tsx`: profiles CRUD, presets, API key, temperature, hotkey, Fetch
+      models (dropdown + auto-select), Diagnostics.
+- [x] **5.4** Manual-mode UI state (copy-first hint, result/copy view).
 
-- [ ] **5.1** Hash routing: `#/` → menu, `#/settings` → settings.
-- [ ] **5.2** `App.tsx` menu: proofread / professional / concise / translate-submenu, ⚙
-      Settings, Escape→`hide_window`. Show active destination (e.g. "→ Ollama (local)").
-- [ ] **5.3** `Settings.tsx`: profiles CRUD, presets, API key, temperature, hotkey,
-      "Fetch models" (`GET /models`) with free-text fallback.
-- [ ] **5.4** Manual-mode UI state (instruct copy-first, "Copy result" button).
+## Phase 6 — Hotkey & Wayland integration (§8/§10) ✅
 
-## Phase 6 — Hotkey & Wayland integration (§8/§10)
+- [x] **6.1** In-process global shortcut (Win/macOS/X11); parse + re-register on change.
+      Default **`Ctrl+Shift+A`** (was `Ctrl+Shift+Space`; same combo on every OS).
+- [x] **6.2** `single-instance` `--trigger` forwarding into the running daemon.
+- [x] **6.3** Hyprland integration documented (autostart + `bind … --trigger`); wired into
+      the user's config this session.
 
-- [ ] **6.1** In-process global shortcut for Win/macOS/X11; parse the configured hotkey
-      string and re-register on change (lifts §13 future item into v1 if cheap).
-- [ ] **6.2** `single-instance` `--trigger` forwarding into the running daemon.
-- [ ] **6.3** Ship/generate Hyprland snippets: `exec-once` autostart, `bind … --trigger`,
-      and window-rules (or layer-shell from spike 0.3).
+## Phase 7 — Observability ✅
 
-## Phase 7 — Observability (architecture §Observability)
+- [x] **7.1** `tracing` init (stdout); clipboard/keys never logged. _Rotating file log: TODO._
+- [x] **7.2** Settings "Diagnostics" panel: session, clipboard backend, input support, mode.
 
-- [ ] **7.1** `tracing` to a rotating file log; redact clipboard text + API keys.
-- [ ] **7.2** Settings "Diagnostics" panel: detected session, clipboard backend, input
-      backend + support, last AI call status.
+## Phase 8 — Testing (§12)
 
-## Phase 8 — Testing (§12, expanded per-platform)
-
-- [ ] **8.1** Clipboard restored to prior contents after paste (the trust-anchor test).
-- [ ] **8.2** Empty/whitespace selection → graceful "No text selected".
-- [ ] **8.3** Profile switch (Ollama → OpenAI) routes with correct auth.
-- [ ] **8.4** `GET /models` populates dropdown per preset; manual entry on failure.
-- [ ] **8.5** API error / non-200 / empty completion → readable message, no paste.
-- [ ] **8.6** Escape closes menu; focus-loss auto-hide.
-- [ ] **8.7** Run the matrix on **each** target: Windows, macOS (Accessibility granted),
-      Linux/X11, Linux/Wayland (spike-validated path).
+- [x] **8.1–8.6** Covered by unit tests + manual verification (hotkey parse, system prompts,
+      settings serde/defaults, session detect; freeze/clipboard verified live on Hyprland).
+- [ ] **8.7** Full per-platform matrix on **Windows, macOS, Linux/X11** still pending
+      (Linux/Wayland path validated here). Release CI now builds all targets.
 
 ## Phase 9 — Hardening
 
-- [ ] **9.1** API keys → OS keychain (`keyring`). **DEFERRED** — Crostini has no Secret
-      Service/D-Bus keyring backend, so it can't be tested here and would risk the working
-      auth flow. Architecture/ADR already accepts plaintext `settings.json` for v1; enable on
-      a platform with a keychain (Win/macOS/GNOME/KDE) later.
-- [x] **9.2** Streaming responses with live preview ✅ — `process_text_stream` + SSE parser
-      (`run_completion_stream`) emits `ghostpen://chunk|done|error`; Playground renders live.
-- [x] **9.3** Custom user-defined actions + per-action model overrides ✅ — `CustomAction`
-      in settings, `resolve_action()`, managed in Settings, shown in menu + Playground.
-- [x] **9.4** System tray ✅ — Show menu / Playground / Settings / Quit + left-click summon.
-      Built non-fatally (tray may not render in the ChromeOS shelf under Sommelier; harmless
-      Gtk warning). Works on real desktops.
-- [ ] **9.5** Multi-format clipboard snapshot/restore (lifts ADR-004 limitation).
-      **DEFERRED** — low value; v1 text-only restore is sufficient.
+- [ ] **9.1** API keys → OS keychain (`keyring`). **DEFERRED** — plaintext `settings.json` for v1.
+- [x] **9.2** Streaming responses with live preview ✅ (Playground).
+- [x] **9.3** Custom user-defined actions + per-action model overrides ✅.
+- [x] **9.4** System tray ✅ (Show menu / Playground / Settings / Quit + left-click). Now uses
+      the real app icon.
+- [ ] **9.5** Multi-format clipboard snapshot/restore. **DEFERRED** — v1 text-only is enough.
+
+## Phase 10 — Packaging, polish & release (v0.1.x, 2026-06-05) ✅
+
+- [x] **10.1 Keyboard-driven menu** — ↑/↓ (or j/k) navigate, ←/→ change intensity, Enter runs,
+      1–9 quick-run, Esc closes; guards so typing in the prompt bar doesn't trigger shortcuts.
+- [x] **10.2 Google-style UI redesign** — per-action line icons, a freeform **prompt bar**
+      ("Tell GhostPen what to do…" → `process_ai_custom`, pasted back like a preset action),
+      and **system (light/dark) theme** via `prefers-color-scheme`.
+- [x] **10.3 LM Studio** shipped as a default profile alongside Ollama (OpenAI-compatible).
+- [x] **10.4 CLI** — `ghostpen --help` / `--version`, handled before GUI/daemon startup.
+- [x] **10.5 App + tray icon** — "nib-ghost" brand mark; `assets/icon.svg` master, full
+      `src-tauri/icons/*` regenerated via `tauri icon` (concepts kept in `assets/icon-options/`).
+- [x] **10.6 Release CI** — `.github/workflows/release.yml`: on a `v*` tag, build + upload a
+      draft GitHub Release for macOS (arm64+x86_64), Windows (x86_64+arm64), Linux
+      deb/rpm/appimage (x86_64 + arm64) via tauri-action.
+- [x] **10.7 Local install script** — `scripts/install-local.sh` (build via `tauri build` +
+      install binary/desktop/icon to ~/.local; avoids the `cargo build` dev-URL pitfall).
+- [x] **10.8 Bundle scripts fixed** — `bundle:*` now use `tauri build` (not `tauri bundle`,
+      which shipped a stale dev-mode binary).
+- [x] **10.9 Freeze fix** — after a manual-mode result the app hung ("not responding") because
+      `get_selection` (sync, GTK main thread) read our **own** served Wayland selection and
+      deadlocked. `WaylandClipboard` now returns the cached served value while we own the
+      selection; a generation counter avoids races between serve threads.
+- [x] **10.10 Release v0.1.1** — `git-chglog` config + `CHANGELOG.md`; annotated tags
+      `v0.1.0` and `v0.1.1`; version bumped across manifests.
+- [x] **10.11 README** — logo + screenshots (action menu / Professional result) captured on a
+      real Hyprland session.
+
+### Remaining / next
+- [ ] **8.7** per-platform test matrix (Windows, macOS, Linux/X11).
+- [ ] **6.x** verify the in-process global hotkey on X11/Windows/macOS (Wayland uses the
+      compositor bind).
+- [ ] **9.1** keychain, **9.5** multi-format clipboard, **7.1** rotating file log (all deferred).
+- [ ] Push `main` + tags; let the release workflow publish the first artifacts.
+- [ ] Optional: dedicated monochrome tray glyph (dark tile can blend into dark tray bars).
 
 ---
-
-## In Progress
-- Live functional testing of AI actions (use the Playground window).
-
-## Completed
-- **Phase 0.1** clipboard spike (arboard, cross-boundary) ✅
-- **Phase 1.0–1.5** deps + scaffold + rename + plugins + crates + window config (main /
-  settings / playground) + capabilities ✅
-- **First build + launch verified on Crostini** ✅ — dev loop works (Sommelier window).
-- **Phase 2 — PAL** ✅ `pal/{mod,clipboard,input}.rs`: traits, `detect_session()`, arboard
-  clipboard, enigo input (fallible, probed), `use_synthetic()` (manual on Wayland).
-- **Phase 3 — core flow** ✅ AppState, snapshot-before-copy clipboard contract, AI client
-  with timeouts, in-flight guard, manual-copy mode. Manual-mode window-hide bug fixed
-  (only hide before synthetic paste; keep visible to show result).
-- **Phase 4 — config** ✅ Settings/Profile, store load/save (Rust = source of truth),
-  defaults seed.
-- **Phase 5 — frontend** ✅ hash router, Menu (actions + translate submenu + result/manual
-  views), Settings (profiles CRUD, presets, Fetch models → dropdown w/ auto-select,
-  temperature, hotkey, force-synthetic, restore delay, Diagnostics).
-- **Phase 6 — hotkey** ✅ parse + register on Win/macOS/X11; `--trigger` + single-instance
-  forwarding; Wayland no-op (compositor bind per §10).
-- **Phase 7 — observability** ✅ tracing init + Diagnostics panel.
-- **Playground** ✅ (user request) — dedicated window: input textarea → run any action →
-  result textarea (uses `process_text`, no clipboard). 🧪 button in the menu header.
-- **Phase 8 — tests** partial ✅ 8 unit tests pass (hotkey parse, system prompts, settings
-  serde/defaults, session detect). Per-platform matrix (8.7) still pending on real targets.
-- **Fix:** Fetch models now shows a dropdown + auto-selects when the current model isn't
-  available (was showing the unreal seeded `gemma4:e4b`).
-- **Intensity levels** ✅ — global Subtle / Balanced / Strong control (menu + Playground)
-  applied to Professional / Casual / Concise / Expand via leveled system prompts; Proofread
-  & Translate ignore it. `level` threaded through all process commands; 2 new tests.
-
----
-*Last updated: 2026-06-04*
+*Last updated: 2026-06-05*

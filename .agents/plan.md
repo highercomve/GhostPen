@@ -19,6 +19,26 @@ draft. Notable changes from v1:
   with mitigations.
 - Added clipboard save/restore so the user's clipboard isn't destroyed.
 
+> **Implementation status (2026-06-05) — shipped, released v0.1.1.** This plan is now a
+> design reference; the app is built and working. Track live status in [`TODO.md`](./TODO.md).
+> Deviations from the sketches below, worth knowing when reading the rest of this doc:
+> - **Default hotkey is `Ctrl+Shift+A`**, not `Ctrl+Shift+Space` (same combo on every OS;
+>   on Wayland it's bound in the compositor, e.g. Hyprland `bind = CTRL SHIFT, A, exec, ghostpen --trigger`).
+> - **Wayland clipboard** is `wl-clipboard-rs` (read + a persistent serve thread), not arboard
+>   — arboard is X11-only and loses writes over XWayland. Reading our *own* served selection
+>   deadlocks the GTK main thread, so `WaylandClipboard` caches the served value while we own it.
+> - **Synthetic input fails silently on native Wayland/Hyprland** (enigo/libei) → app runs in
+>   **manual-copy mode** there. Native synthetic paste works on X11/Windows/macOS.
+> - **Two default profiles** ship: Ollama (`gemma4:e4b`, active) **and LM Studio**
+>   (`:1234`). Any OpenAI-compatible endpoint still works.
+> - **Beyond the original plan:** full keyboard-driven menu; Google-style UI (per-action icons
+>   + a freeform "prompt bar" → `process_ai_custom`); system light/dark theme; `--help`/
+>   `--version`; a "nib-ghost" app/tray icon (`assets/icon.svg`); `scripts/install-local.sh`;
+>   and a multi-platform **release workflow** (`.github/workflows/release.yml`) building
+>   macOS/Windows/Linux deb·rpm·appimage for x86_64 + arm64.
+> - Dev/primary target moved from the Crostini Chromebook to a real **Arch Linux / Hyprland**
+>   (Wayland, x86_64) machine, which is why §10's Hyprland assumptions now apply directly.
+
 ---
 
 ## 1. Architecture
