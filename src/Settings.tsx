@@ -211,7 +211,7 @@ export default function Settings() {
         <h2>Behaviour</h2>
         <label>
           Hotkey <span className="muted">(Windows/macOS/X11; on Wayland bind in your compositor)</span>
-          <input value={settings.hotkey} onChange={(e) => update({ hotkey: e.target.value })} placeholder="Ctrl+Shift+Space" />
+          <input value={settings.hotkey} onChange={(e) => update({ hotkey: e.target.value })} placeholder="Ctrl+Shift+A" />
         </label>
         <label className="checkbox">
           <input type="checkbox" checked={settings.forceSynthetic}

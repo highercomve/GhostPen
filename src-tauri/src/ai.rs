@@ -68,6 +68,16 @@ pub fn system_prompt(
     })
 }
 
+/// System prompt for a freeform, user-typed instruction (the menu's prompt bar). The
+/// instruction is applied to the selected text; only the transformed result is returned.
+pub fn custom_system_prompt(instruction: &str) -> String {
+    format!(
+        "You are a precise text editor. Apply the following instruction to the user's text: \
+         \"{}\". Return ONLY the resulting text — no explanations, notes, preamble, or wrapper quotes.",
+        instruction.trim().replace('"', "'")
+    )
+}
+
 /// Run a chat completion and return the trimmed assistant message.
 pub async fn run_completion(profile: &Profile, system: &str, user: &str) -> Result<String, String> {
     let base = profile.base_url.trim_end_matches('/');

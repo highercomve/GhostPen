@@ -10,7 +10,23 @@
   --danger: #ff6b6b;
   --ok: #62d39a;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color-scheme: dark;
+  color-scheme: light dark;
+}
+
+/* Light theme — follows the OS color scheme (ADR: overlay theme = system). */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --bg-soft: #f5f6f8;
+    --bg-elev: #eaecf0;
+    --border: #dcdfe6;
+    --text: #1b1e24;
+    --muted: #6b7280;
+    --accent: #3b6cff;
+    --accent-soft: #e7edff;
+    --danger: #d64545;
+    --ok: #1a9d5f;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -99,13 +115,20 @@ kbd {
 }
 .selection.empty { color: var(--muted); font-style: italic; }
 
-.actions { display: flex; flex-direction: column; gap: 6px; }
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
 
 .action {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
   background: var(--bg-soft);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -116,10 +139,56 @@ kbd {
   transition: background 0.12s, border-color 0.12s;
 }
 .action:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+.action.selected:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
 .action:disabled { opacity: 0.45; cursor: not-allowed; }
+.action-icon { flex: none; color: var(--muted); }
+.action:hover:not(:disabled) .action-icon,
+.action.selected:not(:disabled) .action-icon { color: var(--accent); }
+.action-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .action-label { font-weight: 600; }
 .action-hint { font-size: 11px; color: var(--muted); }
 .action.small { flex-direction: row; padding: 6px 12px; }
+
+/* Freeform instruction bar (Google-style) pinned at the bottom of the menu. */
+.prompt-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 4px 4px 4px 12px;
+}
+.prompt-bar:focus-within { border-color: var(--accent); }
+.prompt-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 0;
+}
+.prompt-input::placeholder { color: var(--muted); }
+.prompt-input:disabled { cursor: not-allowed; }
+.prompt-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: filter 0.12s, opacity 0.12s;
+}
+.prompt-send:hover:not(:disabled) { filter: brightness(1.1); }
+.prompt-send:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .lang-grid {
   display: grid;
@@ -136,6 +205,7 @@ kbd {
   cursor: pointer;
 }
 .lang:hover { background: var(--accent-soft); border-color: var(--accent); }
+.lang.selected { background: var(--accent-soft); border-color: var(--accent); }
 .lang.back { grid-column: 1 / -1; color: var(--muted); }
 
 .state {

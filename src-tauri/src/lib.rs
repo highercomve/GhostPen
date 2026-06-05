@@ -155,6 +155,48 @@ fn show_window(app: &AppHandle, label: &str) {
     }
 }
 
+/// Usage text for `--help`. Kept in one place so it stays in sync with the flags
+/// `handle_cli_args` actually understands.
+const HELP_TEXT: &str = "\
+GhostPen — AI text editing overlay
+
+Highlight text anywhere, trigger GhostPen, pick an action (proofread, rewrite,
+concise, translate), and the result is pasted back in place.
+
+USAGE:
+    ghostpen [FLAGS]
+
+FLAGS:
+    --trigger       Show the action menu for the current selection. If GhostPen is
+                    already running, this is forwarded to the running daemon (bind
+                    this to a hotkey, e.g. Ctrl+Shift+A, in your compositor).
+    --settings      Open the Settings window.
+    --playground    Open the Playground window.
+    -h, --help      Print this help and exit.
+    -V, --version   Print version and exit.
+
+With no flags, GhostPen starts as a background daemon (system tray + global hotkey
+on X11/Windows/macOS; on Wayland bind `ghostpen --trigger` in your compositor).
+
+CONFIG:
+    Settings live in the app's data dir (settings.json). The default AI backend is a
+    local Ollama at http://localhost:11434 running the `gemma4:e4b` model.
+";
+
+/// Handle help/version, which must work without a display and without disturbing a
+/// running daemon. Prints and exits the process when one of these flags is present;
+/// returns normally otherwise so startup can continue.
+fn handle_help_version(args: &[String]) {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{HELP_TEXT}");
+        std::process::exit(0);
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("ghostpen {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+}
+
 /// Handle CLI args (used at first launch and forwarded by single-instance):
 /// `--trigger` shows the menu, `--playground` / `--settings` open those windows.
 fn handle_cli_args(app: &AppHandle, args: &[String]) {
@@ -307,6 +349,22 @@ fn get_selection(app: AppHandle) -> Result<String, String> {
     pal.clipboard.read_text().map_err(|e| e.to_string())
 }
 
+/// Try to mark the app busy; Err if a request is already in flight. Paired with `release_busy`.
+fn try_acquire_busy(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut busy = state.busy.lock().unwrap();
+    if *busy {
+        return Err("Already processing a request…".into());
+    }
+    *busy = true;
+    Ok(())
+}
+
+fn release_busy(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    *state.busy.lock().unwrap() = false;
+}
+
 #[tauri::command]
 async fn process_ai_action(
     app: AppHandle,
@@ -314,35 +372,43 @@ async fn process_ai_action(
     target_lang: Option<String>,
     level: Option<String>,
 ) -> Result<ProcessResult, String> {
-    // in-flight guard
-    {
-        let state = app.state::<AppState>();
-        let mut busy = state.busy.lock().unwrap();
-        if *busy {
-            return Err("Already processing a request…".into());
-        }
-        *busy = true;
+    try_acquire_busy(&app)?;
+    let resolved = {
+        let settings = load_settings(&app);
+        resolve_action(&settings, &action, target_lang.as_deref(), level.as_deref())
+    };
+    let result = match resolved {
+        Ok((system, model_override)) => process_inner(&app, &system, model_override).await,
+        Err(e) => Err(e),
+    };
+    release_busy(&app);
+    result
+}
+
+/// Freeform instruction typed in the menu's prompt bar, applied to the current selection and
+/// pasted back exactly like a preset action (uses the active profile's model).
+#[tauri::command]
+async fn process_ai_custom(app: AppHandle, instruction: String) -> Result<ProcessResult, String> {
+    if instruction.trim().is_empty() {
+        return Err("No instruction provided".into());
     }
-    let result = process_inner(&app, &action, target_lang.as_deref(), level.as_deref()).await;
-    {
-        let state = app.state::<AppState>();
-        *state.busy.lock().unwrap() = false;
-    }
+    try_acquire_busy(&app)?;
+    let system = ai::custom_system_prompt(&instruction);
+    let result = process_inner(&app, &system, None).await;
+    release_busy(&app);
     result
 }
 
 async fn process_inner(
     app: &AppHandle,
-    action: &str,
-    target_lang: Option<&str>,
-    level: Option<&str>,
+    system: &str,
+    model_override: Option<String>,
 ) -> Result<ProcessResult, String> {
     let settings = load_settings(app);
     let mut profile = settings
         .active()
         .ok_or("No active AI profile configured")?
         .clone();
-    let (system, model_override) = resolve_action(&settings, action, target_lang, level)?;
     if let Some(m) = model_override {
         profile.model = m;
     }
@@ -357,7 +423,7 @@ async fn process_inner(
         return Err("No text selected".into());
     }
 
-    let output = ai::run_completion(&profile, &system, &selected).await?;
+    let output = ai::run_completion(&profile, system, &selected).await?;
 
     let synthetic = {
         let state = app.state::<AppState>();
@@ -537,6 +603,10 @@ fn apply_wayland_webkit_workaround() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Handle --help / --version before any GUI/daemon setup so they work headless and
+    // without forwarding into (or starting) the daemon.
+    handle_help_version(&std::env::args().collect::<Vec<_>>());
+
     #[cfg(target_os = "linux")]
     apply_wayland_webkit_workaround();
 
@@ -574,6 +644,7 @@ pub fn run() {
             get_status,
             get_selection,
             process_ai_action,
+            process_ai_custom,
             process_text,
             process_text_stream,
             show_menu,
@@ -592,6 +663,7 @@ mod tests {
 
     #[test]
     fn hotkey_parses_default() {
+        assert!(parse_hotkey("Ctrl+Shift+A").is_some());
         assert!(parse_hotkey("Ctrl+Shift+Space").is_some());
     }
 

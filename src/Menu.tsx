@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import LevelBar from "./LevelBar";
+import { Icon, IconName } from "./icons";
 import {
   Status,
   ProcessResult,
@@ -10,6 +11,7 @@ import {
   getSettings,
   getSelection,
   processAiAction,
+  processAiCustom,
   hideWindow,
   openSettings,
   openPlayground,
@@ -23,13 +25,27 @@ type View =
   | { kind: "result"; result: ProcessResult }
   | { kind: "error"; message: string };
 
-const ACTIONS = [
-  { id: "proofread", label: "Proofread", hint: "Fix spelling & grammar" },
-  { id: "professional", label: "Professional", hint: "Rewrite polished & clear" },
-  { id: "casual", label: "Casual", hint: "Friendly, conversational" },
-  { id: "concise", label: "Concise", hint: "Condense, keep meaning" },
-  { id: "expand", label: "Expand", hint: "Add detail & elaborate" },
+const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
+  { id: "proofread", label: "Proofread", hint: "Fix spelling & grammar", icon: "proofread" },
+  { id: "professional", label: "Professional", hint: "Rewrite polished & clear", icon: "professional" },
+  { id: "casual", label: "Casual", hint: "Friendly, conversational", icon: "casual" },
+  { id: "concise", label: "Concise", hint: "Condense, keep meaning", icon: "concise" },
+  { id: "expand", label: "Expand", hint: "Add detail & elaborate", icon: "expand" },
 ];
+
+const LEVELS: Level[] = ["subtle", "balanced", "strong"];
+
+// Cycle the intensity level by `dir` (+1 / -1), clamped (no wrap).
+function shiftLevel(level: Level, dir: number): Level {
+  const i = LEVELS.indexOf(level);
+  return LEVELS[Math.min(LEVELS.length - 1, Math.max(0, i + dir))];
+}
+
+// True when a keyboard event originates from a text field — so global menu shortcuts
+// (arrows, Enter, 1–9, j/k/h/l) don't fire while the user is typing in the prompt bar.
+function isTypingTarget(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+}
 
 export default function Menu() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -37,6 +53,11 @@ export default function Menu() {
   const [customActions, setCustomActions] = useState<CustomAction[]>([]);
   const [level, setLevel] = useState<Level>("balanced");
   const [view, setView] = useState<View>({ kind: "menu" });
+  // Keyboard cursor: index into `menuItems` (menu view) and into the language grid (translate view).
+  const [cursor, setCursor] = useState(0);
+  const [langCursor, setLangCursor] = useState(0);
+  // Freeform instruction typed in the prompt bar.
+  const [prompt, setPrompt] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -56,6 +77,76 @@ export default function Menu() {
     }
   }, []);
 
+  const run = useCallback(
+    async (action: string, targetLang: string | null, label: string) => {
+      setView({ kind: "loading", label });
+      try {
+        const result = await processAiAction(action, targetLang, level);
+        setView({ kind: "result", result });
+      } catch (e) {
+        setView({ kind: "error", message: String(e) });
+      }
+    },
+    [level],
+  );
+
+  const empty = selection.length === 0;
+
+  // Run the freeform instruction from the prompt bar over the current selection.
+  const runCustom = useCallback(async () => {
+    const instruction = prompt.trim();
+    if (!instruction || empty) return;
+    setView({ kind: "loading", label: instruction });
+    try {
+      const result = await processAiCustom(instruction);
+      setPrompt("");
+      setView({ kind: "result", result });
+    } catch (e) {
+      setView({ kind: "error", message: String(e) });
+    }
+  }, [prompt, empty]);
+
+  // Flat, ordered list of selectable menu items — the single source of truth for both
+  // rendering and keyboard navigation, so the cursor index always matches what's on screen.
+  const menuItems = useMemo(() => {
+    const items: { id: string; label: string; hint: string; icon: IconName; activate: () => void }[] =
+      ACTIONS.map((a) => ({
+        id: a.id,
+        label: a.label,
+        hint: a.hint,
+        icon: a.icon,
+        activate: () => run(a.id, null, a.label),
+      }));
+    items.push({
+      id: "__translate",
+      label: "Translate →",
+      hint: "Into another language",
+      icon: "translate",
+      activate: () => setView({ kind: "translate" }),
+    });
+    for (const a of customActions) {
+      items.push({
+        id: a.id,
+        label: a.label,
+        hint: "Custom action",
+        icon: "custom",
+        activate: () => run(a.id, null, a.label),
+      });
+    }
+    return items;
+  }, [customActions, run]);
+
+  // Language grid items + a trailing "Back" entry, so the keyboard can reach Back too.
+  const langItems = useMemo(() => {
+    const items: { label: string; back?: boolean; activate: () => void }[] =
+      TRANSLATE_LANGUAGES.map((lang) => ({
+        label: lang,
+        activate: () => run("translate", lang, `Translate → ${lang}`),
+      }));
+    items.push({ label: "← Back", back: true, activate: () => setView({ kind: "menu" }) });
+    return items;
+  }, [run]);
+
   useEffect(() => {
     refresh();
   }, [refresh]);
@@ -66,6 +157,7 @@ export default function Menu() {
   useEffect(() => {
     const unlisten = listen("ghostpen://show", () => {
       setView({ kind: "menu" });
+      setCursor(0);
       refresh();
     });
     return () => {
@@ -82,10 +174,26 @@ export default function Menu() {
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
 
-  // Escape closes the menu; if in a sub-view, go back to the menu first.
+  // Reset the language cursor each time we enter the translate view.
+  useEffect(() => {
+    if (view.kind === "translate") setLangCursor(0);
+  }, [view.kind]);
+
+  // Keep the cursor in range if the item count changes (e.g. custom actions load in).
+  useEffect(() => {
+    setCursor((c) => Math.min(c, Math.max(0, menuItems.length - 1)));
+  }, [menuItems.length]);
+
+  // ---- keyboard control --------------------------------------------------------------
+  // Escape closes the menu; from a sub-view it goes back to the menu first.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // First Esc while typing just leaves the prompt field; a second Esc then hides/closes.
+      if (isTypingTarget(e.target)) {
+        (e.target as HTMLElement).blur();
+        return;
+      }
       if (view.kind === "translate" || view.kind === "result" || view.kind === "error") {
         setView({ kind: "menu" });
       } else {
@@ -96,17 +204,97 @@ export default function Menu() {
     return () => window.removeEventListener("keydown", onKey);
   }, [view]);
 
-  const run = async (action: string, targetLang: string | null, label: string) => {
-    setView({ kind: "loading", label });
-    try {
-      const result = await processAiAction(action, targetLang, level);
-      setView({ kind: "result", result });
-    } catch (e) {
-      setView({ kind: "error", message: String(e) });
-    }
-  };
+  // Menu view: ↑/↓ (or j/k) move the cursor, ←/→ (or h/l) change intensity, Enter activates,
+  // and 1–9 jump to and run an action directly.
+  useEffect(() => {
+    if (view.kind !== "menu") return;
+    const n = menuItems.length;
+    if (n === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target)) return; // don't hijack keys while typing in the prompt bar
+      switch (e.key) {
+        case "ArrowDown":
+        case "j":
+          e.preventDefault();
+          setCursor((c) => (c + 1) % n);
+          break;
+        case "ArrowUp":
+        case "k":
+          e.preventDefault();
+          setCursor((c) => (c - 1 + n) % n);
+          break;
+        case "ArrowLeft":
+        case "h":
+          e.preventDefault();
+          setLevel((lv) => shiftLevel(lv, -1));
+          break;
+        case "ArrowRight":
+        case "l":
+          e.preventDefault();
+          setLevel((lv) => shiftLevel(lv, 1));
+          break;
+        case "Enter":
+          e.preventDefault();
+          if (!empty) menuItems[cursor]?.activate();
+          break;
+        default:
+          if (/^[1-9]$/.test(e.key)) {
+            const idx = Number(e.key) - 1;
+            if (idx < n) {
+              e.preventDefault();
+              setCursor(idx);
+              if (!empty) menuItems[idx]?.activate();
+            }
+          }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view.kind, menuItems, cursor, empty]);
 
-  const empty = selection.length === 0;
+  // Translate view: arrows move across the 2-column grid, Enter picks the language.
+  useEffect(() => {
+    if (view.kind !== "translate") return;
+    const n = langItems.length;
+    const COLS = 2;
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target)) return;
+      switch (e.key) {
+        case "ArrowRight":
+        case "l":
+          e.preventDefault();
+          setLangCursor((c) => Math.min(n - 1, c + 1));
+          break;
+        case "ArrowLeft":
+        case "h":
+          e.preventDefault();
+          setLangCursor((c) => Math.max(0, c - 1));
+          break;
+        case "ArrowDown":
+        case "j":
+          e.preventDefault();
+          setLangCursor((c) => Math.min(n - 1, c + COLS));
+          break;
+        case "ArrowUp":
+        case "k":
+          e.preventDefault();
+          setLangCursor((c) => Math.max(0, c - COLS));
+          break;
+        case "Enter":
+          e.preventDefault();
+          langItems[langCursor]?.activate();
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view.kind, langItems, langCursor]);
+
+  // Scroll the active item into view as the cursor moves through a long list.
+  const cursorRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    cursorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [cursor, langCursor, view.kind]);
 
   return (
     <div className="menu">
@@ -144,50 +332,62 @@ export default function Menu() {
           </div>
           <LevelBar level={level} setLevel={setLevel} />
           <div className="actions">
-            {ACTIONS.map((a) => (
+            {menuItems.map((a, i) => (
               <button
                 key={a.id}
-                className="action"
+                ref={i === cursor ? cursorRef : undefined}
+                className={`action ${i === cursor ? "selected" : ""}`}
                 disabled={empty}
-                onClick={() => run(a.id, null, a.label)}
+                onClick={() => a.activate()}
+                onMouseEnter={() => setCursor(i)}
               >
-                <span className="action-label">{a.label}</span>
-                <span className="action-hint">{a.hint}</span>
-              </button>
-            ))}
-            <button
-              className="action"
-              disabled={empty}
-              onClick={() => setView({ kind: "translate" })}
-            >
-              <span className="action-label">Translate →</span>
-              <span className="action-hint">Into another language</span>
-            </button>
-            {customActions.map((a) => (
-              <button
-                key={a.id}
-                className="action"
-                disabled={empty}
-                onClick={() => run(a.id, null, a.label)}
-              >
-                <span className="action-label">{a.label}</span>
-                <span className="action-hint">Custom action</span>
+                <Icon name={a.icon} className="action-icon" />
+                <span className="action-text">
+                  <span className="action-label">{a.label}</span>
+                  <span className="action-hint">{a.hint}</span>
+                </span>
               </button>
             ))}
           </div>
+          <form
+            className="prompt-bar"
+            onSubmit={(e) => {
+              e.preventDefault();
+              runCustom();
+            }}
+          >
+            <input
+              className="prompt-input"
+              value={prompt}
+              disabled={empty}
+              placeholder={empty ? "Select text first…" : "Tell GhostPen what to do…"}
+              onChange={(e) => setPrompt(e.target.value)}
+            />
+            <button
+              type="submit"
+              className="prompt-send"
+              disabled={empty || prompt.trim().length === 0}
+              title="Run instruction (Enter)"
+            >
+              <Icon name="send" />
+            </button>
+          </form>
         </>
       )}
 
       {view.kind === "translate" && (
         <div className="lang-grid">
-          {TRANSLATE_LANGUAGES.map((lang) => (
-            <button key={lang} className="lang" onClick={() => run("translate", lang, `Translate → ${lang}`)}>
-              {lang}
+          {langItems.map((lang, i) => (
+            <button
+              key={lang.label}
+              ref={i === langCursor ? cursorRef : undefined}
+              className={`lang ${lang.back ? "back" : ""} ${i === langCursor ? "selected" : ""}`}
+              onClick={() => lang.activate()}
+              onMouseEnter={() => setLangCursor(i)}
+            >
+              {lang.label}
             </button>
           ))}
-          <button className="lang back" onClick={() => setView({ kind: "menu" })}>
-            ← Back
-          </button>
         </div>
       )}
 

@@ -51,7 +51,7 @@ pub struct Settings {
 }
 
 fn default_hotkey() -> String {
-    "Ctrl+Shift+Space".into()
+    "Ctrl+Shift+A".into()
 }
 
 fn default_restore_delay() -> u64 {
@@ -68,14 +68,26 @@ impl Settings {
         Settings {
             hotkey: default_hotkey(),
             active_profile_id: "ollama-local".into(),
-            profiles: vec![Profile {
-                id: "ollama-local".into(),
-                name: "Ollama (local)".into(),
-                base_url: "http://localhost:11434/v1".into(),
-                api_key: String::new(),
-                model: "gemma4:e4b".into(),
-                temperature: 0.2,
-            }],
+            profiles: vec![
+                Profile {
+                    id: "ollama-local".into(),
+                    name: "Ollama (local)".into(),
+                    base_url: "http://localhost:11434/v1".into(),
+                    api_key: String::new(),
+                    model: "gemma4:e4b".into(),
+                    temperature: 0.2,
+                },
+                Profile {
+                    // LM Studio's OpenAI-compatible server (default port 1234). Model id is left
+                    // blank — LM Studio model ids depend on what's loaded; pick via "Fetch models".
+                    id: "lmstudio-local".into(),
+                    name: "LM Studio".into(),
+                    base_url: "http://localhost:1234/v1".into(),
+                    api_key: String::new(),
+                    model: String::new(),
+                    temperature: 0.2,
+                },
+            ],
             force_synthetic: false,
             restore_delay_ms: default_restore_delay(),
             custom_actions: Vec::new(),

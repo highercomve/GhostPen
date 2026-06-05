@@ -56,6 +56,9 @@ export type Level = "subtle" | "balanced" | "strong";
 
 export const processAiAction = (action: string, targetLang: string | null, level: Level) =>
   invoke<ProcessResult>("process_ai_action", { action, targetLang, level });
+/** Freeform instruction (menu prompt bar) applied to the selection, pasted back like an action. */
+export const processAiCustom = (instruction: string) =>
+  invoke<ProcessResult>("process_ai_custom", { instruction });
 /** Playground: transform text directly, no clipboard involved. */
 export const processText = (action: string, targetLang: string | null, level: Level, text: string) =>
   invoke<string>("process_text", { action, targetLang, level, text });
