@@ -160,8 +160,14 @@ if (compiles && !alreadyRequested) {
   }
 }
 
-const bin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "tauri.cmd" : "tauri");
-const child = spawn(bin, final, { stdio: "inherit", env: { ...process.env, ...extraEnv } });
+const isWin = process.platform === "win32";
+const bin = path.join(root, "node_modules", ".bin", isWin ? "tauri.cmd" : "tauri");
+// Node >=18.20 / 20.12 throws `spawn EINVAL` when launching a Windows `.cmd` shim without a
+// shell (the CVE-2024-27980 hardening). Run the `.cmd` through cmd.exe on Windows; the bin path
+// is quoted for spaces, and our args are controlled (target triples / feature names, no spaces).
+const child = isWin
+  ? spawn(`"${bin}"`, final, { stdio: "inherit", env: { ...process.env, ...extraEnv }, shell: true })
+  : spawn(bin, final, { stdio: "inherit", env: { ...process.env, ...extraEnv } });
 child.on("exit", (code, signal) => {
   if (signal) process.kill(process.pid, signal);
   else process.exit(code ?? 0);
