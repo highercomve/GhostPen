@@ -178,8 +178,10 @@ Cargo feature** (default off) so the default build + release CI are untouched.
       artifacts on every PR (all 6 targets), installing the extra deps (ALSA, CMake, libclang/LLVM)
       and passing `--features captions`. whisper-rs pinned to **0.16** (newer whisper.cpp).
       Build-portability fixes: `GGML_NATIVE=OFF` (portable binaries + sidesteps the macOS/arm64
-      i8mm intrinsic error), `MACOSX_DEPLOYMENT_TARGET=11.0` (x86_64 `std::filesystem`), and
-      `clang-cl` for the Windows/arm64 ggml CPU backend (MSVC unsupported on ARM).
+      i8mm intrinsic error) and `MACOSX_DEPLOYMENT_TARGET=11.0` (x86_64 `std::filesystem`).
+      5/6 targets build + upload artifacts. **windows-arm64 is `continue-on-error`** (best-effort):
+      whisper.cpp/ggml refuses its CPU backend under MSVC on ARM and clang-cl is still seen as
+      MSVC by CMake — a real GNU-clang arm64-windows toolchain is deferred (11.10).
 - [ ] **11.10** Follow-ups: overlap/VAD chunking; macOS ScreenCaptureKit to avoid BlackHole;
       fold `--features captions` into the tagged `release.yml` once the PR lane is proven green.
 
