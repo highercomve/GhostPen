@@ -174,8 +174,14 @@ Cargo feature** (default off) so the default build + release CI are untouched.
 - [x] **11.8** Verified: `cargo check` (default) ✅, `cargo check --features captions` ✅,
       `cargo test --features captions` ✅, `npm run build` (tsc) ✅. Runtime capture/transcription
       not exercisable in CI/container (no audio device or display).
-- [ ] **11.9** Follow-ups: dedicated release CI lane building `--features captions`
-      (+ `libasound2-dev`); overlap/VAD chunking; macOS ScreenCaptureKit to avoid BlackHole.
+- [x] **11.9** PR build CI: `.github/workflows/pr-build.yml` builds installable, captions-enabled
+      artifacts on every PR (all 6 targets), installing the extra deps (ALSA, CMake, libclang/LLVM)
+      and passing `--features captions`. whisper-rs pinned to **0.16** (newer whisper.cpp).
+      Build-portability fixes: `GGML_NATIVE=OFF` (portable binaries + sidesteps the macOS/arm64
+      i8mm intrinsic error), `MACOSX_DEPLOYMENT_TARGET=11.0` (x86_64 `std::filesystem`), and
+      `clang-cl` for the Windows/arm64 ggml CPU backend (MSVC unsupported on ARM).
+- [ ] **11.10** Follow-ups: overlap/VAD chunking; macOS ScreenCaptureKit to avoid BlackHole;
+      fold `--features captions` into the tagged `release.yml` once the PR lane is proven green.
 
 ### Remaining / next
 - [ ] **8.7** per-platform test matrix (Windows, macOS, Linux/X11).

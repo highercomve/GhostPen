@@ -41,7 +41,7 @@ dirs = "5"
 # + libclang for bindgen). Build with: `cargo build --features captions` /
 # `npm run tauri build -- --features captions`.
 cpal = { version = "0.15", optional = true }
-whisper-rs = { version = "0.14", optional = true }
+whisper-rs = { version = "0.16", optional = true }
 
 [features]
 default = []

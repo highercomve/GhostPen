@@ -125,11 +125,32 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # whisper.cpp's ggml CPU backend can't be built by MSVC on ARM ("MSVC is not supported
+      # for ARM, use clang"), so point CMake at clang-cl for the Windows arm64 cross-build only.
+      # Scoped to this one target so the passing windows-x86_64 (MSVC) build is untouched.
+      - name: Use clang-cl for whisper.cpp on Windows ARM64
+        if: matrix.label == 'windows-arm64'
+        shell: pwsh
+        run: |
+          echo "CMAKE_C_COMPILER=clang-cl" >> $env:GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER=clang-cl" >> $env:GITHUB_ENV
+
       - name: Build captions bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NO_STRIP: "true"
+          # whisper-rs-sys forwards GGML_*/CMAKE_* env vars as CMake -D defines.
+          # GGML_NATIVE=OFF builds portable (non -march=native) binaries — correct for
+          # distributable artifacts, and it sidesteps the macOS/arm64 ggml i8mm-intrinsic
+          # build error (the CPU kernel used i8mm without enabling that target feature).
+          GGML_NATIVE: "OFF"
+          # whisper.cpp's ggml-backend-reg.cpp uses std::filesystem, which needs a macOS 10.15+
+          # deployment target (the x86_64 cross-build otherwise fails with "operator!= is
+          # unavailable"). cmake-rs maps MACOSX_DEPLOYMENT_TARGET → CMAKE_OSX_DEPLOYMENT_TARGET,
+          # and whisper-rs-sys also forwards CMAKE_* defines. Harmless off macOS.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
         with:
           # No releaseId / tagName → tauri-action just builds (no release is created).
           args: ${{ matrix.args }}

@@ -65,13 +65,15 @@ impl Transcriber {
             .full(params, samples)
             .map_err(|e| format!("Transcription failed: {e}"))?;
 
-        let n = state
-            .full_n_segments()
-            .map_err(|e| format!("Transcription read error: {e}"))?;
+        // whisper-rs 0.16: `full_n_segments` returns the count directly, and segment text is
+        // read via `get_segment(i).to_str()`.
+        let n = state.full_n_segments();
         let mut text = String::new();
         for i in 0..n {
-            if let Ok(seg) = state.full_get_segment_text(i) {
-                text.push_str(&seg);
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(seg) = segment.to_str() {
+                    text.push_str(seg);
+                }
             }
         }
         Ok(text.trim().to_string())
