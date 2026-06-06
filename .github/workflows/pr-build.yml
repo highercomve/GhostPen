@@ -1,0 +1,147 @@
+name: PR build (captions)
+
+# Build installable GhostPen artifacts for every target on each pull request, with the
+# `captions` feature ON, so reviewers can download and test the system-audio captions binary.
+#
+# This mirrors release.yml's 6-target matrix but:
+#   - triggers on pull_request (not a tag),
+#   - enables `--features captions` (ADR-008),
+#   - installs the extra build deps that feature needs (ALSA, CMake, libclang/LLVM for the
+#     whisper.cpp bindgen + build),
+#   - uploads the bundles as workflow artifacts instead of creating a GitHub Release.
+#
+# Coverage (all x86_64 + arm64):
+#   - macOS    .app / .dmg      (aarch64 + x86_64, both on the Apple-Silicon runner)
+#   - Windows  .msi / NSIS .exe (x86_64 native + aarch64 cross-compile)
+#   - Linux    .deb .rpm .AppImage  (x86_64 + aarch64, each on a native runner)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+# One build run per PR ref; cancel superseded runs.
+concurrency:
+  group: pr-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    # Skip draft PRs to save CI minutes (still runnable via workflow_dispatch / "Ready for review").
+    if: github.event.pull_request.draft == false || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- macOS (built on Apple Silicon; x86_64 via cross-compile) ----
+          - label: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin --features captions"
+          - label: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin --features captions"
+
+          # ---- Linux (native runners → deb + rpm + appimage) ----
+          - label: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: "--features captions"
+          - label: linux-arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            args: "--features captions"
+
+          # ---- Windows (x86_64 native; aarch64 cross-compile) ----
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: "--target x86_64-pc-windows-msvc --features captions"
+          - label: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            args: "--target aarch64-pc-windows-msvc --features captions"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux system dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            libfuse2 \
+            xdg-utils \
+            build-essential curl wget file \
+            cmake \
+            libasound2-dev \
+            clang libclang-dev
+
+      # whisper.cpp is built via CMake on every platform; macOS runners ship clang+cmake but
+      # ensure cmake is present.
+      - name: Install macOS build dependencies
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      # whisper-rs's bindgen needs libclang; the cmake crate needs CMake. Provide both on Windows.
+      - name: Install Windows build dependencies (LLVM for whisper-rs bindgen)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress -y
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: pr-captions-${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build captions bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NO_STRIP: "true"
+        with:
+          # No releaseId / tagName → tauri-action just builds (no release is created).
+          args: ${{ matrix.args }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostpen-${{ matrix.label }}-captions
+          # Native builds (no --target) bundle to target/release/bundle; cross/targeted builds
+          # bundle to target/<triple>/release/bundle. Cover both.
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+          if-no-files-found: warn
+          retention-days: 14
