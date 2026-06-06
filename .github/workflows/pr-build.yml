@@ -1,0 +1,246 @@
+name: PR build (captions)
+
+# Build installable GhostPen artifacts on each pull request with the captions feature ON
+# (ADR-008), across multiple whisper compute backends so reviewers can download and test the
+# binary that matches their hardware.
+#
+# Backends (one artifact each — a GPU binary is NOT universal; see ADR-008):
+#   - cpu     (`--features captions`)        : universal, no GPU needed. Linux + Windows.
+#   - vulkan  (`--features captions-vulkan`) : GPU on ANY vendor (NVIDIA/AMD/Intel); links the
+#                                              Vulkan loader and falls back to CPU if no GPU.
+#                                              Linux + Windows. Needs glslc/shaderc + Vulkan SDK
+#                                              at BUILD time, and the Vulkan loader at RUN time.
+#   - metal   (`--features captions-metal`)  : macOS GPU (built into the OS; CPU fallback). macOS.
+#
+# Coverage (all x86_64 + arm64):
+#   - macOS    .app / .dmg            (aarch64 + x86_64)              → metal
+#   - Windows  .msi / NSIS .exe       (x86_64 native + aarch64 cross) → cpu + vulkan
+#   - Linux    .deb .rpm .AppImage    (x86_64 + aarch64)             → cpu + vulkan
+#
+# Uploads bundles as workflow artifacts (no GitHub Release). To publish GPU release binaries,
+# mirror this matrix into release.yml once the GPU lanes are proven green (TODO 11.10).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+# One build run per PR ref; cancel superseded runs.
+concurrency:
+  group: pr-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    # Skip draft PRs to save CI minutes (still runnable via workflow_dispatch / "Ready for review").
+    if: github.event.pull_request.draft == false || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    # Best-effort lanes (allowed to fail without failing the workflow):
+    #   - windows-arm64: whisper.cpp/ggml refuses its CPU backend under MSVC on ARM ("use clang"),
+    #     and CMake classifies clang-cl as MSVC so the guard fires regardless — a real GNU-clang
+    #     arm64-windows toolchain is deferred.
+    #   - vulkan lanes: the build-time Vulkan SDK / glslc availability varies per runner+arch
+    #     (arm64 Linux has no LunarG apt repo and no distro glslc, so that lane builds glslc from
+    #     shaderc source), so GPU lanes stay best-effort until proven, keeping cpu/metal always green.
+    continue-on-error: ${{ matrix.backend == 'vulkan' || contains(matrix.label, 'windows-arm64') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- macOS → metal (Apple GPU, built into the OS) ----
+          - label: macos-arm64-metal
+            os: macos-latest
+            target: aarch64-apple-darwin
+            backend: metal
+            args: "--target aarch64-apple-darwin --features captions-metal"
+          - label: macos-x86_64-metal
+            os: macos-latest
+            target: x86_64-apple-darwin
+            backend: metal
+            args: "--target x86_64-apple-darwin --features captions-metal"
+
+          # ---- Linux → cpu + vulkan (native runners → deb + rpm + appimage) ----
+          - label: linux-x86_64-cpu
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            backend: cpu
+            args: "--features captions"
+          - label: linux-x86_64-vulkan
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            backend: vulkan
+            args: "--features captions-vulkan"
+          - label: linux-arm64-cpu
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            backend: cpu
+            args: "--features captions"
+          - label: linux-arm64-vulkan
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            backend: vulkan
+            args: "--features captions-vulkan"
+
+          # ---- Windows → cpu + vulkan (x86_64 native; aarch64 cross-compile) ----
+          - label: windows-x86_64-cpu
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            backend: cpu
+            args: "--target x86_64-pc-windows-msvc --features captions"
+          - label: windows-x86_64-vulkan
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            backend: vulkan
+            args: "--target x86_64-pc-windows-msvc --features captions-vulkan"
+          - label: windows-arm64-cpu
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            backend: cpu
+            args: "--target aarch64-pc-windows-msvc --features captions"
+          - label: windows-arm64-vulkan
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            backend: vulkan
+            args: "--target aarch64-pc-windows-msvc --features captions-vulkan"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux system dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            libfuse2 \
+            xdg-utils \
+            build-essential curl wget file \
+            cmake \
+            libasound2-dev \
+            clang libclang-dev
+
+      # ggml's Vulkan backend needs glslc/shaderc + the Vulkan headers/loader at build time.
+      - name: Install Vulkan SDK (Linux, vulkan backend)
+        if: matrix.backend == 'vulkan' && startsWith(matrix.os, 'ubuntu')
+        run: |
+          set -e
+          if [ "$(uname -m)" = "x86_64" ]; then
+            # LunarG ships glslc + headers + loader for x86_64 via apt.
+            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+            sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list \
+              https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+            sudo apt-get update
+            sudo apt-get install -y vulkan-sdk
+          else
+            # arm64: no LunarG apt repo, and the Ubuntu repos don't ship glslc
+            # (glslang-tools only provides glslangValidator, which ggml's Vulkan
+            # backend rejects). Install the loader/headers from the distro and
+            # build glslc — the one build-time tool ggml needs — from shaderc
+            # source. glslc is a host tool here (the runner is native arm64).
+            sudo apt-get update
+            sudo apt-get install -y libvulkan-dev glslang-tools spirv-tools \
+              cmake ninja-build python3 git
+            git clone --depth 1 https://github.com/google/shaderc.git "$RUNNER_TEMP/shaderc"
+            (
+              cd "$RUNNER_TEMP/shaderc"
+              ./utils/git-sync-deps
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DSHADERC_SKIP_TESTS=ON \
+                -DSHADERC_SKIP_EXAMPLES=ON \
+                -DSHADERC_SKIP_COPYRIGHT_CHECK=ON
+              cmake --build build --target glslc_exe
+              sudo install -m755 build/glslc/glslc /usr/local/bin/glslc
+            )
+          fi
+          glslc --version || echo "::warning::glslc not found — ggml Vulkan shader-gen will fail"
+
+      # whisper.cpp is built via CMake on every platform; macOS runners ship clang+cmake +
+      # the Metal toolchain (xcrun metal) needed by the metal backend.
+      - name: Install macOS build dependencies
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      # whisper-rs's bindgen needs libclang; the cmake crate needs CMake. Provide both on Windows.
+      - name: Install Windows build dependencies (LLVM for whisper-rs bindgen)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress -y
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      # Vulkan SDK (glslc + headers + loader) for the Windows vulkan backend. The build-time
+      # shader compiler runs on the x86_64 host even for the arm64 cross-build.
+      - name: Install Vulkan SDK (Windows, vulkan backend)
+        if: matrix.backend == 'vulkan' && startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --no-progress -y
+          $sdk = (Get-ChildItem 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          echo "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          echo "$sdk\Bin" >> $env:GITHUB_PATH
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          # Backend in the key so cpu/vulkan/metal builds of a target don't clobber each other.
+          key: pr-${{ matrix.target }}-${{ matrix.backend }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build captions bundles (${{ matrix.backend }})
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NO_STRIP: "true"
+          # whisper-rs-sys forwards GGML_*/CMAKE_* env vars as CMake -D defines.
+          # GGML_NATIVE=OFF builds portable (non -march=native) binaries — correct for
+          # distributable artifacts, and it sidesteps the macOS/arm64 ggml i8mm-intrinsic
+          # build error (the CPU kernel used i8mm without enabling that target feature).
+          GGML_NATIVE: "OFF"
+          # whisper.cpp's ggml-backend-reg.cpp uses std::filesystem, which needs a macOS 10.15+
+          # deployment target (the x86_64 cross-build otherwise fails with "operator!= is
+          # unavailable"). cmake-rs maps MACOSX_DEPLOYMENT_TARGET → CMAKE_OSX_DEPLOYMENT_TARGET,
+          # and whisper-rs-sys also forwards CMAKE_* defines. Harmless off macOS.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
+        with:
+          # No releaseId / tagName → tauri-action just builds (no release is created).
+          args: ${{ matrix.args }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostpen-${{ matrix.label }}
+          # Native builds (no --target) bundle to target/release/bundle; cross/targeted builds
+          # bundle to target/<triple>/release/bundle. Cover both.
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+          if-no-files-found: warn
+          retention-days: 14

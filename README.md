@@ -55,7 +55,9 @@ into *"I have completed the item you requested. Please let me know if you requir
   restored afterward.
 - **Cross-platform input:** native global hotkey + synthetic copy/paste on Windows/macOS/X11;
   a **manual-copy mode** fallback where synthetic input isn't available (e.g. Wayland).
-- **System tray** (where supported): Show menu · Playground · Settings · Quit.
+- **System tray** (where supported): Show menu · Captions · Playground · Settings · Quit.
+- **Live captions (opt-in):** caption & translate **system audio** on-device with Whisper in a
+  click-through overlay — with optional **GPU acceleration** (CUDA / Vulkan / Metal). See below.
 
 ---
 
@@ -140,7 +142,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ### Triggering the menu
 
 - **Windows / macOS / Linux (X11):** select text in any app and press the global hotkey
-  (default **`Ctrl + Shift + Space`**, configurable in Settings). On **macOS**, grant
+  (default **`Ctrl + Shift + A`**, configurable in Settings). On **macOS**, grant
   **Accessibility** permission first (System Settings → Privacy & Security → Accessibility),
   or input simulation silently fails.
 - **Linux (Wayland / Hyprland):** in-process global hotkeys aren't allowed; bind a key in
@@ -176,6 +178,117 @@ transforms), or **Clear**.
 **Settings → Custom Actions → + Add.** Give it a label and a system prompt (e.g. *"Convert
 the text into concise bullet points. Return ONLY the bullets."*), optionally a model
 override. It appears alongside the built-in actions in the menu and Playground.
+
+### Live captions (system audio) — opt-in build
+
+GhostPen can caption and translate **system audio** (meetings, videos, podcasts) live: it
+captures what you hear, transcribes it **on-device** with Whisper, and shows subtitles in a
+transparent, click-through overlay — optionally translating via your active AI profile.
+
+This pulls in heavier native dependencies (audio capture via cpal + a bundled whisper.cpp), so
+it's behind the optional **`captions`** Cargo feature and **off by default**. Build deps:
+
+| OS | Captions build dependencies |
+|----|-----------------------------|
+| **Linux** | ALSA dev headers + a C/C++ toolchain + libclang — `sudo apt-get install libasound2-dev clang libclang-dev cmake` (Debian/Ubuntu) / `sudo pacman -S alsa-lib clang cmake` (Arch) |
+| **macOS** | Xcode command-line tools + CMake (`brew install cmake`) |
+| **Windows** | LLVM/libclang + CMake (e.g. `choco install llvm cmake`) |
+
+#### Easiest: the auto-detecting dev wrapper
+
+`npm run tauri dev` / `npm run bundle*` go through [`scripts/tauri.mjs`](./scripts/tauri.mjs),
+which **auto-enables captions when the build deps are present** — so on a properly set-up
+machine you don't pass any flag at all:
+
+```bash
+npm run tauri dev          # prints e.g. "[tauri] captions: captions-cuda — CUDA auto-detected (…)"
+```
+
+It also **auto-selects the fastest whisper backend it can build** (see GPU section below), and
+builds CPU-only (or no captions) where the deps/GPU aren't available — so the same command
+works on every machine. Override with environment variables:
+
+| Variable | Values | Effect |
+|----------|--------|--------|
+| `GHOSTPEN_CAPTIONS` | `1` / `0` | Force the captions feature on / off (skip dep auto-detect) |
+| `GHOSTPEN_CAPTIONS_GPU` | `cuda` / `vulkan` / `cpu` / `auto` | Pin the whisper backend (default `auto`) |
+
+#### Manual / explicit feature flags
+
+```bash
+npm run tauri build -- --features captions          # CPU backend (universal)
+npm run tauri build -- --features captions-vulkan   # GPU, any vendor (NVIDIA/AMD/Intel)
+npm run tauri build -- --features captions-cuda     # GPU, NVIDIA only (fastest)
+npm run tauri build -- --features captions-metal    # GPU, macOS (Apple Silicon / Metal)
+# or with cargo directly: cargo run --features captions-vulkan
+```
+
+### GPU-accelerated transcription
+
+whisper.cpp runs on the **CPU** by default. On a GPU it's dramatically faster — fast enough to
+run a larger, more accurate model (`small`/`medium`) in real time instead of being stuck on
+`tiny`. GhostPen exposes three GPU backends as Cargo features, each implying `captions`:
+
+| Backend | Feature | Runs on | Build needs | Notes |
+|---------|---------|---------|-------------|-------|
+| **CUDA** | `captions-cuda` | NVIDIA only | CUDA toolkit (`nvcc`) + NVIDIA driver | Fastest; binary requires an NVIDIA GPU at runtime |
+| **Vulkan** | `captions-vulkan` | NVIDIA / AMD / Intel | `glslc`/shaderc + Vulkan loader & headers | One binary for any GPU vendor; CPU fallback if no GPU |
+| **Metal** | `captions-metal` | macOS GPU | Xcode (built in) | Apple Silicon / Intel-Mac GPU; CPU fallback |
+| CPU | `captions` | everything | — | Universal fallback, no GPU needed |
+
+A GPU build is **not universal** — it links a vendor runtime and needs that hardware/driver to
+run (a CUDA binary won't start without an NVIDIA GPU). Pick the feature matching the machine
+you'll *run* on, or just use the auto-detecting wrapper above.
+
+#### Building locally with CUDA (NVIDIA)
+
+If you have an NVIDIA GPU and want maximum speed (this is the maintainer's dev setup — RTX 4070):
+
+1. Install the **NVIDIA driver** and the **CUDA toolkit** (provides `nvcc`):
+   - Arch: `sudo pacman -S cuda` (installs to `/opt/cuda`)
+   - Debian/Ubuntu: `sudo apt-get install nvidia-cuda-toolkit` (or NVIDIA's official repo)
+2. Build — the wrapper auto-detects CUDA and sets the toolkit env for you:
+   ```bash
+   npm run tauri dev            # auto-picks captions-cuda when nvcc + an NVIDIA GPU are found
+   ```
+   …or do it manually if `nvcc` isn't on your `PATH` (e.g. Arch's `/opt/cuda/bin`):
+   ```bash
+   CUDA_PATH=/opt/cuda CUDACXX=/opt/cuda/bin/nvcc \
+   CMAKE_CUDA_ARCHITECTURES=native PATH="/opt/cuda/bin:$PATH" \
+     cargo run --manifest-path src-tauri/Cargo.toml --features captions-cuda
+   ```
+   `CMAKE_CUDA_ARCHITECTURES=native` builds kernels for *your* GPU; use an explicit list
+   (e.g. `89` for Ada / RTX 40-series, or `75;80;86;89;90`) when building on a machine without
+   the target GPU. The first build compiles whisper.cpp's CUDA kernels and takes a few minutes.
+3. Confirm it's using the GPU — the whisper logs print `whisper_backend_init_gpu: using CUDA0
+   backend`, and `ldd` on the binary shows `libcudart`/`libcublas`.
+
+Pre-built **CPU + Vulkan** (Linux/Windows) and **Metal** (macOS) captions binaries are produced
+for every pull request by [`.github/workflows/pr-build.yml`](./.github/workflows/pr-build.yml) —
+download the artifact matching your OS/GPU.
+
+### Using captions
+
+**Tray → Captions** (or **Settings → Live Captions → Open captions overlay**) → pick a Whisper
+model and **Download model** → **Start**. The overlay shows captions on an opaque bar with the
+controls docked beneath it. Toggle **🌐 Translate** to translate live, **👻 Ghost** to make the
+overlay click-through (bring the controls back from the tray **Captions** item).
+
+- **Whisper model:** the selector shows speed/accuracy/size for each model — on a GPU, `small`
+  is the live-caption sweet spot, `medium` for max accuracy.
+- **Source language** can be auto-detected or pinned. **Translate to English** uses Whisper's
+  free built-in translation; for other targets enable **Translate via AI profile** and choose a
+  target language (routed through your active OpenAI-compatible endpoint).
+- **Chunk length** (1–15 s) trades latency for accuracy: shorter = snappier but clips words.
+- **Capture device (which audio to transcribe):**
+  - **Linux (PipeWire/Pulse):** defaults to **Auto** — the monitor of your current output sink,
+    i.e. whatever you're hearing. Settings → Captions → **Capture device** lists all sources
+    (pick a `.monitor` for system audio, or a mic to caption your voice). Requires `pactl`.
+  - **Windows:** WASAPI loopback on the default output device, automatically.
+  - **macOS** blocks direct system-audio capture — install a virtual loopback device (e.g.
+    [BlackHole](https://existential.audio/blackhole/)) and select it as the capture device.
+- On-device transcription means **audio never leaves your machine**; only the optional AI
+  translation step contacts your configured endpoint.
 
 ---
 
@@ -213,12 +326,14 @@ are stored as JSON in the app config directory (`settings.json`) via `tauri-plug
 ## Project layout
 
 ```
-src/             React + TypeScript frontend (Menu, Settings, Playground, LevelBar)
+src/             React + TypeScript frontend (Menu, Settings, Playground, LevelBar, Captions)
 src-tauri/src/   Rust backend
-  ├── lib.rs       app wiring, commands, hotkey, tray, trigger flow
+  ├── lib.rs       app wiring, commands, hotkey, tray, trigger flow, window lifecycle
   ├── pal/         Platform Abstraction Layer (clipboard, input, session detection)
-  ├── config.rs    settings / profiles / custom actions
-  └── ai.rs        OpenAI-compatible client (+ streaming, model discovery)
-scripts/         install-deps.sh (cross-platform system deps)
+  ├── config.rs    settings / profiles / custom actions / captions config
+  ├── ai.rs        OpenAI-compatible client (+ streaming, model discovery)
+  └── captions/    live captions (ADR-008): audio loopback, whisper transcription, model mgmt
+scripts/         install-deps.sh (system deps) · tauri.mjs (auto-detects captions + GPU backend)
+.github/         CI: release.yml + pr-build.yml (multi-backend captions artifacts)
 .agents/         design docs: plan, architecture, TODO, agent roles
 ```

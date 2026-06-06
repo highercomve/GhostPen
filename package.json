@@ -7,12 +7,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "bundle": "tauri build",
-    "bundle:appimage": "NO_STRIP=true tauri build --bundles appimage",
-    "bundle:deb": "tauri build --bundles deb",
-    "bundle:rpm": "tauri build --bundles rpm",
-    "bundle:linux": "NO_STRIP=true tauri build --bundles deb,rpm,appimage"
+    "tauri": "node scripts/tauri.mjs",
+    "bundle": "node scripts/tauri.mjs build",
+    "bundle:appimage": "NO_STRIP=true node scripts/tauri.mjs build --bundles appimage",
+    "bundle:deb": "node scripts/tauri.mjs build --bundles deb",
+    "bundle:rpm": "node scripts/tauri.mjs build --bundles rpm",
+    "bundle:linux": "NO_STRIP=true node scripts/tauri.mjs build --bundles deb,rpm,appimage"
   },
   "dependencies": {
     "react": "^19.1.0",

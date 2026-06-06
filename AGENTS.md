@@ -70,8 +70,9 @@ These come from the architecture review; violating them reintroduces fixed bugs.
    and total timeout (~30 s, configurable). Surface readable errors; never leave the overlay
    stuck.
 5. **Default model is `gemma4:e4b`** (Gemma 4 edge E4B). Don't "correct" it to `gemma3n` —
-   it exists on the Ollama library and is verified. (Dev on this Chromebook uses
-   `gemma4:31b-cloud` via Ollama Cloud; shipped default stays `gemma4:e4b`.)
+   it exists on the Ollama library and is verified. (Dev on the Chromebook uses
+   `gemma4:31b-cloud` via Ollama Cloud; the Arch desktop can run `gemma4:e4b` locally; shipped
+   default stays `gemma4:e4b`.)
 6. **Secrets:** API keys live in `settings.json` (plaintext in v1). Never log keys or
    clipboard contents; redact them in errors. Keychain is a planned hardening (`keyring`).
 7. **Don't widen Tauri capabilities** beyond what a feature needs (see `capabilities/default.json`).
@@ -88,6 +89,35 @@ npm run tauri build         # production binary
 Default backend setup (Ollama): see [`README.md`](./README.md) — install Ollama, then
 `ollama pull gemma4:e4b`.
 
+### Captions feature — auto-detected, no flag to remember (ADR-008)
+
+The system-audio **captions** stack (cpal + whisper.cpp) is an optional Cargo feature
+(`captions`, default off) because it needs extra build deps (ALSA, a C/C++ toolchain,
+libclang). To avoid typing `--features captions` on every command, `npm run tauri` /
+`npm run bundle*` go through [`scripts/tauri.mjs`](./scripts/tauri.mjs), which **probes for
+those deps and adds `--features captions` automatically when they're all present**:
+
+- **Arch desktop** (full deps) → captions auto-enabled. A plain `npm run tauri dev` includes
+  them.
+- **Chromebook/Crostini** (deps absent, and no loopback device anyway — ADR-007) → builds
+  cleanly *without* captions; the app degrades to the "compiled without captions" path.
+- **Release CI** → unaffected: it invokes `tauri-action` directly (not these npm scripts) and
+  enables captions explicitly per-target in `.github/workflows/pr-build.yml`.
+
+The same wrapper also **auto-selects the whisper compute backend**: it prefers **CUDA**
+(`captions-cuda`) when the CUDA toolkit + an NVIDIA GPU are present, falls back to **Vulkan**
+(`captions-vulkan`) when glslc/shaderc + the Vulkan loader exist, and otherwise builds the
+**CPU** backend (`captions`). On CUDA it also sets the toolkit env (`CUDA_PATH`, `CUDACXX`,
+`CMAKE_CUDA_ARCHITECTURES=native`) so the build finds nvcc even when it's off `PATH`
+(e.g. Arch's `/opt/cuda/bin`). GPU whisper is what makes a larger, more accurate model usable
+in real time (CPU `tiny` is fast-ish but inaccurate; GPU `small`/`medium` is both).
+
+Force the decision when needed:
+- `GHOSTPEN_CAPTIONS=1|0` — captions feature on / off (overrides dep auto-detect).
+- `GHOSTPEN_CAPTIONS_GPU=cuda|vulkan|cpu|auto` — pin the backend (default `auto`).
+
+The wrapper prints `[tauri] captions: <feature|off> — <reason>` so you can see what it chose.
+
 ## Conventions
 
 - Match the surrounding code's style; keep the menu/AI logic OS-agnostic behind the PAL.
@@ -95,5 +125,10 @@ Default backend setup (Ollama): see [`README.md`](./README.md) — install Ollam
   clipboard on the target Wayland/Hyprland session, (b) enigo/libei synthetic input there.
   See the architecture Risk Register and Next Steps.
 - Update `.agents/architecture.md` (ADRs) when you make a structural decision.
-- **Dev environment is a Chromebook/Crostini VM** — global hotkey + synthetic input can't be
-  tested here; develop in manual-copy mode and validate those on a real target (ADR-007).
+- **Two dev machines** (decide which one you're on before assuming what can be tested):
+  - **Arch desktop** (this one) — native Wayland (Hyprland/PipeWire), full build deps. The
+    real target: global hotkey, synthetic input, overlay, **and captions** all run here.
+    `npm run tauri dev` auto-enables captions (see above).
+  - **Chromebook/Crostini VM** — sandboxed (ADR-007): no global-hotkey delivery, no synthetic
+    input, no loopback audio. Develop UI + AI + clipboard in **manual-copy mode**; captions
+    build out automatically. Validate the "magic" OS integrations on the Arch desktop.
