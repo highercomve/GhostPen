@@ -44,8 +44,8 @@ jobs:
     #     and CMake classifies clang-cl as MSVC so the guard fires regardless — a real GNU-clang
     #     arm64-windows toolchain is deferred.
     #   - vulkan lanes: the build-time Vulkan SDK / glslc availability varies per runner+arch
-    #     (notably arm64 Linux has no LunarG apt repo), so GPU lanes stay best-effort until proven,
-    #     keeping the cpu/metal artifacts always green.
+    #     (arm64 Linux has no LunarG apt repo and no distro glslc, so that lane builds glslc from
+    #     shaderc source), so GPU lanes stay best-effort until proven, keeping cpu/metal always green.
     continue-on-error: ${{ matrix.backend == 'vulkan' || contains(matrix.label, 'windows-arm64') }}
     strategy:
       fail-fast: false
@@ -143,10 +143,26 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y vulkan-sdk
           else
-            # arm64: no LunarG apt repo — use distro packages (best-effort; glslc may be absent).
+            # arm64: no LunarG apt repo, and the Ubuntu repos don't ship glslc
+            # (glslang-tools only provides glslangValidator, which ggml's Vulkan
+            # backend rejects). Install the loader/headers from the distro and
+            # build glslc — the one build-time tool ggml needs — from shaderc
+            # source. glslc is a host tool here (the runner is native arm64).
             sudo apt-get update
-            sudo apt-get install -y libvulkan-dev glslang-tools spirv-tools glslc \
-              || sudo apt-get install -y libvulkan-dev glslang-tools spirv-tools
+            sudo apt-get install -y libvulkan-dev glslang-tools spirv-tools \
+              cmake ninja-build python3 git
+            git clone --depth 1 https://github.com/google/shaderc.git "$RUNNER_TEMP/shaderc"
+            (
+              cd "$RUNNER_TEMP/shaderc"
+              ./utils/git-sync-deps
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DSHADERC_SKIP_TESTS=ON \
+                -DSHADERC_SKIP_EXAMPLES=ON \
+                -DSHADERC_SKIP_COPYRIGHT_CHECK=ON
+              cmake --build build --target glslc_exe
+              sudo install -m755 build/glslc/glslc /usr/local/bin/glslc
+            )
           fi
           glslc --version || echo "::warning::glslc not found — ggml Vulkan shader-gen will fail"
 
