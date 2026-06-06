@@ -5,6 +5,7 @@
 // govern this code (PAL, snapshot-before-copy, no-panic OS calls, bounded HTTP, manual mode).
 
 pub mod ai;
+pub mod captions;
 pub mod config;
 pub mod pal;
 
@@ -25,6 +26,8 @@ struct AppState {
     saved_clipboard: Mutex<Option<String>>,
     /// Guards against overlapping triggers corrupting clipboard state.
     busy: Mutex<bool>,
+    /// Live system-audio captions subsystem (ADR-008).
+    captions: captions::CaptionsManager,
 }
 
 impl AppState {
@@ -33,6 +36,7 @@ impl AppState {
             pal: Mutex::new(Pal::detect()),
             saved_clipboard: Mutex::new(None),
             busy: Mutex::new(false),
+            captions: captions::CaptionsManager::new(),
         }
     }
 }
@@ -216,10 +220,11 @@ fn handle_cli_args(app: &AppHandle, args: &[String]) {
 /// the caller logs and continues so startup never fails on a missing tray.
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show menu", true, None::<&str>)?;
+    let captions = MenuItem::with_id(app, "captions", "Captions", true, None::<&str>)?;
     let playground = MenuItem::with_id(app, "playground", "Playground", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &playground, &settings, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &captions, &playground, &settings, &quit])?;
 
     TrayIconBuilder::with_id("ghostpen-tray")
         .icon(app.default_window_icon().unwrap().clone())
@@ -228,6 +233,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => trigger_menu_flow(app),
+            "captions" => open_captions(app.clone()),
             "playground" => show_window(app, "playground"),
             "settings" => show_window(app, "settings"),
             "quit" => app.exit(0),
@@ -565,10 +571,10 @@ fn show_menu(app: AppHandle) {
 }
 
 #[tauri::command]
-fn hide_window(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.hide();
-    }
+fn hide_window(window: tauri::WebviewWindow) {
+    // Hide the window that invoked the command (the main overlay or the captions overlay),
+    // not a hardcoded label — so each overlay's ✕ closes itself.
+    let _ = window.hide();
 }
 
 #[tauri::command]
@@ -584,6 +590,106 @@ fn close_settings(app: AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.hide();
     }
+}
+
+// ---- captions commands (ADR-008) -----------------------------------------------------
+
+/// Position the captions overlay along the bottom-center of its monitor, then show it.
+/// (Tauri can't express a bottom-anchored window in tauri.conf.json, so we place it here.)
+fn place_captions_bottom(w: &tauri::WebviewWindow) {
+    if let Ok(Some(monitor)) = w.current_monitor() {
+        let screen = monitor.size();
+        let win = w.outer_size().unwrap_or(tauri::PhysicalSize::new(900, 160));
+        let margin = (screen.height as f64 * 0.06) as i32; // ~6% up from the bottom edge
+        let x = ((screen.width as i32 - win.width as i32) / 2).max(0);
+        let y = (screen.height as i32 - win.height as i32 - margin).max(0);
+        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
+#[tauri::command]
+fn open_captions(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("captions") {
+        // Showing the controls implies interactive: ensure click-through is off and tell the
+        // overlay UI to leave ghost mode so the control bar reappears.
+        let _ = w.set_ignore_cursor_events(false);
+        place_captions_bottom(&w);
+        let _ = w.show();
+        let _ = w.set_focus();
+        let _ = app.emit("ghostpen://captions-show", ());
+    }
+}
+
+#[tauri::command]
+fn captions_status(app: AppHandle) -> captions::CaptionsStatus {
+    let settings = load_settings(&app);
+    let state = app.state::<AppState>();
+    state.captions.status(&settings)
+}
+
+#[tauri::command]
+fn captions_list_devices() -> Vec<String> {
+    #[cfg(feature = "captions")]
+    {
+        captions::audio::list_devices()
+    }
+    #[cfg(not(feature = "captions"))]
+    {
+        Vec::new()
+    }
+}
+
+#[tauri::command]
+fn captions_start(app: AppHandle) -> Result<String, String> {
+    let settings = load_settings(&app);
+    let device = {
+        let state = app.state::<AppState>();
+        state.captions.start(&app, &settings)?
+    };
+    // Bring the overlay up so the user sees captions appear.
+    if let Some(w) = app.get_webview_window("captions") {
+        place_captions_bottom(&w);
+        let _ = w.show();
+    }
+    Ok(device)
+}
+
+#[tauri::command]
+fn captions_stop(app: AppHandle) {
+    let state = app.state::<AppState>();
+    state.captions.stop();
+}
+
+/// Toggle the overlay's click-through (ghost) mode. When on, the mouse passes through the
+/// window to whatever is underneath (the video/meeting), exactly like Netflix subtitles.
+#[tauri::command]
+fn captions_set_click_through(app: AppHandle, enable: bool) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("captions") {
+        w.set_ignore_cursor_events(enable).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Toggle AI translation of captions from the overlay. Persists the choice to settings and,
+/// if a session is running, flips it live so the next transcribed chunk is translated (or not)
+/// without restarting capture.
+#[tauri::command]
+fn captions_set_translate(app: AppHandle, enable: bool) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    settings.captions.ai_translate = enable;
+    persist_settings(&app, &settings)?;
+    app.state::<AppState>().captions.set_translate(enable);
+    Ok(())
+}
+
+/// Download the configured whisper model (or a specific one) to the app data dir.
+#[tauri::command]
+async fn captions_download_model(app: AppHandle, model: Option<String>) -> Result<(), String> {
+    let model = match model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => load_settings(&app).captions.model,
+    };
+    captions::model::ensure_model(&model).await.map(|_| ())
 }
 
 // ---- entrypoint ----------------------------------------------------------------------
@@ -623,6 +729,15 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
+        // GhostPen is a tray-resident daemon: closing a window (e.g. the Settings titlebar ✕)
+        // must HIDE it, not destroy it — otherwise `get_webview_window(...)` returns None and
+        // the tray/`open_settings` can never reopen it. Quit still exits via the tray menu.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .manage(AppState::new())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -651,7 +766,15 @@ pub fn run() {
             hide_window,
             open_settings,
             open_playground,
-            close_settings
+            close_settings,
+            open_captions,
+            captions_status,
+            captions_list_devices,
+            captions_start,
+            captions_stop,
+            captions_set_click_through,
+            captions_set_translate,
+            captions_download_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostPen");

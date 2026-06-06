@@ -45,6 +45,21 @@
         "transparent": false,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "captions",
+        "title": "GhostPen Captions",
+        "url": "index.html#/captions",
+        "width": 900,
+        "height": 170,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "resizable": true,
+        "focus": false,
+        "visible": false
       }
     ],
     "security": {

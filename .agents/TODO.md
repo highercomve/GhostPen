@@ -149,6 +149,63 @@ WAS shared with ChromeOS. Used `gemma4:31b-cloud` (Ollama Cloud) since local HW 
 - [x] **10.11 README** — logo + screenshots (action menu / Professional result) captured on a
       real Hyprland session.
 
+## Phase 11 — Live system-audio captions (ADR-008) ✅ (opt-in `captions` feature)
+
+On-device captions/translation for system audio. Native stack gated behind the **`captions`
+Cargo feature** (default off) so the default build + release CI are untouched.
+
+- [x] **11.1** Cargo: optional `cpal` + `whisper-rs` behind `[features] captions`; `dirs` for
+      the model dir. Default build adds no new system deps.
+- [x] **11.2** `captions/audio.rs` — cpal loopback capture (per-OS device pick: Windows WASAPI
+      loopback / Linux monitor source / macOS virtual device), downmix→mono + resample→16 kHz,
+      capped `SampleBuffer`, dedicated capture thread (non-`Send` `Stream`). No `.unwrap()` on
+      OS calls. Unit tests for downmix/resample/buffer cap.
+- [x] **11.3** `captions/transcribe.rs` — whisper-rs 0.14 wrapper (auto/pinned language +
+      built-in translate flag).
+- [x] **11.4** `captions/model.rs` — ggml model path + on-demand bounded download; sanitized id.
+- [x] **11.5** `captions/mod.rs` — `CaptionsManager` (in `AppState`): capture + transcription
+      worker, `ghostpen://caption` events, optional AI translation via `ai::run_completion`.
+      Compiles + degrades gracefully when the feature is off.
+- [x] **11.6** `captions` window (transparent, alwaysOnTop, skipTaskbar) + bottom-center
+      placement; click-through via `set_ignore_cursor_events`; tray **Captions** item + escape
+      hatch event. Commands wired + capabilities widened minimally.
+- [x] **11.7** Frontend: `Captions.tsx` overlay, **Live Captions** Settings panel, `api.ts`
+      wrappers, `#/captions` route.
+- [x] **11.8** Verified: `cargo check` (default) ✅, `cargo check --features captions` ✅,
+      `cargo test --features captions` ✅, `npm run build` (tsc) ✅. Runtime capture/transcription
+      not exercisable in CI/container (no audio device or display).
+- [x] **11.9** PR build CI: `.github/workflows/pr-build.yml` builds installable, captions-enabled
+      artifacts on every PR (all 6 targets), installing the extra deps (ALSA, CMake, libclang/LLVM)
+      and passing `--features captions`. whisper-rs pinned to **0.16** (newer whisper.cpp).
+      Build-portability fixes: `GGML_NATIVE=OFF` (portable binaries + sidesteps the macOS/arm64
+      i8mm intrinsic error) and `MACOSX_DEPLOYMENT_TARGET=11.0` (x86_64 `std::filesystem`).
+      5/6 targets build + upload artifacts. **windows-arm64 is `continue-on-error`** (best-effort):
+      whisper.cpp/ggml refuses its CPU backend under MSVC on ARM and clang-cl is still seen as
+      MSVC by CMake — a real GNU-clang arm64-windows toolchain is deferred (11.10).
+- [x] **11.11** Dev ergonomics: `scripts/tauri.mjs` wrapper auto-enables `--features captions`
+      when the build deps (ALSA + libclang + a C/C++ compiler) are present, so `npm run tauri dev`
+      / `bundle*` "just work" with captions on the Arch desktop and build cleanly without them on
+      the Chromebook/CI. `GHOSTPEN_CAPTIONS=1|0` overrides. (Two-machine note in AGENTS.md; ADR-008.)
+- [x] **11.12** Overlay readability: caption lines now render on a single **opaque** bottom bar
+      (fixes WebKitGTK transparent-window frame-ghosting on wlroots — captions smeared on top of
+      each other); 2-line cap. **Live translation toggle** (🌐) in the overlay control bar —
+      `captions_set_translate` flips `settings.captions.aiTranslate` and updates a worker-read
+      `AtomicBool` so it takes effect mid-session without restarting capture.
+- [x] **11.13** GPU whisper backends: `captions-cuda` / `captions-vulkan` Cargo features
+      (each implies `captions`, swap ggml's compute backend). `scripts/tauri.mjs` auto-picks
+      **cuda > vulkan > cpu** from installed toolchains and sets the CUDA build env
+      (`CUDA_PATH`/`CUDACXX`/`CMAKE_CUDA_ARCHITECTURES=native`). `GHOSTPEN_CAPTIONS_GPU` overrides.
+      CI stays CPU-only. Verified CUDA builds under gcc 16 + CUDA 13.3 on the RTX 4070. (ADR-008.)
+- [x] **11.14** Linux loopback capture fix (was `[BLANK_AUDIO]`): cpal/ALSA can't open PipeWire
+      `.monitor` sources by name, so it captured the mic. Now resolves the default sink's monitor
+      (or an explicit source) via `pactl`, sets `PULSE_SOURCE`, and opens cpal's `pulse` device.
+      Settings → Captions device dropdown lists `pactl` sources ("Auto" = current output). (ADR-008.)
+- [x] **11.15** Window lifecycle: tray-resident close policy — `on_window_event` intercepts
+      `CloseRequested` and hides instead of destroying, so the Settings/Playground titlebar ✕ no
+      longer makes the window unreopenable from the tray.
+- [ ] **11.10** Follow-ups: overlap/VAD chunking; macOS ScreenCaptureKit to avoid BlackHole;
+      fold `--features captions` into the tagged `release.yml` once the PR lane is proven green.
+
 ### Remaining / next
 - [ ] **8.7** per-platform test matrix (Windows, macOS, Linux/X11).
 - [ ] **6.x** verify the in-process global hotkey on X11/Windows/macOS (Wayland uses the

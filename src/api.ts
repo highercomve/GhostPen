@@ -18,6 +18,17 @@ export interface CustomAction {
   model: string; // "" = use active profile's model
 }
 
+export interface CaptionsSettings {
+  model: string;
+  language: string;
+  whisperTranslate: boolean;
+  aiTranslate: boolean;
+  targetLang: string;
+  chunkSeconds: number;
+  device: string;
+  fontSize: number;
+}
+
 export interface Settings {
   hotkey: string;
   activeProfileId: string;
@@ -25,6 +36,25 @@ export interface Settings {
   forceSynthetic: boolean;
   restoreDelayMs: number;
   customActions: CustomAction[];
+  captions: CaptionsSettings;
+}
+
+export interface CaptionsStatus {
+  available: boolean;
+  running: boolean;
+  device: string | null;
+  model_ready: boolean;
+  model: string;
+  /** Whether AI translation is currently on (mirrors settings.captions.aiTranslate). */
+  translate: boolean;
+  /** Target language for AI translation, for the overlay toggle label. */
+  target_lang: string;
+}
+
+/** Payload of the `ghostpen://caption` event. */
+export interface Caption {
+  text: string;
+  translated: boolean;
 }
 
 export interface Status {
@@ -70,6 +100,52 @@ export const showMenu = () => invoke<void>("show_menu");
 export const hideWindow = () => invoke<void>("hide_window");
 export const openSettings = () => invoke<void>("open_settings");
 export const closeSettings = () => invoke<void>("close_settings");
+
+// ---- captions (ADR-008) --------------------------------------------------------------
+
+export const openCaptions = () => invoke<void>("open_captions");
+export const captionsStatus = () => invoke<CaptionsStatus>("captions_status");
+export const captionsListDevices = () => invoke<string[]>("captions_list_devices");
+/** Start capturing + transcribing; resolves to the capture device name. */
+export const captionsStart = () => invoke<string>("captions_start");
+export const captionsStop = () => invoke<void>("captions_stop");
+export const captionsSetClickThrough = (enable: boolean) =>
+  invoke<void>("captions_set_click_through", { enable });
+/** Toggle AI translation live (persists to settings; takes effect on the next chunk). */
+export const captionsSetTranslate = (enable: boolean) =>
+  invoke<void>("captions_set_translate", { enable });
+/** Download the configured (or a specific) whisper model. May take a while (~140MB for base). */
+export const captionsDownloadModel = (model?: string) =>
+  invoke<void>("captions_download_model", { model: model ?? null });
+
+// Whisper models offered in the UI (ggml-{id}.bin on Hugging Face). Ordered fastest →
+// most accurate. `.en` variants are English-only but a bit faster/more accurate for English.
+// `speed`/`accuracy` are relative 1–5 (5 = best) for the little meter in the UI.
+export interface WhisperModelInfo {
+  id: string;
+  size: string;
+  speed: number;
+  accuracy: number;
+  note: string;
+}
+export const WHISPER_MODELS: WhisperModelInfo[] = [
+  { id: "tiny",      size: "~75 MB",  speed: 5, accuracy: 1, note: "fastest, lowest accuracy" },
+  { id: "tiny.en",   size: "~75 MB",  speed: 5, accuracy: 2, note: "fastest, English-only" },
+  { id: "base",      size: "~142 MB", speed: 4, accuracy: 2, note: "fast, basic accuracy" },
+  { id: "base.en",   size: "~142 MB", speed: 4, accuracy: 3, note: "fast, English-only" },
+  { id: "small",     size: "~466 MB", speed: 3, accuracy: 4, note: "balanced — sweet spot on a GPU" },
+  { id: "small.en",  size: "~466 MB", speed: 3, accuracy: 4, note: "balanced, English-only" },
+  { id: "medium",    size: "~1.5 GB", speed: 2, accuracy: 5, note: "most accurate, heaviest" },
+  { id: "medium.en", size: "~1.5 GB", speed: 2, accuracy: 5, note: "most accurate, English-only" },
+];
+
+/** Compact bar meter like "▰▰▰▱▱" for a 1–5 score. */
+export const scoreMeter = (n: number) => "▰".repeat(n) + "▱".repeat(5 - n);
+
+// Whisper source-language codes (subset; "auto" detects).
+export const CAPTION_LANGUAGES = [
+  "auto", "en", "es", "fr", "de", "it", "pt", "nl", "zh", "ja", "ko", "ru", "ar",
+];
 
 // ---- presets (Settings UI starting points) -------------------------------------------
 

@@ -33,6 +33,69 @@ pub struct CustomAction {
     pub model: String,
 }
 
+/// Live system-audio captions (ADR-008). Defaults are conservative: transcribe-only
+/// (no translation), auto source language, the small/fast `base` whisper model.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaptionsSettings {
+    /// Whisper model id → resolves to `ggml-{model}.bin` in the app data dir's `models/`.
+    /// e.g. `base`, `base.en`, `small`, `small.en`, `medium`. Smaller = faster, less accurate.
+    #[serde(default = "default_caption_model")]
+    pub model: String,
+    /// Source language: `auto` (detect) or an ISO code (`en`, `es`, `fr`, …).
+    #[serde(default = "default_caption_language")]
+    pub language: String,
+    /// Use Whisper's built-in translate (source → English) — free, but English-only target.
+    #[serde(default, rename = "whisperTranslate")]
+    pub whisper_translate: bool,
+    /// Route the transcript through the active AI profile to translate into `targetLang`.
+    /// Use this for non-English targets (Whisper's built-in translate only outputs English).
+    #[serde(default, rename = "aiTranslate")]
+    pub ai_translate: bool,
+    /// Target language for AI translation (when `aiTranslate` is on).
+    #[serde(default = "default_caption_target", rename = "targetLang")]
+    pub target_lang: String,
+    /// Seconds of audio per transcription chunk. Larger = more context/accuracy, more latency.
+    #[serde(default = "default_caption_chunk", rename = "chunkSeconds")]
+    pub chunk_seconds: f32,
+    /// Capture device name substring to match; empty = auto-pick the system-audio loopback.
+    #[serde(default)]
+    pub device: String,
+    /// Caption font size in px (the overlay UI reads this).
+    #[serde(default = "default_caption_font", rename = "fontSize")]
+    pub font_size: u32,
+}
+
+fn default_caption_model() -> String {
+    "base".into()
+}
+fn default_caption_language() -> String {
+    "auto".into()
+}
+fn default_caption_target() -> String {
+    "English".into()
+}
+fn default_caption_chunk() -> f32 {
+    5.0
+}
+fn default_caption_font() -> u32 {
+    28
+}
+
+impl Default for CaptionsSettings {
+    fn default() -> Self {
+        CaptionsSettings {
+            model: default_caption_model(),
+            language: default_caption_language(),
+            whisper_translate: false,
+            ai_translate: false,
+            target_lang: default_caption_target(),
+            chunk_seconds: default_caption_chunk(),
+            device: String::new(),
+            font_size: default_caption_font(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_hotkey")]
@@ -48,6 +111,9 @@ pub struct Settings {
     pub restore_delay_ms: u64,
     #[serde(default, rename = "customActions")]
     pub custom_actions: Vec<CustomAction>,
+    /// Live system-audio captions configuration (ADR-008).
+    #[serde(default)]
+    pub captions: CaptionsSettings,
 }
 
 fn default_hotkey() -> String {
@@ -91,6 +157,7 @@ impl Settings {
             force_synthetic: false,
             restore_delay_ms: default_restore_delay(),
             custom_actions: Vec::new(),
+            captions: CaptionsSettings::default(),
         }
     }
 }

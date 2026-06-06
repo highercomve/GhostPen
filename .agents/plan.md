@@ -674,3 +674,47 @@ config → frontend → hotkey/Wayland → observability → per-platform testin
 
 Implementation should follow `TODO.md` top-to-bottom, honoring the corrections in
 [`architecture.md`](./architecture.md) (which wins on any conflict with this plan).
+
+---
+
+## 15. Live system-audio captions (ADR-008)
+
+A second feature alongside text editing: **live captions + translation for system audio**
+(meetings, videos, podcasts). Governed by **ADR-008** in `architecture.md`.
+
+**Pipeline:** loopback capture (`cpal`) → on-device transcription (`whisper-rs`/whisper.cpp)
+→ *optional* AI translation (the active OpenAI-compatible profile) → a transparent,
+click-through captions overlay window.
+
+**Build flag.** The native stack (cpal + whisper-rs) is behind the **optional `captions`
+Cargo feature** — default **off** so the default build and the 6-target release CI add no new
+system deps. Enable with `cargo build --features captions` /
+`npm run tauri build -- --features captions`. Linux additionally needs `libasound2-dev`
+(ALSA) and a C/C++ toolchain + `libclang` at build time. Compiled out, the overlay/commands
+exist but `captions_start` reports "compiled without captions support" (no crash).
+
+**Backend (`src-tauri/src/captions/`).**
+- `audio.rs` — cpal loopback capture behind a small port. Per-OS device pick (Windows WASAPI
+  loopback on the default output device; Linux PipeWire/PulseAudio *monitor* source; macOS a
+  user-installed virtual device, e.g. BlackHole). Downmix→mono + linear resample→16 kHz in the
+  callback. The non-`Send` `Stream` lives on a dedicated capture thread.
+- `transcribe.rs` — whisper-rs 0.14 wrapper (`auto`/pinned language, built-in translate flag).
+- `model.rs` — resolve/download ggml models (`ggml-{id}.bin`) into the app data dir; bounded
+  HTTP; path-sanitized model id.
+- `mod.rs` — `CaptionsManager` (in `AppState`) orchestrates capture + a transcription worker
+  thread, emits `ghostpen://caption` events, and does optional AI translation via
+  `ai::run_completion`.
+
+**Overlay + commands.** New `captions` window (`#/captions`), transparent + alwaysOnTop +
+skipTaskbar. Click-through via `set_ignore_cursor_events` ("ghost" mode); the tray **Captions**
+item / `open_captions` always re-enables interaction and emits `ghostpen://captions-show`.
+Commands: `open_captions`, `captions_status`, `captions_list_devices`, `captions_start`,
+`captions_stop`, `captions_set_click_through`, `captions_download_model`.
+
+**Frontend.** `Captions.tsx` overlay (rolling lines, start/stop, ghost toggle), a **Live
+Captions** panel in `Settings.tsx` (model + download, source language, Whisper/AI translate,
+target language, chunk length, capture device, font size), and `api.ts` wrappers.
+
+**v1 limitations.** Fixed-window chunking (default 5 s) can clip words at boundaries
+(overlap/VAD later); macOS needs a virtual loopback device; releasing captions binaries needs
+a dedicated CI lane with `--features captions` + ALSA dev libs.
