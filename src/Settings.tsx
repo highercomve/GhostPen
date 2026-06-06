@@ -3,13 +3,22 @@ import {
   Settings as SettingsType,
   Profile,
   CustomAction,
+  CaptionsSettings,
   Status,
+  CaptionsStatus,
   getSettings,
   saveSettings,
   fetchModels,
   getStatus,
   closeSettings,
+  captionsStatus,
+  captionsDownloadModel,
+  captionsListDevices,
+  openCaptions,
   PRESETS,
+  WHISPER_MODELS,
+  CAPTION_LANGUAGES,
+  TRANSLATE_LANGUAGES,
 } from "./api";
 
 function newProfile(): Profile {
@@ -29,10 +38,16 @@ export default function Settings() {
   const [models, setModels] = useState<string[]>([]);
   const [modelMsg, setModelMsg] = useState<string>("");
   const [saved, setSaved] = useState(false);
+  const [capStatus, setCapStatus] = useState<CaptionsStatus | null>(null);
+  const [capDevices, setCapDevices] = useState<string[]>([]);
+  const [capMsg, setCapMsg] = useState<string>("");
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     getSettings().then(setSettings);
     getStatus().then(setStatus).catch(() => {});
+    captionsStatus().then(setCapStatus).catch(() => {});
+    captionsListDevices().then(setCapDevices).catch(() => {});
   }, []);
 
   if (!settings) return <div className="settings loading-page">Loading…</div>;
@@ -113,6 +128,27 @@ export default function Settings() {
 
   const deleteCustomAction = (id: string) => {
     update({ customActions: customActions.filter((a) => a.id !== id) });
+  };
+
+  const captions = settings.captions;
+  const updateCaptions = (patch: Partial<CaptionsSettings>) => {
+    update({ captions: { ...captions, ...patch } });
+  };
+
+  // Download the configured whisper model, then save + refresh status so the UI reflects it.
+  const downloadModel = async () => {
+    setDownloading(true);
+    setCapMsg(`Downloading ${captions.model}… (this can take a while)`);
+    try {
+      await saveSettings(settings); // persist so the backend reads the chosen model id
+      await captionsDownloadModel(captions.model);
+      setCapMsg(`Model “${captions.model}” ready ✓`);
+      captionsStatus().then(setCapStatus).catch(() => {});
+    } catch (e) {
+      setCapMsg(String(e));
+    } finally {
+      setDownloading(false);
+    }
   };
 
   const save = async () => {
@@ -254,6 +290,91 @@ export default function Settings() {
           </div>
         ))}
         <button className="btn" onClick={addCustomAction}>+ Add custom action</button>
+      </section>
+
+      {/* Live captions (system audio) */}
+      <section className="card">
+        <h2>Live Captions <span className="muted small">system audio → subtitles</span></h2>
+        {capStatus && !capStatus.available && (
+          <p className="muted small">
+            This build was compiled without captions support. Rebuild with
+            {" "}<code>--features captions</code> to enable on-device transcription.
+          </p>
+        )}
+        <p className="muted small">
+          Captures what you hear (meetings, videos, podcasts), transcribes it on-device with
+          Whisper, and shows subtitles in a click-through overlay. Optionally translate via your
+          active AI profile.
+        </p>
+
+        <label>
+          Whisper model <span className="muted">(smaller = faster, larger = more accurate)</span>
+          <div className="row">
+            <select value={captions.model} onChange={(e) => updateCaptions({ model: e.target.value })}>
+              {WHISPER_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <button className="btn" type="button" onClick={downloadModel} disabled={downloading}>
+              {capStatus?.model_ready && capStatus.model === captions.model ? "Re-download" : "Download model"}
+            </button>
+          </div>
+          {capStatus && (
+            <span className="muted small">
+              {capStatus.model_ready ? `“${capStatus.model}” downloaded ✓` : `“${captions.model}” not downloaded`}
+            </span>
+          )}
+          {capMsg && <span className="muted small">{capMsg}</span>}
+        </label>
+
+        <label>
+          Source language
+          <select value={captions.language} onChange={(e) => updateCaptions({ language: e.target.value })}>
+            {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        </label>
+
+        <label className="checkbox">
+          <input type="checkbox" checked={captions.whisperTranslate}
+            onChange={(e) => updateCaptions({ whisperTranslate: e.target.checked })} />
+          Translate to English with Whisper <span className="muted">(free, English-only target)</span>
+        </label>
+
+        <label className="checkbox">
+          <input type="checkbox" checked={captions.aiTranslate}
+            onChange={(e) => updateCaptions({ aiTranslate: e.target.checked })} />
+          Translate transcript via AI profile <span className="muted">(for non-English targets)</span>
+        </label>
+        {captions.aiTranslate && (
+          <label>
+            Target language
+            <select value={captions.targetLang} onChange={(e) => updateCaptions({ targetLang: e.target.value })}>
+              {TRANSLATE_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+            </select>
+          </label>
+        )}
+
+        <label>
+          Chunk length: {captions.chunkSeconds.toFixed(0)}s
+          <input type="range" min={2} max={15} step={1} value={captions.chunkSeconds}
+            onChange={(e) => updateCaptions({ chunkSeconds: parseInt(e.target.value, 10) })} />
+        </label>
+
+        <label>
+          Capture device <span className="muted">(blank = auto-detect system-audio loopback)</span>
+          <input list="cap-devices" value={captions.device}
+            placeholder="auto"
+            onChange={(e) => updateCaptions({ device: e.target.value })} />
+          <datalist id="cap-devices">
+            {capDevices.map((d) => <option key={d} value={d} />)}
+          </datalist>
+        </label>
+
+        <label>
+          Caption font size: {captions.fontSize}px
+          <input type="range" min={16} max={48} step={2} value={captions.fontSize}
+            onChange={(e) => updateCaptions({ fontSize: parseInt(e.target.value, 10) })} />
+        </label>
+
+        <button className="btn" onClick={() => openCaptions()}>Open captions overlay</button>
       </section>
 
       <div className="footer">

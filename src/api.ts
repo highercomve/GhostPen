@@ -18,6 +18,17 @@ export interface CustomAction {
   model: string; // "" = use active profile's model
 }
 
+export interface CaptionsSettings {
+  model: string;
+  language: string;
+  whisperTranslate: boolean;
+  aiTranslate: boolean;
+  targetLang: string;
+  chunkSeconds: number;
+  device: string;
+  fontSize: number;
+}
+
 export interface Settings {
   hotkey: string;
   activeProfileId: string;
@@ -25,6 +36,21 @@ export interface Settings {
   forceSynthetic: boolean;
   restoreDelayMs: number;
   customActions: CustomAction[];
+  captions: CaptionsSettings;
+}
+
+export interface CaptionsStatus {
+  available: boolean;
+  running: boolean;
+  device: string | null;
+  model_ready: boolean;
+  model: string;
+}
+
+/** Payload of the `ghostpen://caption` event. */
+export interface Caption {
+  text: string;
+  translated: boolean;
 }
 
 export interface Status {
@@ -70,6 +96,30 @@ export const showMenu = () => invoke<void>("show_menu");
 export const hideWindow = () => invoke<void>("hide_window");
 export const openSettings = () => invoke<void>("open_settings");
 export const closeSettings = () => invoke<void>("close_settings");
+
+// ---- captions (ADR-008) --------------------------------------------------------------
+
+export const openCaptions = () => invoke<void>("open_captions");
+export const captionsStatus = () => invoke<CaptionsStatus>("captions_status");
+export const captionsListDevices = () => invoke<string[]>("captions_list_devices");
+/** Start capturing + transcribing; resolves to the capture device name. */
+export const captionsStart = () => invoke<string>("captions_start");
+export const captionsStop = () => invoke<void>("captions_stop");
+export const captionsSetClickThrough = (enable: boolean) =>
+  invoke<void>("captions_set_click_through", { enable });
+/** Download the configured (or a specific) whisper model. May take a while (~140MB for base). */
+export const captionsDownloadModel = (model?: string) =>
+  invoke<void>("captions_download_model", { model: model ?? null });
+
+// Whisper model ids offered in the UI (ggml-{id}.bin on Hugging Face).
+export const WHISPER_MODELS = [
+  "tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en",
+];
+
+// Whisper source-language codes (subset; "auto" detects).
+export const CAPTION_LANGUAGES = [
+  "auto", "en", "es", "fr", "de", "it", "pt", "nl", "zh", "ja", "ko", "ru", "ar",
+];
 
 // ---- presets (Settings UI starting points) -------------------------------------------
 

@@ -32,6 +32,21 @@ tracing-subscriber = "0.3.23"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1.52.3", features = ["full"] }
+dirs = "5"
+
+# --- System-audio captions (ADR-008) -------------------------------------------------
+# Opt-in: gated behind the `captions` feature so the default build (and the 6-target
+# release CI) adds NO new system dependencies. Enabling it pulls in cpal (loopback audio
+# capture; needs ALSA on Linux) and whisper-rs (bundled whisper.cpp; needs a C/C++ toolchain
+# + libclang for bindgen). Build with: `cargo build --features captions` /
+# `npm run tauri build -- --features captions`.
+cpal = { version = "0.15", optional = true }
+whisper-rs = { version = "0.14", optional = true }
+
+[features]
+default = []
+# On-device captions: cpal loopback capture + local whisper.cpp transcription.
+captions = ["dep:cpal", "dep:whisper-rs"]
 
 # Native Wayland clipboard (read + persistent serve). Linux-only; pure Rust, no wl-copy CLI.
 # arboard is X11-only here and loses writes through the XWayland bridge (ADR-002 revisited).

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import Menu from "./Menu";
 import Settings from "./Settings";
 import Playground from "./Playground";
+import Captions from "./Captions";
 
 function route(): string {
   // "#/settings" → "/settings", default "/"
@@ -19,5 +20,6 @@ export default function App() {
 
   if (path.startsWith("/settings")) return <Settings />;
   if (path.startsWith("/playground")) return <Playground />;
+  if (path.startsWith("/captions")) return <Captions />;
   return <Menu />;
 }

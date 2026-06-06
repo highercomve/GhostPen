@@ -177,6 +177,35 @@ transforms), or **Clear**.
 the text into concise bullet points. Return ONLY the bullets."*), optionally a model
 override. It appears alongside the built-in actions in the menu and Playground.
 
+### Live captions (system audio) — opt-in build
+
+GhostPen can caption and translate **system audio** (meetings, videos, podcasts) live: it
+captures what you hear, transcribes it **on-device** with Whisper, and shows subtitles in a
+transparent, click-through overlay — optionally translating via your active AI profile.
+
+This pulls in heavier native dependencies (audio capture + a bundled whisper.cpp), so it's
+behind the optional **`captions`** Cargo feature and **off by default**:
+
+```bash
+# Linux also needs ALSA dev headers + a C/C++ toolchain & libclang at build time:
+#   sudo apt-get install libasound2-dev clang libclang-dev   # Debian/Ubuntu
+npm run tauri build -- --features captions     # or: cargo run --features captions
+```
+
+Then: **tray → Captions** (or **Settings → Live Captions → Open captions overlay**) → pick a
+Whisper model and **Download model** → **Start**. Toggle **👻 Ghost** to make the overlay
+click-through; bring the controls back from the tray **Captions** item.
+
+- **Source language** can be auto-detected or pinned. **Translate to English** uses Whisper's
+  free built-in translation; for other targets enable **Translate via AI profile** and choose a
+  target language (routed through your active OpenAI-compatible endpoint).
+- **Loopback per OS:** Windows uses WASAPI loopback automatically; Linux captures a
+  PipeWire/PulseAudio **monitor** source; **macOS blocks direct system-audio capture**, so
+  install a virtual loopback device (e.g. [BlackHole](https://existential.audio/blackhole/))
+  and select it as the capture device in Settings.
+- On-device transcription means **audio never leaves your machine**; only the optional AI
+  translation step contacts your configured endpoint.
+
 ---
 
 ## Platform support

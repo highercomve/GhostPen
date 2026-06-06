@@ -233,6 +233,53 @@ backend is mandatory there, with a persistent serve thread for clipboard ownersh
   default clipboard works in Crostini incl. cross-boundary reads (spike 0.1). The dev profile
   here uses `gemma4:31b-cloud` (Ollama Cloud); shipped default remains `gemma4:e4b`.
 
+### ADR-008: Live system-audio captions (loopback → whisper.cpp → optional AI translate)
+- **Status**: Accepted — implemented behind the optional `captions` Cargo feature.
+- **Context**: Extend GhostPen from a text assistant to a live-captions/translation tool for
+  *system audio* (meetings, videos, podcasts). This is **capture of speaker output** (loopback),
+  not the microphone, and the speech-to-text must run **on-device** (audio shouldn't leave the
+  machine). A community blueprint proposed cpal + whisper-rs + a click-through overlay, but its
+  sample code regressed three of this repo's Critical rules: it `.unwrap()`ed every OS call
+  (rule 3), called OS audio APIs directly from feature logic instead of an abstraction (rule 1),
+  and added a heavy native dependency that would break the 6-target release CI (no graceful
+  degradation, rule on not widening the build's needs).
+- **Decision**:
+  1. **Feature-gate the native stack.** cpal + whisper-rs sit behind a `captions` Cargo feature
+     (default **off**), so the default build and the existing release CI add **no** new system
+     dependencies (ALSA, a C/C++ toolchain, libclang). Build captions with
+     `cargo build --features captions`. When compiled out, the commands and overlay still exist
+     and `captions_start` returns a readable "compiled without captions support" error — the app
+     **degrades, never crashes** (consistent with ADR-005).
+  2. **A capture port, not direct calls.** `captions::audio` owns all cpal interaction behind a
+     small surface (`start(device, buffer) -> Capture`, `SampleBuffer`), mirroring the PAL's
+     ports-and-adapters style. The cpal `Stream` (not `Send` on every platform) is created and
+     kept alive on a **dedicated capture thread**; nothing else touches it. Loopback is selected
+     per OS at runtime: **Windows** WASAPI loopback (input stream on the default *output*
+     device), **Linux** a PipeWire/PulseAudio *monitor* source (input device whose name contains
+     "monitor", else default input), **macOS** a user-installed virtual device (e.g. BlackHole)
+     selected by name — Apple blocks direct system-audio capture, so this degrades with an
+     actionable message rather than failing silently.
+  3. **On-device STT.** `captions::transcribe` wraps whisper-rs (bundled whisper.cpp). Models are
+     ggml files resolved/downloaded on demand into the app data dir (`models/ggml-{id}.bin`) with
+     a path-sanitized id and a bounded HTTP download (ADR-006 discipline). Audio is downmixed to
+     mono and linearly resampled to 16 kHz in the capture callback (no extra resampler dep).
+  4. **Two translation paths.** Whisper's built-in `translate` flag gives free source→**English**
+     translation. For other targets, the transcript is routed through the **active AI profile**
+     (reusing `ai::run_completion`) — one code path, same providers as text editing.
+  5. **Click-through overlay.** A new transparent, always-on-top `captions` window
+     (`#/captions`). `window.set_ignore_cursor_events(true)` ("ghost" mode) lets the mouse pass
+     through to the video/meeting underneath. Because a fully click-through window can't surface
+     its own controls, the tray **Captions** item (and `open_captions`) always disables
+     click-through and emits `ghostpen://captions-show` so the control bar returns — a reliable
+     escape hatch. The caption text sits on a semi-opaque pill so it stays legible even without a
+     compositor (opaque-fallback rule). Captions stream to the UI via `ghostpen://caption` events.
+- **Consequences**: Default builds/CI are untouched; captions are a deliberate opt-in build.
+  Fixed-window chunking (default 5 s) can clip words at boundaries — acceptable for v1, a future
+  enhancement is overlap/VAD segmentation. The capture + transcription worker are two threads
+  guarded by the `CaptionsManager`; stopping joins both. macOS requires a virtual loopback
+  device. Releasing captions binaries means adding `--features captions` (and the Linux ALSA dev
+  lib) to a dedicated CI lane — left as a follow-up so the existing release path stays green.
+
 ## Plan Review (review of `plan.md`)
 
 ### Strengths
@@ -427,6 +474,9 @@ scale.
 | Non-text clipboard not restored (ADR-004) | Low | Low | Documented v1 limitation; multi-format later |
 | Plaintext API keys | Med | Med | keyring hardening (§13); redact in logs/UI |
 | Overlapping triggers corrupt clipboard state | Low | Med | Debounce/in-flight guard |
+| Captions: system-audio loopback unavailable on target (esp. macOS) | High (macOS) | Med | Feature-gated; runtime device pick; actionable message + device override (ADR-008) |
+| Captions: whisper-rs heavy native dep breaks release CI | High | High | Off by default behind `captions` feature; default build/CI unchanged (ADR-008) |
+| Captions: fixed-window chunking clips words | Med | Low | Documented v1 limit; overlap/VAD segmentation later (ADR-008) |
 
 ## Open Questions
 

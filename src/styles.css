@@ -427,3 +427,94 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 }
 .pg-footer { display: flex; gap: 8px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ---- Live captions overlay (ADR-008) ----------------------------------------------- */
+/* The window is transparent + click-through capable; the caption pill is semi-opaque so it
+   stays legible even on a compositor without alpha (opaque fallback per the overlay rules). */
+.captions {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 10px;
+  user-select: none;
+}
+
+.cap-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.cap-brand { color: var(--muted); font-weight: 600; }
+.cap-controls { display: flex; gap: 4px; }
+.cap-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cap-btn:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+.cap-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.cap-btn.stop { color: var(--danger); border-color: var(--danger); }
+
+.cap-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-height: 0;
+  flex: 1;
+}
+
+/* A subtitle line: white text on a dark translucent pill with a strong shadow for contrast
+   over arbitrary video. */
+.cap-line {
+  max-width: 92%;
+  text-align: center;
+  line-height: 1.25;
+  padding: 4px 14px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+.cap-line.past { opacity: 0.5; }
+.cap-line.current { opacity: 1; }
+.cap-tag {
+  font-size: 0.5em;
+  vertical-align: super;
+  margin-left: 6px;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.cap-idle, .cap-error {
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.45);
+  padding: 6px 14px;
+  border-radius: 10px;
+}
+.cap-error { color: var(--danger); }
+
+.cap-ghost-hint {
+  position: fixed;
+  bottom: 2px;
+  right: 6px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  text-shadow: 0 1px 2px #000;
+}
