@@ -137,19 +137,18 @@ jobs:
             kind: vulkan
             args: "--features captions-vulkan"
 
-          # ---- Windows → cpu + vulkan (x86_64 native); arm64 base-only (cross-compile) ----
+          # ---- Windows → cpu only (x86_64); arm64 base-only (cross-compile) ----
+          # NOTE: windows-x86_64-vulkan is intentionally NOT shipped yet. ggml's nested
+          # vulkan-shaders-gen build fails on the GitHub Windows runners (compiler detection,
+          # then MSVC C1041 + parallel link races) on both windows-latest (VS 2026 preview)
+          # AND windows-2022. The lane is kept in pr-build.yml (continue-on-error) for
+          # iterating on a fix; re-add it here once it builds green. Windows users get the
+          # cpu captions bundle in the meantime.
           - label: windows-x86_64-cpu
             os: windows-latest
             target: x86_64-pc-windows-msvc
             kind: cpu
             args: "--target x86_64-pc-windows-msvc --features captions"
-          - label: windows-x86_64-vulkan
-            # Pinned to VS 2022 (stable): the windows-latest → VS 2026 preview toolchain breaks
-            # ggml's nested vulkan-shaders-gen build (C1041 + parallel link races).
-            os: windows-2022
-            target: x86_64-pc-windows-msvc
-            kind: vulkan
-            args: "--target x86_64-pc-windows-msvc --features captions-vulkan"
           - label: windows-arm64
             os: windows-latest
             target: aarch64-pc-windows-msvc
