@@ -163,6 +163,16 @@ jobs:
               cmake --build build --target glslc_exe
               sudo install -m755 build/glslc/glslc /usr/local/bin/glslc
             )
+            # Ubuntu 22.04's libvulkan-dev ships Vulkan headers too old for current
+            # whisper.cpp/ggml-vulkan (it references LayerSettingsEXT, CooperativeMatrixKHR,
+            # VkPhysicalDevicePipelineRobustnessFeaturesEXT, vk::DriverId::eMesaDozen, ...).
+            # LunarG has no arm64 apt repo, so install recent Vulkan-Headers (C + C++ vulkan.hpp)
+            # from source to /usr/local, which takes precedence over the distro /usr headers.
+            # The distro libvulkan loader is forward-compatible, so it stays for link/runtime.
+            git clone --depth 1 --branch vulkan-sdk-1.4.313.0 \
+              https://github.com/KhronosGroup/Vulkan-Headers.git "$RUNNER_TEMP/vulkan-headers"
+            cmake -S "$RUNNER_TEMP/vulkan-headers" -B "$RUNNER_TEMP/vulkan-headers/build"
+            sudo cmake --install "$RUNNER_TEMP/vulkan-headers/build"
           fi
           glslc --version || echo "::warning::glslc not found — ggml Vulkan shader-gen will fail"
 
@@ -191,6 +201,16 @@ jobs:
           $sdk = (Get-ChildItem 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
           echo "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
           echo "$sdk\Bin" >> $env:GITHUB_PATH
+
+      # ggml builds a host tool `vulkan-shaders-gen` (GLSL→SPIR-V) as a nested CMake
+      # ExternalProject. It configures with the default generator and fails with
+      # "No CMAKE_C_COMPILER could be found" unless cl.exe is on PATH. Put the MSVC host
+      # (x64) toolchain on PATH so that nested configure succeeds.
+      - name: Set up MSVC dev environment (Windows, vulkan backend)
+        if: matrix.backend == 'vulkan' && startsWith(matrix.os, 'windows')
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
 
       - name: Setup Node
         uses: actions/setup-node@v5
