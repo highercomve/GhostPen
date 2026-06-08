@@ -203,14 +203,24 @@ jobs:
           echo "$sdk\Bin" >> $env:GITHUB_PATH
 
       # ggml builds a host tool `vulkan-shaders-gen` (GLSL→SPIR-V) as a nested CMake
-      # ExternalProject. It configures with the default generator and fails with
-      # "No CMAKE_C_COMPILER could be found" unless cl.exe is on PATH. Put the MSVC host
-      # (x64) toolchain on PATH so that nested configure succeeds.
+      # ExternalProject. With the Visual Studio generator that nested configure fails to
+      # detect the compiler ("No CMAKE_C_COMPILER could be found") — and the VS-2026 runner
+      # migration makes it worse. Fix: put the MSVC host (x64) toolchain on PATH AND force the
+      # Ninja generator, so both the main build and the nested ExternalProject pick up cl.exe
+      # from PATH instead of relying on VS-generator toolset detection.
       - name: Set up MSVC dev environment (Windows, vulkan backend)
         if: matrix.backend == 'vulkan' && startsWith(matrix.os, 'windows')
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
+
+      - name: Force Ninja generator (Windows, vulkan backend)
+        if: matrix.backend == 'vulkan' && startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          choco install ninja --no-progress -y
+          # cmake-rs (whisper-rs-sys) honors CMAKE_GENERATOR; Ninja inherits cl.exe from PATH.
+          echo "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
 
       - name: Setup Node
         uses: actions/setup-node@v5
