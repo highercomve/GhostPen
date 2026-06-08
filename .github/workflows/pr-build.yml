@@ -92,7 +92,10 @@ jobs:
             backend: cpu
             args: "--target x86_64-pc-windows-msvc --features captions"
           - label: windows-x86_64-vulkan
-            os: windows-latest
+            # Pinned to VS 2022 (stable): the windows-latest → VS 2026 preview toolchain breaks
+            # ggml's nested vulkan-shaders-gen build (C1041 in trivial compiles + parallel link
+            # races). Revisit windows-latest once 2025-vs2026 stabilizes.
+            os: windows-2022
             target: x86_64-pc-windows-msvc
             backend: vulkan
             args: "--target x86_64-pc-windows-msvc --features captions-vulkan"
