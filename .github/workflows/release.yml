@@ -86,41 +86,51 @@ jobs:
     name: ${{ matrix.label }}
     needs: create-release
     runs-on: ${{ matrix.os }}
+    # windows-arm64 ships the base app only: whisper.cpp/ggml refuses its CPU backend under
+    # MSVC on ARM ("use clang"), so captions can't build there yet. Keep it best-effort so a
+    # missing arm64-windows bundle never blocks publishing the rest of the release.
+    continue-on-error: ${{ contains(matrix.label, 'windows-arm64') }}
     strategy:
       fail-fast: false
       matrix:
+        # Captions backends mirror the proven-green lanes in pr-build.yml:
+        #   macOS → metal (built into the OS), Linux/Windows-x64 → cpu. The GPU (vulkan/cuda)
+        #   lanes stay PR-only until proven green; release ships the always-green set.
         include:
-          # ---- macOS (built on Apple Silicon; x86_64 via cross-compile) ----
+          # ---- macOS → metal (Apple GPU, built on Apple Silicon; x86_64 via cross-compile) ----
           - label: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
-            args: "--target aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --features captions-metal"
           - label: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
-            args: "--target x86_64-apple-darwin"
+            args: "--target x86_64-apple-darwin --features captions-metal"
 
-          # ---- Linux (native runners → deb + rpm + appimage) ----
+          # ---- Linux → cpu captions (native runners → deb + rpm + appimage) ----
           - label: linux-x86_64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            args: ""
+            args: "--features captions"
           - label: linux-arm64
             # GitHub-hosted arm64 Linux runner (free for public repos). For a private repo
             # without arm64 entitlement, swap this to a self-hosted arm64 runner.
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            args: ""
+            args: "--features captions"
 
-          # ---- Windows (x86_64 native; aarch64 cross-compile) ----
+          # ---- Windows → cpu captions (x86_64 native); arm64 base-only (cross-compile) ----
           - label: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            args: "--target x86_64-pc-windows-msvc"
+            args: "--target x86_64-pc-windows-msvc --features captions"
           - label: windows-arm64
             os: windows-latest
             target: aarch64-pc-windows-msvc
             args: "--target aarch64-pc-windows-msvc"
+            # No captions here (see continue-on-error note). Force the tauri.mjs wrapper's
+            # auto-detect OFF so it doesn't enable the broken MSVC/ARM CPU backend.
+            caps_env: "0"
 
     steps:
       - uses: actions/checkout@v5
@@ -139,7 +149,25 @@ jobs:
             patchelf \
             libfuse2 \
             xdg-utils \
-            build-essential curl wget file
+            build-essential curl wget file \
+            cmake \
+            libasound2-dev \
+            clang libclang-dev
+
+      # whisper.cpp is built via CMake; macOS runners ship clang + the Metal toolchain
+      # (xcrun metal) the metal backend needs, but not always cmake.
+      - name: Install macOS build dependencies
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      # whisper-rs's bindgen needs libclang; the cmake crate needs CMake. Provide both on Windows.
+      - name: Install Windows build dependencies (LLVM for whisper-rs bindgen)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress -y
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -167,6 +195,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # WebKitGTK DMABUF renderer crashes on some setups; harmless to set on CI.
           NO_STRIP: "true"
+          # tauri-action runs `npm run tauri build`, which goes through scripts/tauri.mjs.
+          # Lanes pass explicit `--features` so the wrapper passes them through untouched;
+          # windows-arm64 sets caps_env=0 to keep its auto-detect from enabling captions.
+          GHOSTPEN_CAPTIONS: ${{ matrix.caps_env }}
+          # whisper-rs-sys forwards GGML_*/CMAKE_* env vars as CMake -D defines.
+          # GGML_NATIVE=OFF builds portable (non -march=native) binaries — correct for
+          # distributable artifacts, and it sidesteps the macOS/arm64 ggml i8mm-intrinsic
+          # build error (the CPU kernel used i8mm without enabling that target feature).
+          GGML_NATIVE: "OFF"
+          # whisper.cpp's ggml-backend-reg.cpp uses std::filesystem, which needs a macOS 10.15+
+          # deployment target (the x86_64 cross-build otherwise fails with "operator!= is
+          # unavailable"). cmake-rs maps MACOSX_DEPLOYMENT_TARGET → CMAKE_OSX_DEPLOYMENT_TARGET,
+          # and whisper-rs-sys also forwards CMAKE_* defines. Harmless off macOS.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
         with:
           # Upload into the one draft release created above — no per-job release creation.
           releaseId: ${{ needs.create-release.outputs.release_id }}

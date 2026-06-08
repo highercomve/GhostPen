@@ -101,8 +101,13 @@ those deps and adds `--features captions` automatically when they're all present
   them.
 - **Chromebook/Crostini** (deps absent, and no loopback device anyway — ADR-007) → builds
   cleanly *without* captions; the app degrades to the "compiled without captions" path.
-- **Release CI** → unaffected: it invokes `tauri-action` directly (not these npm scripts) and
-  enables captions explicitly per-target in `.github/workflows/pr-build.yml`.
+- **CI (`pr-build.yml` + `release.yml`)** → `tauri-action` runs `npm run tauri build`, so it
+  **does** go through this wrapper. CI therefore passes `--features <backend>` explicitly per
+  target (macOS=`captions-metal`, Linux/Windows-x64=`captions`, GPU lanes per matrix); the
+  explicit flag makes the wrapper pass it through instead of auto-detecting. A lane that must
+  ship *without* captions (e.g. windows-arm64) sets `GHOSTPEN_CAPTIONS=0` to force the
+  auto-detect off. (Earlier this note wrongly claimed release CI bypassed the wrapper — leaving
+  `release.yml` with no `--features` made macOS auto-detect a broken CPU build; fixed.)
 
 The same wrapper also **auto-selects the whisper compute backend**: it prefers **CUDA**
 (`captions-cuda`) when the CUDA toolkit + an NVIDIA GPU are present, falls back to **Vulkan**
