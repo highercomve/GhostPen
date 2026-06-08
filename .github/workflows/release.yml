@@ -86,47 +86,74 @@ jobs:
     name: ${{ matrix.label }}
     needs: create-release
     runs-on: ${{ matrix.os }}
-    # windows-arm64 ships the base app only: whisper.cpp/ggml refuses its CPU backend under
-    # MSVC on ARM ("use clang"), so captions can't build there yet. Keep it best-effort so a
-    # missing arm64-windows bundle never blocks publishing the rest of the release.
-    continue-on-error: ${{ contains(matrix.label, 'windows-arm64') }}
+    # Best-effort lanes (a failure here never blocks publishing the rest of the release):
+    #   - windows-arm64: whisper.cpp/ggml refuses its CPU backend under MSVC on ARM, so it
+    #     ships the base app only (no captions).
+    #   - vulkan lanes: GPU bundles are an extra on top of the always-green cpu/metal set; if a
+    #     Vulkan build regresses, the cpu bundle for that platform still ships.
+    continue-on-error: ${{ contains(matrix.label, 'windows-arm64') || matrix.kind == 'vulkan' }}
     strategy:
       fail-fast: false
       matrix:
-        # Captions backends mirror the proven-green lanes in pr-build.yml:
-        #   macOS → metal (built into the OS), Linux/Windows-x64 → cpu. The GPU (vulkan/cuda)
-        #   lanes stay PR-only until proven green; release ships the always-green set.
+        # Two captions bundles per platform where possible (ADR-008):
+        #   - cpu/metal: always-green, the primary download. macOS uses metal (Apple GPU).
+        #   - vulkan:    GPU acceleration on any vendor (NVIDIA/AMD/Intel), uploaded with a
+        #                `-vulkan` suffix so it doesn't collide with the cpu bundle's filename.
+        # Backends + their build setup mirror pr-build.yml. windows-arm64 is base-only.
         include:
           # ---- macOS → metal (Apple GPU, built on Apple Silicon; x86_64 via cross-compile) ----
           - label: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
+            kind: metal
             args: "--target aarch64-apple-darwin --features captions-metal"
           - label: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
+            kind: metal
             args: "--target x86_64-apple-darwin --features captions-metal"
 
-          # ---- Linux → cpu captions (native runners → deb + rpm + appimage) ----
-          - label: linux-x86_64
+          # ---- Linux → cpu + vulkan (native runners → deb + rpm + appimage) ----
+          - label: linux-x86_64-cpu
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            kind: cpu
             args: "--features captions"
-          - label: linux-arm64
+          - label: linux-x86_64-vulkan
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            kind: vulkan
+            args: "--features captions-vulkan"
+          - label: linux-arm64-cpu
             # GitHub-hosted arm64 Linux runner (free for public repos). For a private repo
             # without arm64 entitlement, swap this to a self-hosted arm64 runner.
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            kind: cpu
             args: "--features captions"
+          - label: linux-arm64-vulkan
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            kind: vulkan
+            args: "--features captions-vulkan"
 
-          # ---- Windows → cpu captions (x86_64 native); arm64 base-only (cross-compile) ----
-          - label: windows-x86_64
+          # ---- Windows → cpu + vulkan (x86_64 native); arm64 base-only (cross-compile) ----
+          - label: windows-x86_64-cpu
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            kind: cpu
             args: "--target x86_64-pc-windows-msvc --features captions"
+          - label: windows-x86_64-vulkan
+            # Pinned to VS 2022 (stable): the windows-latest → VS 2026 preview toolchain breaks
+            # ggml's nested vulkan-shaders-gen build (C1041 + parallel link races).
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            kind: vulkan
+            args: "--target x86_64-pc-windows-msvc --features captions-vulkan"
           - label: windows-arm64
             os: windows-latest
             target: aarch64-pc-windows-msvc
+            kind: base
             args: "--target aarch64-pc-windows-msvc"
             # No captions here (see continue-on-error note). Force the tauri.mjs wrapper's
             # auto-detect OFF so it doesn't enable the broken MSVC/ARM CPU backend.
@@ -154,6 +181,47 @@ jobs:
             libasound2-dev \
             clang libclang-dev
 
+      # ggml's Vulkan backend needs glslc/shaderc + the Vulkan headers/loader at build time.
+      - name: Install Vulkan SDK (Linux, vulkan backend)
+        if: matrix.kind == 'vulkan' && startsWith(matrix.os, 'ubuntu')
+        run: |
+          set -e
+          if [ "$(uname -m)" = "x86_64" ]; then
+            # LunarG ships glslc + current headers + loader for x86_64 via apt.
+            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+            sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list \
+              https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+            sudo apt-get update
+            sudo apt-get install -y vulkan-sdk
+          else
+            # arm64: no LunarG apt repo. Build glslc (the one build-time tool ggml needs) from
+            # shaderc source, and install recent Vulkan-Headers from source — Ubuntu 22.04's
+            # libvulkan-dev headers are too old for current ggml-vulkan (LayerSettingsEXT,
+            # CooperativeMatrixKHR, eMesaDozen, ...). The distro libvulkan loader is forward-
+            # compatible, so it stays for link/runtime.
+            sudo apt-get update
+            sudo apt-get install -y libvulkan-dev glslang-tools spirv-tools \
+              cmake ninja-build python3 git
+            git clone --depth 1 https://github.com/google/shaderc.git "$RUNNER_TEMP/shaderc"
+            (
+              cd "$RUNNER_TEMP/shaderc"
+              ./utils/git-sync-deps
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DSHADERC_SKIP_TESTS=ON \
+                -DSHADERC_SKIP_EXAMPLES=ON \
+                -DSHADERC_SKIP_COPYRIGHT_CHECK=ON
+              cmake --build build --target glslc_exe
+              sudo install -m755 build/glslc/glslc /usr/local/bin/glslc
+            )
+            git clone --depth 1 --branch vulkan-sdk-1.4.313.0 \
+              https://github.com/KhronosGroup/Vulkan-Headers.git "$RUNNER_TEMP/vulkan-headers"
+            cmake -S "$RUNNER_TEMP/vulkan-headers" -B "$RUNNER_TEMP/vulkan-headers/build"
+            sudo cmake --install "$RUNNER_TEMP/vulkan-headers/build"
+          fi
+          glslc --version || echo "::warning::glslc not found — ggml Vulkan shader-gen will fail"
+
       # whisper.cpp is built via CMake; macOS runners ship clang + the Metal toolchain
       # (xcrun metal) the metal backend needs, but not always cmake.
       - name: Install macOS build dependencies
@@ -168,6 +236,35 @@ jobs:
         run: |
           choco install llvm --no-progress -y
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      # Vulkan SDK (glslc + headers + loader) for the Windows vulkan backend.
+      - name: Install Vulkan SDK (Windows, vulkan backend)
+        if: matrix.kind == 'vulkan' && startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --no-progress -y
+          $sdk = (Get-ChildItem 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          echo "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          echo "$sdk\Bin" >> $env:GITHUB_PATH
+
+      # ggml builds a host tool `vulkan-shaders-gen` (GLSL→SPIR-V) as a nested CMake
+      # ExternalProject that, with the Visual Studio generator, fails to detect the compiler
+      # ("No CMAKE_C_COMPILER could be found"). Put the MSVC host (x64) toolchain on PATH AND
+      # force the Ninja generator so both the main and nested builds use cl.exe from PATH.
+      - name: Set up MSVC dev environment (Windows, vulkan backend)
+        if: matrix.kind == 'vulkan' && startsWith(matrix.os, 'windows')
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Force Ninja generator (Windows, vulkan backend)
+        if: matrix.kind == 'vulkan' && startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          choco install ninja --no-progress -y
+          echo "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
+          # /FS avoids MSVC C1041 (shared vc140.pdb) in the nested vulkan-shaders-gen build.
+          echo "CL=/FS" >> $env:GITHUB_ENV
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -184,36 +281,85 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: ${{ matrix.target }}
+          # kind in the key so cpu/vulkan builds of a target don't clobber each other.
+          key: ${{ matrix.target }}-${{ matrix.kind }}
 
       - name: Install frontend dependencies
         run: npm ci
 
+      # cpu / metal / base lanes: tauri-action builds AND uploads into the draft release by id.
       - name: Build and upload bundles
+        if: matrix.kind != 'vulkan'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # WebKitGTK DMABUF renderer crashes on some setups; harmless to set on CI.
           NO_STRIP: "true"
-          # tauri-action runs `npm run tauri build`, which goes through scripts/tauri.mjs.
-          # Lanes pass explicit `--features` so the wrapper passes them through untouched;
-          # windows-arm64 sets caps_env=0 to keep its auto-detect from enabling captions.
           GHOSTPEN_CAPTIONS: ${{ matrix.caps_env }}
-          # whisper-rs-sys forwards GGML_*/CMAKE_* env vars as CMake -D defines.
-          # GGML_NATIVE=OFF builds portable (non -march=native) binaries — correct for
-          # distributable artifacts, and it sidesteps the macOS/arm64 ggml i8mm-intrinsic
-          # build error (the CPU kernel used i8mm without enabling that target feature).
           GGML_NATIVE: "OFF"
-          # whisper.cpp's ggml-backend-reg.cpp uses std::filesystem, which needs a macOS 10.15+
-          # deployment target (the x86_64 cross-build otherwise fails with "operator!= is
-          # unavailable"). cmake-rs maps MACOSX_DEPLOYMENT_TARGET → CMAKE_OSX_DEPLOYMENT_TARGET,
-          # and whisper-rs-sys also forwards CMAKE_* defines. Harmless off macOS.
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
         with:
           # Upload into the one draft release created above — no per-job release creation.
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+
+      # vulkan lanes: build ONLY (no releaseId) — the cpu bundle owns the natural filenames, so
+      # the GPU bundles are renamed with a `-vulkan` suffix and uploaded separately below.
+      - name: Build bundles (vulkan, no upload)
+        if: matrix.kind == 'vulkan'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NO_STRIP: "true"
+          GGML_NATIVE: "OFF"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
+        with:
+          args: ${{ matrix.args }}
+
+      # Rename the Vulkan installers with a `-vulkan` marker and upload them into the draft
+      # release by id (gh release upload can't resolve a draft by tag; octokit by id can).
+      - name: Upload Vulkan bundles (renamed)
+        if: matrix.kind == 'vulkan'
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TARGET: ${{ matrix.target }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const releaseId = Number(process.env.RELEASE_ID);
+            const target = process.env.TARGET || '';
+            // Native builds bundle to target/release/bundle; --target builds to
+            // target/<triple>/release/bundle. Cover both.
+            const roots = [
+              path.join('src-tauri', 'target', target, 'release', 'bundle'),
+              path.join('src-tauri', 'target', 'release', 'bundle'),
+            ];
+            const exts = /\.(deb|rpm|AppImage|msi|exe)$/i;
+            const walk = (d) => {
+              if (!fs.existsSync(d)) return [];
+              return fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => {
+                const p = path.join(d, e.name);
+                return e.isDirectory() ? walk(p) : [p];
+              });
+            };
+            const files = [...new Set(roots.flatMap(walk))].filter((f) => exts.test(f));
+            if (!files.length) { core.setFailed('no vulkan bundles found to upload'); return; }
+            for (const f of files) {
+              const base = path.basename(f);
+              const dot = base.lastIndexOf('.');
+              const name = `${base.slice(0, dot)}-vulkan${base.slice(dot)}`;
+              core.info(`uploading ${name} (${(fs.statSync(f).size / 1e6).toFixed(1)} MB)`);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: releaseId,
+                name,
+                data: fs.readFileSync(f),
+              });
+            }
 
   # ---------------------------------------------------------------------------
   # 3. Publish the release once every platform has uploaded successfully.
