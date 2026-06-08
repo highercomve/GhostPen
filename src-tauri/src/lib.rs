@@ -41,6 +41,15 @@ impl AppState {
     }
 }
 
+/// Lock a mutex, recovering the guard if another thread poisoned it by panicking
+/// while holding it. The guarded values here are OS handles (PAL clipboard/input)
+/// and small flags; a prior panic doesn't corrupt them in any way that matters for
+/// the next clipboard op, and crashing the whole daemon (the `.unwrap()` default)
+/// is strictly worse. Honors Critical Rule #3 — never panic on an OS call.
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ---- DTOs returned to the frontend ---------------------------------------------------
 
 #[derive(Serialize)]
@@ -119,27 +128,36 @@ fn parse_hotkey(s: &str) -> Option<Shortcut> {
     code.map(|c| Shortcut::new(Some(mods), c))
 }
 
-/// Register the in-process global hotkey (Windows/macOS/X11). On Wayland this is a no-op —
-/// bind the key in the compositor to `ghostpen --trigger` instead (plan §10).
-fn register_hotkey(app: &AppHandle, hotkey: &str) {
+/// Register the in-process global hotkey (Windows/macOS/X11). On Wayland this is a no-op
+/// (returns `Ok`) — bind the key in the compositor to `ghostpen --trigger` instead (plan §10).
+///
+/// Returns `Err` with a user-readable message when the hotkey string is invalid or the OS
+/// refuses the binding (e.g. the combo is already grabbed by another app). Callers surface
+/// it: `save_settings` propagates it to the Settings UI; startup logs it.
+fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
     let session = {
         let state = app.state::<AppState>();
-        let pal = state.pal.lock().unwrap();
+        let pal = lock_recover(&state.pal);
         pal.session
     };
     if session.is_wayland() {
-        return;
+        return Ok(());
     }
     let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
-    if let Some(shortcut) = parse_hotkey(hotkey) {
-        let handle = app.clone();
-        let _ = gs.on_shortcut(shortcut, move |_app, _sc, event| {
-            if event.state() == ShortcutState::Pressed {
-                trigger_menu_flow(&handle);
-            }
-        });
+    // Clearing stale binds is best-effort: nothing registered yet is not an error.
+    if let Err(e) = gs.unregister_all() {
+        tracing::warn!("failed to clear existing global shortcuts: {e}");
     }
+    let shortcut =
+        parse_hotkey(hotkey).ok_or_else(|| format!("'{hotkey}' is not a valid hotkey"))?;
+    let handle = app.clone();
+    gs.on_shortcut(shortcut, move |_app, _sc, event| {
+        if event.state() == ShortcutState::Pressed {
+            trigger_menu_flow(&handle);
+        }
+    })
+    .map_err(|e| format!("could not register hotkey '{hotkey}': {e}"))?;
+    Ok(())
 }
 
 // ---- trigger flow --------------------------------------------------------------------
@@ -172,15 +190,19 @@ USAGE:
 
 FLAGS:
     --trigger       Show the action menu for the current selection. If GhostPen is
-                    already running, this is forwarded to the running daemon (bind
-                    this to a hotkey, e.g. Ctrl+Shift+A, in your compositor).
+                        already running, this is forwarded to the running daemon (bind
+                        this to a hotkey, e.g. Ctrl+Shift+A, in your compositor).
     --settings      Open the Settings window.
     --playground    Open the Playground window.
+    --tray          Run in system tray only, without showing the action menu. This
+                        is the default behavior; the flag just makes it explicit (handy
+                        in autostart entries / .desktop files).
     -h, --help      Print this help and exit.
     -V, --version   Print version and exit.
 
 With no flags, GhostPen starts as a background daemon (system tray + global hotkey
-on X11/Windows/macOS; on Wayland bind `ghostpen --trigger` in your compositor).
+on X11/Windows/macOS; on Wayland bind `ghostpen --trigger` in your compositor). The
+menu stays hidden until you trigger it.
 
 CONFIG:
     Settings live in the app's data dir (settings.json). The default AI backend is a
@@ -203,6 +225,7 @@ fn handle_help_version(args: &[String]) {
 
 /// Handle CLI args (used at first launch and forwarded by single-instance):
 /// `--trigger` shows the menu, `--playground` / `--settings` open those windows.
+/// `--tray` runs in background tray mode only (no menu).
 fn handle_cli_args(app: &AppHandle, args: &[String]) {
     if args.iter().any(|a| a == "--trigger") {
         trigger_menu_flow(app);
@@ -213,6 +236,9 @@ fn handle_cli_args(app: &AppHandle, args: &[String]) {
     if args.iter().any(|a| a == "--settings") {
         show_window(app, "settings");
     }
+    // --tray: explicit form of the default — run in background tray mode only,
+    // without showing the menu. The menu window starts hidden (tauri.conf.json
+    // `visible: false`), so this is a no-op kept for clarity in autostart entries.
 }
 
 /// System-tray icon: Show menu / Playground / Settings / Quit, plus left-click to summon.
@@ -260,13 +286,13 @@ fn trigger_menu_flow(app: &AppHandle) {
     let settings = load_settings(app);
     let state = app.state::<AppState>();
     {
-        let mut pal = state.pal.lock().unwrap();
+        let mut pal = lock_recover(&state.pal);
         if pal.use_synthetic(settings.force_synthetic) {
             let original = pal.clipboard.read_text().ok();
-            *state.saved_clipboard.lock().unwrap() = original;
+            *lock_recover(&state.saved_clipboard) = original;
             let _ = pal.input.copy();
         } else {
-            *state.saved_clipboard.lock().unwrap() = None;
+            *lock_recover(&state.saved_clipboard) = None;
         }
     }
     show_main(app);
@@ -318,7 +344,10 @@ fn get_settings(app: AppHandle) -> config::Settings {
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: config::Settings) -> Result<(), String> {
     persist_settings(&app, &settings)?;
-    register_hotkey(&app, &settings.hotkey);
+    // Settings are already saved; if the hotkey can't be bound, tell the user why
+    // (the Settings UI shows this) rather than failing silently.
+    register_hotkey(&app, &settings.hotkey)
+        .map_err(|e| format!("Settings saved, but the hotkey wasn't registered: {e}"))?;
     Ok(())
 }
 
@@ -331,7 +360,7 @@ async fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, 
 fn get_status(app: AppHandle) -> Status {
     let settings = load_settings(&app);
     let state = app.state::<AppState>();
-    let pal = state.pal.lock().unwrap();
+    let pal = lock_recover(&state.pal);
     let synthetic = pal.use_synthetic(settings.force_synthetic);
     let (profile, model) = settings
         .active()
@@ -351,14 +380,14 @@ fn get_status(app: AppHandle) -> Status {
 #[tauri::command]
 fn get_selection(app: AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
-    let mut pal = state.pal.lock().unwrap();
+    let mut pal = lock_recover(&state.pal);
     pal.clipboard.read_text().map_err(|e| e.to_string())
 }
 
 /// Try to mark the app busy; Err if a request is already in flight. Paired with `release_busy`.
 fn try_acquire_busy(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut busy = state.busy.lock().unwrap();
+    let mut busy = lock_recover(&state.busy);
     if *busy {
         return Err("Already processing a request…".into());
     }
@@ -368,7 +397,7 @@ fn try_acquire_busy(app: &AppHandle) -> Result<(), String> {
 
 fn release_busy(app: &AppHandle) {
     let state = app.state::<AppState>();
-    *state.busy.lock().unwrap() = false;
+    *lock_recover(&state.busy) = false;
 }
 
 #[tauri::command]
@@ -422,7 +451,7 @@ async fn process_inner(
     // Read the selection (the AI input). Never hold the PAL lock across an await.
     let selected = {
         let state = app.state::<AppState>();
-        let mut pal = state.pal.lock().unwrap();
+        let mut pal = lock_recover(&state.pal);
         pal.clipboard.read_text().map_err(|e| e.to_string())?
     };
     if selected.trim().is_empty() {
@@ -433,14 +462,14 @@ async fn process_inner(
 
     let synthetic = {
         let state = app.state::<AppState>();
-        let pal = state.pal.lock().unwrap();
+        let pal = lock_recover(&state.pal);
         pal.use_synthetic(settings.force_synthetic)
     };
 
     // Put the result on the clipboard.
     {
         let state = app.state::<AppState>();
-        let mut pal = state.pal.lock().unwrap();
+        let mut pal = lock_recover(&state.pal);
         pal.clipboard.write_text(&output).map_err(|e| e.to_string())?;
     }
 
@@ -451,13 +480,13 @@ async fn process_inner(
         }
         {
             let state = app.state::<AppState>();
-            let mut pal = state.pal.lock().unwrap();
+            let mut pal = lock_recover(&state.pal);
             let _ = pal.input.paste();
         }
         // Restore the user's original clipboard after the paste lands.
         let saved = {
             let state = app.state::<AppState>();
-            let taken = state.saved_clipboard.lock().unwrap().take();
+            let taken = lock_recover(&state.saved_clipboard).take();
             taken
         };
         if let Some(original) = saved {
@@ -466,11 +495,10 @@ async fn process_inner(
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 let state = app2.state::<AppState>();
-                let mut pal = match state.pal.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => return,
-                };
-                let _ = pal.clipboard.write_text(&original);
+                let mut pal = lock_recover(&state.pal);
+                if let Err(e) = pal.clipboard.write_text(&original) {
+                    tracing::warn!("failed to restore original clipboard: {e}");
+                }
             });
         }
         Ok(ProcessResult {
@@ -744,10 +772,15 @@ pub fn run() {
             // Persist defaults on first run so the store always has a valid shape.
             let settings = load_settings(&handle);
             let _ = persist_settings(&handle, &settings);
-            register_hotkey(&handle, &settings.hotkey);
+            if let Err(e) = register_hotkey(&handle, &settings.hotkey) {
+                tracing::warn!("global hotkey not registered: {e}");
+            }
             if let Err(e) = build_tray(&handle) {
                 tracing::warn!("system tray unavailable: {e}");
             }
+            // The menu window starts hidden (tauri.conf.json `visible: false`), so a
+            // bare launch (or `--tray`) stays in the background. Only an explicit
+            // --trigger/--settings/--playground reveals a window at startup.
             let args: Vec<String> = std::env::args().collect();
             handle_cli_args(&handle, &args);
             Ok(())

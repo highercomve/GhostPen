@@ -159,7 +159,12 @@ A second launch with a flag is forwarded into the running instance (no new proce
 ghostpen --trigger      # show the action menu
 ghostpen --playground   # open the Playground window
 ghostpen --settings     # open the Settings window
+ghostpen --tray         # background tray only (the default; explicit for autostart)
 ```
+
+A bare `ghostpen &` starts in the background with the menu hidden; it only appears when
+you trigger it. `--tray` is the same thing made explicit, handy in `.desktop`/autostart
+entries.
 
 ### Actions & intensity
 

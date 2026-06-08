@@ -111,7 +111,8 @@ esac
 cat <<NOTES
 
 GhostPen installed. Next steps:
-  - Start it:            ghostpen &        (runs as a tray daemon)
+  - Start it:            ghostpen &        (runs as a tray daemon; menu stays hidden)
+                         ghostpen --tray & (explicit form of the same, for autostart)
   - Trigger the overlay: ghostpen --trigger
   - X11/Win/macOS use the in-app hotkey (default Ctrl+Shift+A).
     On Wayland, bind it in your compositor, e.g. Hyprland:
