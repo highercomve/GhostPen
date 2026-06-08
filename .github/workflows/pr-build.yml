@@ -221,6 +221,10 @@ jobs:
           choco install ninja --no-progress -y
           # cmake-rs (whisper-rs-sys) honors CMAKE_GENERATOR; Ninja inherits cl.exe from PATH.
           echo "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
+          # Under Ninja, the nested vulkan-shaders-gen compiler check trips MSVC C1041
+          # ("cannot open program database vc140.pdb ... use /FS"). The CL env var prepends
+          # /FS (synchronous PDB writes) to every cl.exe invocation, which is the fix.
+          echo "CL=/FS" >> $env:GITHUB_ENV
 
       - name: Setup Node
         uses: actions/setup-node@v5
