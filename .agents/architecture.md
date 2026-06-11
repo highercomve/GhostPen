@@ -313,6 +313,48 @@ backend is mandatory there, with a persistent serve thread for clipboard ownersh
   is absent. The Settings → Captions device dropdown lets the user pick any source; "Auto"
   follows the default output. Validated end-to-end (monitor capture rms≈4.5k vs 0 on the mic).
 
+### ADR-009: UI direction — result-preview palette + OS-convention captions overlay
+- **Status**: Accepted (design; implementation tracked as TODO Phase 12)
+- **Context**: A UI review (2026-06-11) compared GhostPen's two surfaces against their
+  OS-native equivalents — Apple Intelligence Writing Tools, Windows Click to Do / PowerToys
+  Advanced Paste, Grammarly, Raycast AI for the action menu; Windows 11 / macOS / Android /
+  Chrome Live Captions plus BBC/Netflix/WCAG subtitle conventions for the captions overlay.
+  Full sourced findings and the gap analysis live in [`ui-review.md`](./ui-review.md).
+- **Decision**:
+  1. **Keep the centered summoned palette.** Near-selection anchoring requires owning the
+     text stack (Apple), per-app injection (Grammarly), or being the compositor (Click to
+     Do); on Wayland clients can't read selection/cursor coordinates at all. Launchers
+     (Raycast/KRunner/GNOME search) chose centered even where positioning is possible.
+     Centered is the *correct* cross-platform pattern, not a fallback.
+  2. **Never paste generative output without showing it first.** Split the action flow into
+     *generate* (streams into a result view in the palette; no clipboard side effects) and
+     *apply* (clipboard write → hide → paste → restore, on explicit confirm — Enter). Every
+     surveyed product previews before committing; blind paste is GhostPen's one real
+     divergence from the field. Manual mode's "apply" remains copy + paste-hint. The
+     clipboard contract (ADR-003) and degradation rules (ADR-005) are unchanged — apply is
+     the same code path, just user-gated.
+  3. **Prompt bar moves to the top of the palette and doubles as a fuzzy filter** over the
+     action list (typing filters; Enter with no match runs as a custom instruction —
+     Raycast/Advanced Paste pattern). Numbered badges surface the existing 1–9 shortcuts.
+  4. **Captions overlay adopts the cross-OS conventions**: chromeless-until-hover controls
+     (macOS), auto-hide on silence with a "Keep onscreen" pin (macOS/Android), drag +
+     position memory + restore-default (all four OS captioners; FCC "don't block content"),
+     progressive partial captions with a faded unstable tail that never backtracks (Azure
+     stable-partial guidance, GNOME LiveCaptions confidence fading), 2-line/~42-char
+     subtitle discipline, and user-stylable caption presets (CEA-708 spirit) behind a gear
+     *inside* the overlay (Windows pattern).
+  5. **Rejected**: popup-near-selection (impossible on Wayland, weaker pattern anyway);
+     always-on ambient widget (Grammarly's defining complaint); auto-apply as default
+     (acceptable only as a later opt-in "Quick Fix" hotkey); Windows-style docked
+     reserved-space captions (per-OS work-area APIs not worth it vs. floating+drag).
+- **Consequences**: One extra keypress (Enter to paste) on the happy path, traded for
+  discardable wrong results — a wrong completion now costs Esc instead of an undo in the
+  target app. Backend gains a generate/apply split and a partial-caption event
+  (`ghostpen://caption-partial`); partial re-transcription raises CPU use while captioning
+  (bounded by re-decoding only the open window). Wayland keeps compositor-side placement
+  for the captions window (documented Hyprland rule + tray "reset position" escape hatch).
+  Prioritized roadmap (P1–P3) in `ui-review.md` §5; tracked as TODO Phase 12.
+
 ## Plan Review (review of `plan.md`)
 
 ### Strengths
@@ -533,4 +575,4 @@ scale.
 5. **Re-run the §12 testing checklist per platform**, expanded with the rows above.
 
 ---
-*Last updated: 2026-06-04*
+*Last updated: 2026-06-11*

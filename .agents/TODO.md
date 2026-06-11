@@ -206,6 +206,36 @@ Cargo feature** (default off) so the default build + release CI are untouched.
 - [ ] **11.10** Follow-ups: overlap/VAD chunking; macOS ScreenCaptureKit to avoid BlackHole;
       fold `--features captions` into the tagged `release.yml` once the PR lane is proven green.
 
+## Phase 12 — UI revamp (ADR-009, [`ui-review.md`](./ui-review.md)) — design accepted, not yet implemented
+
+Ordered by the roadmap in `ui-review.md` §5. Honor the validation criteria there (wrong
+result discardable via Esc with document+clipboard untouched; solid caption text never
+backtracks; menu fully keyboard-completable).
+
+- [ ] **12.1 (P1.1)** Result preview before paste: split `process_ai_action` into
+      *generate* (streams via `ghostpen://chunk` into a palette result view, no clipboard
+      side effects) and *apply* (clipboard→hide→paste→restore on Enter). Result view keys:
+      Enter paste · C copy · R retry · E edit instruction · Esc back. Manual mode: apply =
+      copy + Ctrl+V hint.
+- [ ] **12.2 (P1.2)** Prompt bar → top of palette, dual-purpose (fuzzy-filters actions;
+      Enter with no match = custom instruction). Focused on open; ↓ enters the list;
+      numbered badges for the existing 1–9 shortcuts. Resize `main` window to palette
+      shape (~520×420).
+- [ ] **12.3 (P1.3)** Captions: chromeless-until-hover control bar (ghost mode unchanged;
+      tray remains the escape hatch).
+- [ ] **12.4 (P1.4)** Captions: auto-fade pill after ~6 s silence, fade back in on next
+      caption; "Keep onscreen" pin in the control bar (CSS-only, window stays mapped).
+- [ ] **12.5 (P2.1)** Partial captions: emit `ghostpen://caption-partial` (re-transcribe
+      open window ~every 0.5–1 s), render unstable tail faded; solid text never changes.
+      Pairs with 11.10 overlap/VAD.
+- [ ] **12.6 (P2.2)** Inline word-diff for Proofread in the result view.
+- [ ] **12.7 (P2.3)** Captions drag (`data-tauri-drag-region` on pill) + position memory
+      (Win/macOS/X11) + tray "Reset captions position"; document Hyprland placement rule.
+- [ ] **12.8 (P2.4)** Caption style presets (white-on-black default, yellow-on-black,
+      large) + size/opacity, in a gear popover inside the overlay; persisted in settings.
+- [ ] **12.9 (P3)** Tabbed Settings + auto-save · opt-in no-UI "Quick Fix" hotkey ·
+      expandable caption history + ~42-char line shaping.
+
 ### Remaining / next
 - [ ] **8.7** per-platform test matrix (Windows, macOS, Linux/X11).
 - [ ] **6.x** verify the in-process global hotkey on X11/Windows/macOS (Wayland uses the
