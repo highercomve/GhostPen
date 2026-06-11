@@ -9,6 +9,13 @@
   --accent-soft: #2b3354;
   --danger: #ff6b6b;
   --ok: #62d39a;
+  /* Glass HUD: an opaque fallback (--glass-solid) sits under the translucent fill
+     (--glass-fill). On compositors without alpha the solid color shows through, so the
+     panel stays legible (overlay opaque-fallback rule). */
+  --glass-solid: #16181d;
+  --glass-fill: rgba(28, 31, 39, 0.72);
+  --glass-tile: rgba(40, 44, 54, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.10);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color-scheme: light dark;
 }
@@ -26,6 +33,10 @@
     --accent-soft: #e7edff;
     --danger: #d64545;
     --ok: #1a9d5f;
+    --glass-solid: #f4f5f8;
+    --glass-fill: rgba(255, 255, 255, 0.72);
+    --glass-tile: rgba(255, 255, 255, 0.55);
+    --glass-border: rgba(0, 0, 0, 0.08);
   }
 }
 
@@ -49,116 +60,169 @@ kbd {
   font-size: 11px;
 }
 
-/* ---------- Menu (compact overlay) ---------- */
+/* ---------- Glass HUD action menu ---------- */
 
-.menu {
+.hud {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  gap: 10px;
+  padding: 12px;
   overflow: hidden;
-  padding: 10px;
-  gap: 8px;
+  border-radius: 20px;
+  /* Opaque fallback first, then the translucent frosted fill layered on top. */
+  background: var(--glass-solid);
+  background: var(--glass-fill);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
-.menu-head {
+.hud-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
 }
 
-.brand { font-weight: 700; letter-spacing: 0.3px; }
+.brand { font-weight: 700; letter-spacing: 0.3px; font-size: 13px; }
+
+.head-btns { display: flex; align-items: center; gap: 4px; }
+
+.dest-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--glass-tile);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  max-width: 150px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.dest-chip code { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
 
 .icon-btn {
   background: transparent;
   border: none;
   color: var(--muted);
-  font-size: 16px;
+  font-size: 15px;
   cursor: pointer;
   border-radius: 8px;
-  padding: 4px 8px;
+  padding: 3px 6px;
 }
-.icon-btn:hover { background: var(--bg-elev); color: var(--text); }
-
-.dest {
-  font-size: 12px;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.dest code { color: var(--text); }
+.icon-btn:hover { background: var(--glass-tile); color: var(--text); }
 
 .badge {
   background: var(--accent-soft);
   color: var(--accent);
   border-radius: 6px;
-  padding: 1px 6px;
-  font-size: 10px;
+  padding: 1px 5px;
+  font-size: 9px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
-.selection {
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
+.hud-hint {
   font-size: 12px;
-  color: var(--text);
-  min-height: 38px;
-  max-height: 64px;
-  overflow: hidden;
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  padding: 2px 4px;
 }
-.selection.empty { color: var(--muted); font-style: italic; }
 
-.actions {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+/* Icon-forward grid of action tiles (2–3 columns). */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  align-content: start;
 }
 
-.action {
+.tile {
+  position: relative;
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 9px 12px;
+  justify-content: center;
+  gap: 6px;
+  aspect-ratio: 1 / 1;
+  min-height: 78px;
+  background: var(--glass-tile);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
   color: var(--text);
   cursor: pointer;
-  text-align: left;
-  transition: background 0.12s, border-color 0.12s;
+  padding: 8px 4px;
+  transition: background 0.12s, border-color 0.12s, transform 0.08s;
 }
-.action:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
-.action.selected:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
-.action:disabled { opacity: 0.45; cursor: not-allowed; }
-.action-icon { flex: none; color: var(--muted); }
-.action:hover:not(:disabled) .action-icon,
-.action.selected:not(:disabled) .action-icon { color: var(--accent); }
-.action-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.action-label { font-weight: 600; }
-.action-hint { font-size: 11px; color: var(--muted); }
-.action.small { flex-direction: row; padding: 6px 12px; }
+.tile:hover:not(:disabled),
+.tile.selected:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.tile.selected:not(:disabled) { transform: translateY(-1px); }
+.tile:disabled { opacity: 0.4; cursor: not-allowed; }
+.tile-icon { width: 22px; height: 22px; color: var(--muted); }
+.tile:hover:not(:disabled) .tile-icon,
+.tile.selected:not(:disabled) .tile-icon { color: var(--accent); }
+.tile-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tile-num {
+  position: absolute;
+  top: 5px;
+  left: 7px;
+  font-size: 9px;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+}
 
-/* Freeform instruction bar (Google-style) pinned at the bottom of the menu. */
+/* Bottom row: intensity dots + compact prompt bar. */
+.hud-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.intensity { display: flex; gap: 5px; flex: none; padding: 0 2px; }
+.int-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--muted);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.12s, border-color 0.12s, transform 0.08s;
+}
+.int-dot:hover { border-color: var(--accent); }
+.int-dot.active { background: var(--accent); border-color: var(--accent); transform: scale(1.15); }
+
 .prompt-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: none;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 4px 4px 4px 12px;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  background: var(--glass-tile);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 3px 3px 3px 12px;
 }
 .prompt-bar:focus-within { border-color: var(--accent); }
 .prompt-input {
@@ -168,8 +232,8 @@ kbd {
   border: none;
   outline: none;
   color: var(--text);
-  font-size: 13px;
-  padding: 7px 0;
+  font-size: 12px;
+  padding: 5px 0;
 }
 .prompt-input::placeholder { color: var(--muted); }
 .prompt-input:disabled { cursor: not-allowed; }
@@ -178,10 +242,10 @@ kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border: none;
-  border-radius: 8px;
+  border-radius: 50%;
   background: var(--accent);
   color: #fff;
   cursor: pointer;
@@ -190,24 +254,28 @@ kbd {
 .prompt-send:hover:not(:disabled) { filter: brightness(1.1); }
 .prompt-send:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* Translate sub-view: a glassy language grid. */
 .lang-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
   overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 .lang {
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px;
+  background: var(--glass-tile);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 9px;
   color: var(--text);
   cursor: pointer;
+  font-size: 12px;
 }
-.lang:hover { background: var(--accent-soft); border-color: var(--accent); }
-.lang.selected { background: var(--accent-soft); border-color: var(--accent); }
+.lang:hover, .lang.selected { background: var(--accent-soft); border-color: var(--accent); }
 .lang.back { grid-column: 1 / -1; color: var(--muted); }
 
+/* States: loading / result confirmation / error — tiny, glassy, centered. */
 .state {
   flex: 1;
   display: flex;
@@ -216,38 +284,59 @@ kbd {
   justify-content: center;
   gap: 10px;
   text-align: center;
+  min-height: 0;
 }
-.state.result, .state.error { justify-content: flex-start; align-items: stretch; }
+.state.confirm, .state.error { justify-content: flex-start; }
 .state-label { font-weight: 600; }
-.state-label.ok { color: var(--ok); }
 .state-label.bad { color: var(--danger); }
-.hint { font-size: 12px; color: var(--muted); }
+.hint { font-size: 11px; color: var(--muted); }
+
+.confirm-mark {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ok);
+  margin-top: 6px;
+}
 
 .output {
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  width: 100%;
+  background: var(--glass-tile);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
   padding: 8px 10px;
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 200px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   margin: 0;
+  text-align: left;
 }
 
-.row { display: flex; gap: 8px; align-items: center; }
+.row { display: flex; gap: 8px; align-items: center; justify-content: center; }
+
+.ghost-btn {
+  background: var(--glass-tile);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 5px 16px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+.ghost-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 .spinner {
   width: 26px; height: 26px;
-  border: 3px solid var(--border);
+  border: 3px solid var(--glass-border);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---------- Settings ---------- */
+/* ---------- Settings (glassy, compact) ---------- */
 
 .settings {
   background: var(--bg);
@@ -257,15 +346,15 @@ kbd {
   margin: 0 auto;
 }
 .settings.loading-page { display: flex; align-items: center; justify-content: center; color: var(--muted); }
-.settings h1 { font-size: 20px; margin: 0 0 16px; }
-.settings h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.settings h1 { font-size: 19px; margin: 0 0 16px; }
+.settings h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
 .card {
   background: var(--bg-soft);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 14px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .diag-grid {
@@ -280,8 +369,8 @@ kbd {
 .tab {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 5px 10px;
+  border-radius: 999px;
+  padding: 4px 12px;
   color: var(--text);
   cursor: pointer;
   font-size: 13px;
@@ -296,7 +385,7 @@ label.checkbox { flex-direction: row; align-items: center; gap: 8px; }
 input, select {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 7px 9px;
   color: var(--text);
   font-size: 13px;
@@ -309,7 +398,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .card textarea {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 7px 9px;
   color: var(--text);
   font: inherit;
@@ -336,7 +425,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .btn {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 999px;
   padding: 7px 14px;
   color: var(--text);
   cursor: pointer;
@@ -346,6 +435,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #0b0e16; font-weight: 600; }
 .btn.danger { color: var(--danger); border-color: transparent; align-self: flex-start; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .footer {
   display: flex;
@@ -357,36 +447,9 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   padding-top: 8px;
 }
 
-.head-btns { display: flex; gap: 2px; }
+.row { display: flex; gap: 8px; align-items: center; }
 
-/* ---------- Intensity level segmented control ---------- */
-
-.level { display: flex; align-items: center; gap: 8px; }
-.level-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
-.seg {
-  display: flex;
-  flex: 1;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 2px;
-  gap: 2px;
-}
-.seg-btn {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  font-size: 11px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
-}
-.seg-btn:hover { color: var(--text); }
-.seg-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-
-/* ---------- Playground ---------- */
+/* ---------- Playground (glassy) ---------- */
 
 .playground {
   background: var(--bg);
@@ -398,11 +461,13 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 }
 .pg-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .pg-head h1 { font-size: 18px; margin: 0; }
+.dest { font-size: 12px; color: var(--muted); }
+.dest code { color: var(--text); }
 .pg-label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
 .pg-area {
   background: var(--bg-soft);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 14px;
   color: var(--text);
   font-size: 13px;
   padding: 10px 12px;
@@ -421,16 +486,42 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   background: rgba(255, 107, 107, 0.12);
   border: 1px solid var(--danger);
   color: var(--danger);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 8px 10px;
   font-size: 13px;
 }
 .pg-footer { display: flex; gap: 8px; }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-/* ---- Live captions overlay (ADR-008) ----------------------------------------------- */
-/* The window is transparent + click-through capable; the caption pill is semi-opaque so it
-   stays legible even on a compositor without alpha (opaque fallback per the overlay rules). */
+/* ---------- Intensity segmented control (Playground / shared LevelBar) ---------- */
+
+.level { display: flex; align-items: center; gap: 8px; }
+.level-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.seg {
+  display: flex;
+  flex: 1;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+  gap: 2px;
+}
+.seg-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* ---- Live captions overlay (ADR-008) — chromeless, hover-reveal, auto-hide ---------- */
+/* The window is transparent + click-through capable. The caption text bar is OPAQUE
+   (load-bearing wlroots repaint rule); the control bar is glassy and only fades in on hover. */
 .captions {
   height: 100%;
   display: flex;
@@ -441,30 +532,47 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   user-select: none;
 }
 
+/* Control bar: hidden by default, fades in only when the user hovers the overlay (macOS).
+   It floats above the bottom-docked caption text via flex order. */
 .cap-bar {
-  /* Controls dock at the BOTTOM; caption lines stack on top of them (order below), so text
-     always hugs the bottom edge near the controls instead of floating mid-window. */
   order: 2;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 4px 8px;
+  justify-content: center;
+  gap: 4px;
+  align-self: center;
+  background: var(--glass-fill);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 4px 6px;
   font-size: 12px;
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
 }
-.cap-brand { color: var(--muted); font-weight: 600; }
-.cap-controls { display: flex; gap: 4px; }
+.captions:hover .cap-bar {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
 .cap-btn {
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-tile);
   color: var(--text);
-  border-radius: 6px;
-  padding: 3px 8px;
+  border-radius: 999px;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 9px;
   font-size: 12px;
   cursor: pointer;
 }
+.cap-btn svg { width: 14px; height: 14px; }
 .cap-btn:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
 .cap-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .cap-btn.stop { color: var(--danger); border-color: var(--danger); }
@@ -478,13 +586,16 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   justify-content: flex-end;
   min-height: 0;
   flex: 1;
+  transition: opacity 0.6s ease;
 }
+/* Auto-hide on silence: fade the pill out (window stays mapped — no Wayland focus churn). */
+.cap-stage.faded { opacity: 0; }
 
 /* All caption lines share ONE opaque, content-sized bar docked at the bottom.
    The opaque backdrop is load-bearing on wlroots/WebKitGTK: a transparent webview window
    does NOT clear the previous frame, so translucent per-line pills accumulate into an
    unreadable smear (the caption "ghosting" bug). A solid bar fully repaints on every update,
-   while the rest of the window stays transparent/see-through. */
+   while the rest of the window stays transparent/see-through. Do NOT add blur/alpha here. */
 .cap-lines {
   display: flex;
   flex-direction: column;
@@ -492,9 +603,10 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   gap: 2px;
   max-width: 96%;
   padding: 8px 16px;
-  border-radius: 12px;
+  border-radius: 14px;
   background: #0b0d11;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
+  cursor: grab;
 }
 
 /* A subtitle line: white text with a strong shadow for contrast over the bar. */
@@ -523,7 +635,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   color: var(--muted);
   background: #0b0d11;
   padding: 6px 14px;
-  border-radius: 10px;
+  border-radius: 12px;
 }
 .cap-error { color: var(--danger); }
 

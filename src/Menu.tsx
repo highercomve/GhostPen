@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import LevelBar from "./LevelBar";
 import { Icon, IconName } from "./icons";
 import {
   Status,
@@ -25,24 +24,20 @@ type View =
   | { kind: "result"; result: ProcessResult }
   | { kind: "error"; message: string };
 
-const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
-  { id: "proofread", label: "Proofread", hint: "Fix spelling & grammar", icon: "proofread" },
-  { id: "professional", label: "Professional", hint: "Rewrite polished & clear", icon: "professional" },
-  { id: "casual", label: "Casual", hint: "Friendly, conversational", icon: "casual" },
-  { id: "concise", label: "Concise", hint: "Condense, keep meaning", icon: "concise" },
-  { id: "expand", label: "Expand", hint: "Add detail & elaborate", icon: "expand" },
+const ACTIONS: { id: string; label: string; icon: IconName }[] = [
+  { id: "proofread", label: "Proofread", icon: "proofread" },
+  { id: "professional", label: "Pro", icon: "professional" },
+  { id: "casual", label: "Casual", icon: "casual" },
+  { id: "concise", label: "Concise", icon: "concise" },
+  { id: "expand", label: "Expand", icon: "expand" },
 ];
 
 const LEVELS: Level[] = ["subtle", "balanced", "strong"];
-
-// Cycle the intensity level by `dir` (+1 / -1), clamped (no wrap).
-function shiftLevel(level: Level, dir: number): Level {
-  const i = LEVELS.indexOf(level);
-  return LEVELS[Math.min(LEVELS.length - 1, Math.max(0, i + dir))];
-}
+// Number of tile columns in the action grid; load-bearing for grid keyboard navigation.
+const COLS = 3;
 
 // True when a keyboard event originates from a text field — so global menu shortcuts
-// (arrows, Enter, 1–9, j/k/h/l) don't fire while the user is typing in the prompt bar.
+// (arrows, Enter, 1–9) don't fire while the user is typing in the prompt bar.
 function isTypingTarget(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
 }
@@ -53,10 +48,10 @@ export default function Menu() {
   const [customActions, setCustomActions] = useState<CustomAction[]>([]);
   const [level, setLevel] = useState<Level>("balanced");
   const [view, setView] = useState<View>({ kind: "menu" });
-  // Keyboard cursor: index into `menuItems` (menu view) and into the language grid (translate view).
+  // Keyboard cursor: index into `menuItems` (menu grid) and into the language grid (translate view).
   const [cursor, setCursor] = useState(0);
   const [langCursor, setLangCursor] = useState(0);
-  // Freeform instruction typed in the prompt bar.
+  // Freeform instruction typed in the compact prompt bar.
   const [prompt, setPrompt] = useState("");
 
   const refresh = useCallback(async () => {
@@ -77,6 +72,8 @@ export default function Menu() {
     }
   }, []);
 
+  // Instant apply (Glass HUD differentiator): run the action and show the existing
+  // loading → result/copied states. No preview-before-paste — speed over ceremony.
   const run = useCallback(
     async (action: string, targetLang: string | null, label: string) => {
       setView({ kind: "loading", label });
@@ -106,21 +103,19 @@ export default function Menu() {
     }
   }, [prompt, empty]);
 
-  // Flat, ordered list of selectable menu items — the single source of truth for both
+  // Flat, ordered list of selectable tiles — the single source of truth for both
   // rendering and keyboard navigation, so the cursor index always matches what's on screen.
   const menuItems = useMemo(() => {
-    const items: { id: string; label: string; hint: string; icon: IconName; activate: () => void }[] =
+    const items: { id: string; label: string; icon: IconName; activate: () => void }[] =
       ACTIONS.map((a) => ({
         id: a.id,
         label: a.label,
-        hint: a.hint,
         icon: a.icon,
         activate: () => run(a.id, null, a.label),
       }));
     items.push({
       id: "__translate",
-      label: "Translate →",
-      hint: "Into another language",
+      label: "Translate",
       icon: "translate",
       activate: () => setView({ kind: "translate" }),
     });
@@ -128,7 +123,6 @@ export default function Menu() {
       items.push({
         id: a.id,
         label: a.label,
-        hint: "Custom action",
         icon: "custom",
         activate: () => run(a.id, null, a.label),
       });
@@ -204,8 +198,9 @@ export default function Menu() {
     return () => window.removeEventListener("keydown", onKey);
   }, [view]);
 
-  // Menu view: ↑/↓ (or j/k) move the cursor, ←/→ (or h/l) change intensity, Enter activates,
-  // and 1–9 jump to and run an action directly.
+  // Menu grid: ←/→ move across columns, ↑/↓ move across rows (grid navigation), Enter
+  // activates the focused tile, and 1–9 jump to and run a tile directly. Intensity is
+  // adjusted with the inline control / mouse in this compact layout.
   useEffect(() => {
     if (view.kind !== "menu") return;
     const n = menuItems.length;
@@ -213,25 +208,21 @@ export default function Menu() {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return; // don't hijack keys while typing in the prompt bar
       switch (e.key) {
-        case "ArrowDown":
-        case "j":
+        case "ArrowRight":
           e.preventDefault();
-          setCursor((c) => (c + 1) % n);
-          break;
-        case "ArrowUp":
-        case "k":
-          e.preventDefault();
-          setCursor((c) => (c - 1 + n) % n);
+          setCursor((c) => Math.min(n - 1, c + 1));
           break;
         case "ArrowLeft":
-        case "h":
           e.preventDefault();
-          setLevel((lv) => shiftLevel(lv, -1));
+          setCursor((c) => Math.max(0, c - 1));
           break;
-        case "ArrowRight":
-        case "l":
+        case "ArrowDown":
           e.preventDefault();
-          setLevel((lv) => shiftLevel(lv, 1));
+          setCursor((c) => (c + COLS < n ? c + COLS : c));
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          setCursor((c) => (c - COLS >= 0 ? c - COLS : c));
           break;
         case "Enter":
           e.preventDefault();
@@ -256,29 +247,25 @@ export default function Menu() {
   useEffect(() => {
     if (view.kind !== "translate") return;
     const n = langItems.length;
-    const COLS = 2;
+    const LCOLS = 2;
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return;
       switch (e.key) {
         case "ArrowRight":
-        case "l":
           e.preventDefault();
           setLangCursor((c) => Math.min(n - 1, c + 1));
           break;
         case "ArrowLeft":
-        case "h":
           e.preventDefault();
           setLangCursor((c) => Math.max(0, c - 1));
           break;
         case "ArrowDown":
-        case "j":
           e.preventDefault();
-          setLangCursor((c) => Math.min(n - 1, c + COLS));
+          setLangCursor((c) => Math.min(n - 1, c + LCOLS));
           break;
         case "ArrowUp":
-        case "k":
           e.preventDefault();
-          setLangCursor((c) => Math.max(0, c - COLS));
+          setLangCursor((c) => Math.max(0, c - LCOLS));
           break;
         case "Enter":
           e.preventDefault();
@@ -290,17 +277,23 @@ export default function Menu() {
     return () => window.removeEventListener("keydown", onKey);
   }, [view.kind, langItems, langCursor]);
 
-  // Scroll the active item into view as the cursor moves through a long list.
+  // Scroll the active item into view as the cursor moves.
   const cursorRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     cursorRef.current?.scrollIntoView({ block: "nearest" });
   }, [cursor, langCursor, view.kind]);
 
   return (
-    <div className="menu">
-      <header className="menu-head">
+    <div className="hud">
+      <header className="hud-head" data-tauri-drag-region>
         <span className="brand">GhostPen</span>
         <span className="head-btns">
+          {status && (
+            <span className="dest-chip" title="Active AI destination">
+              <code>{status.active_model}</code>
+              {status.manual_mode && <span className="badge">manual</span>}
+            </span>
+          )}
           <button className="icon-btn" title="Playground" onClick={() => openPlayground()}>
             🧪
           </button>
@@ -310,68 +303,69 @@ export default function Menu() {
         </span>
       </header>
 
-      {status && (
-        <div className="dest" title="Active AI destination">
-          → {status.active_profile} · <code>{status.active_model}</code>
-          {status.manual_mode && <span className="badge">manual</span>}
-        </div>
-      )}
-
       {view.kind === "menu" && (
         <>
-          <div className={`selection ${empty ? "empty" : ""}`}>
-            {empty ? (
-              status?.manual_mode ? (
-                "Copy some text (Ctrl+C), then pick an action."
-              ) : (
-                "No text selected."
-              )
-            ) : (
-              <span>{selection.length > 140 ? selection.slice(0, 140) + "…" : selection}</span>
-            )}
-          </div>
-          <LevelBar level={level} setLevel={setLevel} />
-          <div className="actions">
+          {empty && (
+            <div className="hud-hint">
+              {status?.manual_mode
+                ? "Copy some text (Ctrl+C), then pick an action."
+                : "No text selected."}
+            </div>
+          )}
+          <div className="tile-grid" role="menu">
             {menuItems.map((a, i) => (
               <button
                 key={a.id}
                 ref={i === cursor ? cursorRef : undefined}
-                className={`action ${i === cursor ? "selected" : ""}`}
+                className={`tile ${i === cursor ? "selected" : ""}`}
                 disabled={empty}
                 onClick={() => a.activate()}
                 onMouseEnter={() => setCursor(i)}
+                title={a.label}
               >
-                <Icon name={a.icon} className="action-icon" />
-                <span className="action-text">
-                  <span className="action-label">{a.label}</span>
-                  <span className="action-hint">{a.hint}</span>
-                </span>
+                {i < 9 && <span className="tile-num">{i + 1}</span>}
+                <Icon name={a.icon} className="tile-icon" />
+                <span className="tile-label">{a.label}</span>
               </button>
             ))}
           </div>
-          <form
-            className="prompt-bar"
-            onSubmit={(e) => {
-              e.preventDefault();
-              runCustom();
-            }}
-          >
-            <input
-              className="prompt-input"
-              value={prompt}
-              disabled={empty}
-              placeholder={empty ? "Select text first…" : "Tell GhostPen what to do…"}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-            <button
-              type="submit"
-              className="prompt-send"
-              disabled={empty || prompt.trim().length === 0}
-              title="Run instruction (Enter)"
+
+          <div className="hud-foot">
+            <div className="intensity" title="Intensity">
+              {LEVELS.map((l) => (
+                <button
+                  key={l}
+                  className={`int-dot ${level === l ? "active" : ""}`}
+                  onClick={() => setLevel(l)}
+                  title={l[0].toUpperCase() + l.slice(1)}
+                  aria-label={`Intensity: ${l}`}
+                />
+              ))}
+            </div>
+            <form
+              className="prompt-bar"
+              onSubmit={(e) => {
+                e.preventDefault();
+                runCustom();
+              }}
             >
-              <Icon name="send" />
-            </button>
-          </form>
+              <input
+                className="prompt-input"
+                value={prompt}
+                disabled={empty}
+                placeholder={empty ? "Select text first…" : "Tell GhostPen…"}
+                onChange={(e) => setPrompt(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="prompt-send"
+                disabled={empty || prompt.trim().length === 0}
+                title="Run instruction (Enter)"
+              >
+                <Icon name="send" />
+              </button>
+            </form>
+          </div>
         </>
       )}
 
@@ -399,19 +393,21 @@ export default function Menu() {
       )}
 
       {view.kind === "result" && (
-        <div className="state result">
-          <div className="state-label ok">
-            {view.result.pasted ? "✓ Pasted" : "✓ Result copied"}
+        <div className="state confirm">
+          <div className="confirm-mark">
+            {view.result.pasted ? "✓ Pasted" : "✓ Copied"}
           </div>
           {!view.result.pasted && (
-            <div className="hint">On the clipboard — press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.</div>
+            <div className="hint">
+              On the clipboard — press <kbd>Ctrl</kbd>+<kbd>V</kbd>.
+            </div>
           )}
           <pre className="output">{view.result.output}</pre>
           <div className="row">
-            <button className="action small" onClick={() => setView({ kind: "menu" })}>
+            <button className="ghost-btn" onClick={() => setView({ kind: "menu" })}>
               Back
             </button>
-            <button className="action small" onClick={() => hideWindow()}>
+            <button className="ghost-btn" onClick={() => hideWindow()}>
               Close
             </button>
           </div>
@@ -421,7 +417,7 @@ export default function Menu() {
       {view.kind === "error" && (
         <div className="state error">
           <div className="state-label bad">⚠ {view.message}</div>
-          <button className="action small" onClick={() => setView({ kind: "menu" })}>
+          <button className="ghost-btn" onClick={() => setView({ kind: "menu" })}>
             Back
           </button>
         </div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Icon } from "./icons";
 import {
   Caption,
   CaptionsStatus,
@@ -21,6 +22,8 @@ interface Line {
 
 // How many recent caption lines to keep on screen (subtitle convention: 1–2 lines).
 const MAX_LINES = 2;
+// Fade the pill out after this long without a new caption (macOS/Android auto-hide).
+const SILENCE_MS = 6000;
 
 export default function Captions() {
   const [lines, setLines] = useState<Line[]>([]);
@@ -29,7 +32,13 @@ export default function Captions() {
   // "Ghost" = click-through: the mouse passes through to the video/meeting underneath.
   const [ghost, setGhost] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Auto-hide on silence: the pill fades out after SILENCE_MS, back in on the next caption.
+  // The window stays mapped throughout — this is a pure CSS opacity transition, no show/hide.
+  const [silent, setSilent] = useState(false);
+  // "Keep onscreen" pin disables the silence auto-hide (macOS "Keep Onscreen").
+  const [pinned, setPinned] = useState(false);
   const nextId = useRef(0);
+  const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshStatus = async () => {
     try {
@@ -51,12 +60,20 @@ export default function Captions() {
     })();
   }, []);
 
+  // (Re)arm the silence timer whenever a caption arrives.
+  const bumpSilence = () => {
+    setSilent(false);
+    if (silenceTimer.current) clearTimeout(silenceTimer.current);
+    silenceTimer.current = setTimeout(() => setSilent(true), SILENCE_MS);
+  };
+
   // Stream captions in.
   useEffect(() => {
     const un1 = listen<Caption>("ghostpen://caption", (e) => {
       const { text, translated } = e.payload;
       if (!text.trim()) return;
       setError(null);
+      bumpSilence();
       setLines((prev) => {
         const next = [...prev, { id: nextId.current++, text, translated }];
         return next.slice(-MAX_LINES);
@@ -64,16 +81,19 @@ export default function Captions() {
     });
     const un2 = listen<string>("ghostpen://caption-error", (e) => {
       setError(String(e.payload));
+      bumpSilence();
     });
     // Summoned from the tray → leave ghost mode so the controls are reachable again.
     const un3 = listen("ghostpen://captions-show", () => {
       setGhost(false);
+      bumpSilence();
       refreshStatus();
     });
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
+      if (silenceTimer.current) clearTimeout(silenceTimer.current);
     };
   }, []);
 
@@ -81,6 +101,7 @@ export default function Captions() {
     setError(null);
     try {
       await captionsStart();
+      bumpSilence();
       await refreshStatus();
     } catch (e) {
       setError(String(e));
@@ -116,56 +137,66 @@ export default function Captions() {
   };
 
   const running = status?.running ?? false;
+  // Fade out only when idle, pinned-off, not in an error, and not showing the placeholder.
+  const faded = silent && !pinned && !error && lines.length > 0;
 
   return (
     <div className={`captions ${ghost ? "ghost" : ""}`}>
       {!ghost && (
-        <div className="cap-bar">
-          <span className="cap-brand">GhostPen Captions</span>
-          <span className="cap-controls">
-            {running ? (
-              <button className="cap-btn stop" onClick={onStop} title="Stop captions">
-                ■ Stop
-              </button>
-            ) : (
-              <button
-                className="cap-btn"
-                onClick={onStart}
-                disabled={status ? !status.available : true}
-                title={
-                  status && !status.available
-                    ? "This build lacks captions support (rebuild with --features captions)"
-                    : "Start captions"
-                }
-              >
-                ● Start
-              </button>
-            )}
+        <div className="cap-bar" role="toolbar">
+          {running ? (
+            <button className="cap-btn stop" onClick={onStop} title="Stop captions">
+              ■ Stop
+            </button>
+          ) : (
             <button
-              className={`cap-btn ${status?.translate ? "active" : ""}`}
-              onClick={onToggleTranslate}
+              className="cap-btn"
+              onClick={onStart}
+              disabled={status ? !status.available : true}
               title={
-                status?.translate
-                  ? `Translating → ${status.target_lang} (click to turn off)`
-                  : `Translate captions → ${status?.target_lang || "target language"} (Settings → Captions to change)`
+                status && !status.available
+                  ? "This build lacks captions support (rebuild with --features captions)"
+                  : "Start captions"
               }
             >
-              🌐 {status?.translate ? status.target_lang || "On" : "Translate"}
+              ● Start
             </button>
-            <button className="cap-btn" onClick={enterGhost} title="Click-through (mouse passes through)">
-              👻 Ghost
-            </button>
-            <button className="cap-btn" onClick={() => openSettings()} title="Captions settings">
-              ⚙
-            </button>
-            <button className="cap-btn" onClick={() => hideWindow()} title="Hide overlay">
-              ✕
-            </button>
-          </span>
+          )}
+          <button
+            className={`cap-btn ${status?.translate ? "active" : ""}`}
+            onClick={onToggleTranslate}
+            title={
+              status?.translate
+                ? `Translating → ${status.target_lang} (click to turn off)`
+                : `Translate captions → ${status?.target_lang || "target language"} (Settings → Captions to change)`
+            }
+          >
+            🌐
+          </button>
+          <button
+            className={`cap-btn ${pinned ? "active" : ""}`}
+            onClick={() => setPinned((p) => !p)}
+            title={pinned ? "Keep onscreen: on (auto-hide disabled)" : "Keep onscreen (disable auto-hide on silence)"}
+          >
+            <Icon name="pin" />
+          </button>
+          <button className="cap-btn" onClick={enterGhost} title="Click-through (mouse passes through)">
+            👻
+          </button>
+          <button className="cap-btn" onClick={() => openSettings()} title="Captions settings">
+            ⚙
+          </button>
+          <button className="cap-btn" onClick={() => hideWindow()} title="Hide overlay">
+            ✕
+          </button>
         </div>
       )}
 
-      <div className="cap-stage" style={{ fontSize }}>
+      <div
+        className={`cap-stage ${faded ? "faded" : ""}`}
+        style={{ fontSize }}
+        data-tauri-drag-region
+      >
         {error ? (
           <div className="cap-error">⚠ {error}</div>
         ) : lines.length === 0 ? (
@@ -181,7 +212,7 @@ export default function Captions() {
             </div>
           )
         ) : (
-          <div className="cap-lines">
+          <div className="cap-lines" data-tauri-drag-region>
             {lines.map((l, i) => (
               <div
                 key={l.id}

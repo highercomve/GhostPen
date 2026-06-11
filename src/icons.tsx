@@ -9,7 +9,8 @@ export type IconName =
   | "expand"
   | "translate"
   | "custom"
-  | "send";
+  | "send"
+  | "pin";
 
 const PATHS: Record<IconName, ReactNode> = {
   // edit / pencil
@@ -60,6 +61,13 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <line x1="12" y1="19" x2="12" y2="5" />
       <polyline points="5 12 12 5 19 12" />
+    </>
+  ),
+  // map pin (keep onscreen)
+  pin: (
+    <>
+      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+      <circle cx="12" cy="10" r="3" />
     </>
   ),
 };
