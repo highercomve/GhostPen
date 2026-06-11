@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
-import LevelBar from "./LevelBar";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { Icon, IconName } from "./icons";
 import {
   Status,
@@ -12,17 +11,26 @@ import {
   getSelection,
   processAiAction,
   processAiCustom,
+  processTextStream,
   hideWindow,
   openSettings,
   openPlayground,
   TRANSLATE_LANGUAGES,
 } from "./api";
 
+// A run target the palette can execute: a built-in/custom action (streamable preview) or a
+// freeform instruction typed into the search bar (no streaming command exists for it).
+type RunTarget =
+  | { kind: "action"; id: string; targetLang: string | null; label: string; level: Level }
+  | { kind: "custom"; instruction: string; label: string };
+
 type View =
   | { kind: "menu" }
   | { kind: "translate" }
-  | { kind: "loading"; label: string }
-  | { kind: "result"; result: ProcessResult }
+  // The result-preview view: stream the output, then let the user confirm the paste/replace.
+  | { kind: "preview"; target: RunTarget }
+  | { kind: "applying"; label: string }
+  | { kind: "done"; result: ProcessResult }
   | { kind: "error"; message: string };
 
 const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
@@ -35,16 +43,11 @@ const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
 
 const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 
-// Cycle the intensity level by `dir` (+1 / -1), clamped (no wrap).
-function shiftLevel(level: Level, dir: number): Level {
-  const i = LEVELS.indexOf(level);
-  return LEVELS[Math.min(LEVELS.length - 1, Math.max(0, i + dir))];
-}
-
-// True when a keyboard event originates from a text field — so global menu shortcuts
-// (arrows, Enter, 1–9, j/k/h/l) don't fire while the user is typing in the prompt bar.
-function isTypingTarget(t: EventTarget | null): boolean {
-  return t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+// Case-insensitive substring match over a row's label + hint.
+function matches(query: string, label: string, hint: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return (label + " " + hint).toLowerCase().includes(q);
 }
 
 export default function Menu() {
@@ -53,11 +56,13 @@ export default function Menu() {
   const [customActions, setCustomActions] = useState<CustomAction[]>([]);
   const [level, setLevel] = useState<Level>("balanced");
   const [view, setView] = useState<View>({ kind: "menu" });
-  // Keyboard cursor: index into `menuItems` (menu view) and into the language grid (translate view).
+  // Keyboard cursor: index into the *filtered* `menuItems`, and into the language grid.
   const [cursor, setCursor] = useState(0);
   const [langCursor, setLangCursor] = useState(0);
-  // Freeform instruction typed in the prompt bar.
-  const [prompt, setPrompt] = useState("");
+  // The search/prompt query: fuzzy-filters the list, or runs as a custom instruction on Enter.
+  const [query, setQuery] = useState("");
+
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -77,45 +82,23 @@ export default function Menu() {
     }
   }, []);
 
-  const run = useCallback(
-    async (action: string, targetLang: string | null, label: string) => {
-      setView({ kind: "loading", label });
-      try {
-        const result = await processAiAction(action, targetLang, level);
-        setView({ kind: "result", result });
-      } catch (e) {
-        setView({ kind: "error", message: String(e) });
-      }
-    },
-    [level],
-  );
-
   const empty = selection.length === 0;
 
-  // Run the freeform instruction from the prompt bar over the current selection.
-  const runCustom = useCallback(async () => {
-    const instruction = prompt.trim();
-    if (!instruction || empty) return;
-    setView({ kind: "loading", label: instruction });
-    try {
-      const result = await processAiCustom(instruction);
-      setPrompt("");
-      setView({ kind: "result", result });
-    } catch (e) {
-      setView({ kind: "error", message: String(e) });
-    }
-  }, [prompt, empty]);
+  // Enter the result-preview view for a target (no clipboard side-effects yet).
+  const preview = useCallback((target: RunTarget) => {
+    setView({ kind: "preview", target });
+  }, []);
 
-  // Flat, ordered list of selectable menu items — the single source of truth for both
-  // rendering and keyboard navigation, so the cursor index always matches what's on screen.
-  const menuItems = useMemo(() => {
+  // Full, unfiltered list of rows — source of truth for badges + activation.
+  const allItems = useMemo(() => {
     const items: { id: string; label: string; hint: string; icon: IconName; activate: () => void }[] =
       ACTIONS.map((a) => ({
         id: a.id,
         label: a.label,
         hint: a.hint,
         icon: a.icon,
-        activate: () => run(a.id, null, a.label),
+        activate: () =>
+          preview({ kind: "action", id: a.id, targetLang: null, label: a.label, level }),
       }));
     items.push({
       id: "__translate",
@@ -130,35 +113,51 @@ export default function Menu() {
         label: a.label,
         hint: "Custom action",
         icon: "custom",
-        activate: () => run(a.id, null, a.label),
+        activate: () =>
+          preview({ kind: "action", id: a.id, targetLang: null, label: a.label, level }),
       });
     }
     return items;
-  }, [customActions, run]);
+  }, [customActions, level, preview]);
+
+  // Filtered view driven by the search query. These indices are what the cursor uses.
+  const menuItems = useMemo(
+    () => allItems.filter((it) => matches(query, it.label, it.hint)),
+    [allItems, query],
+  );
+
+  // Run the search query as a freeform instruction over the selection (preview flow).
+  const runQueryAsInstruction = useCallback(() => {
+    const instruction = query.trim();
+    if (!instruction || empty) return;
+    preview({ kind: "custom", instruction, label: instruction });
+  }, [query, empty, preview]);
 
   // Language grid items + a trailing "Back" entry, so the keyboard can reach Back too.
   const langItems = useMemo(() => {
     const items: { label: string; back?: boolean; activate: () => void }[] =
       TRANSLATE_LANGUAGES.map((lang) => ({
         label: lang,
-        activate: () => run("translate", lang, `Translate → ${lang}`),
+        activate: () =>
+          preview({ kind: "action", id: "translate", targetLang: lang, label: `Translate → ${lang}`, level }),
       }));
     items.push({ label: "← Back", back: true, activate: () => setView({ kind: "menu" }) });
     return items;
-  }, [run]);
+  }, [level, preview]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
   // A fresh trigger (hotkey / --trigger / tray) resets to the menu and re-reads the selection.
-  // This is driven by an explicit event from the backend, NOT window focus — otherwise simply
-  // regaining focus (e.g. after the AI call completes) would wipe the result the user wants.
+  // Driven by an explicit backend event, NOT focus — regaining focus must not wipe a result.
   useEffect(() => {
     const unlisten = listen("ghostpen://show", () => {
       setView({ kind: "menu" });
       setCursor(0);
+      setQuery("");
       refresh();
+      requestAnimationFrame(() => searchRef.current?.focus());
     });
     return () => {
       unlisten.then((f) => f());
@@ -174,83 +173,84 @@ export default function Menu() {
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
 
+  // Autofocus the search input on initial mount.
+  useEffect(() => {
+    searchRef.current?.focus();
+  }, []);
+
   // Reset the language cursor each time we enter the translate view.
   useEffect(() => {
     if (view.kind === "translate") setLangCursor(0);
   }, [view.kind]);
 
-  // Keep the cursor in range if the item count changes (e.g. custom actions load in).
+  // Keep the cursor in range when the filtered item count changes.
   useEffect(() => {
     setCursor((c) => Math.min(c, Math.max(0, menuItems.length - 1)));
   }, [menuItems.length]);
 
   // ---- keyboard control --------------------------------------------------------------
-  // Escape closes the menu; from a sub-view it goes back to the menu first.
+  // Escape: from a sub-view → back to menu; in the menu, clear a query first, then hide.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      // First Esc while typing just leaves the prompt field; a second Esc then hides/closes.
-      if (isTypingTarget(e.target)) {
-        (e.target as HTMLElement).blur();
+      if (
+        view.kind === "translate" ||
+        view.kind === "preview" ||
+        view.kind === "done" ||
+        view.kind === "error"
+      ) {
+        e.preventDefault();
+        setView({ kind: "menu" });
+        requestAnimationFrame(() => searchRef.current?.focus());
         return;
       }
-      if (view.kind === "translate" || view.kind === "result" || view.kind === "error") {
-        setView({ kind: "menu" });
-      } else {
-        hideWindow();
+      if (query.length > 0) {
+        e.preventDefault();
+        setQuery("");
+        return;
       }
+      hideWindow();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view]);
+  }, [view.kind, query]);
 
-  // Menu view: ↑/↓ (or j/k) move the cursor, ←/→ (or h/l) change intensity, Enter activates,
-  // and 1–9 jump to and run an action directly.
+  // Menu view: ↑/↓ move the cursor, Enter runs the highlighted row (or the query as an
+  // instruction when nothing matches), Ctrl/Alt+1–9 quick-run a numbered row. The search
+  // input stays focused, so digits/letters type into it; navigation is arrows + modifiers.
   useEffect(() => {
     if (view.kind !== "menu") return;
     const n = menuItems.length;
-    if (n === 0) return;
     const onKey = (e: KeyboardEvent) => {
-      if (isTypingTarget(e.target)) return; // don't hijack keys while typing in the prompt bar
       switch (e.key) {
         case "ArrowDown":
-        case "j":
           e.preventDefault();
-          setCursor((c) => (c + 1) % n);
+          if (n > 0) setCursor((c) => (c + 1) % n);
           break;
         case "ArrowUp":
-        case "k":
           e.preventDefault();
-          setCursor((c) => (c - 1 + n) % n);
-          break;
-        case "ArrowLeft":
-        case "h":
-          e.preventDefault();
-          setLevel((lv) => shiftLevel(lv, -1));
-          break;
-        case "ArrowRight":
-        case "l":
-          e.preventDefault();
-          setLevel((lv) => shiftLevel(lv, 1));
+          if (n > 0) setCursor((c) => (c - 1 + n) % n);
           break;
         case "Enter":
           e.preventDefault();
-          if (!empty) menuItems[cursor]?.activate();
+          if (empty) break;
+          if (n > 0) menuItems[cursor]?.activate();
+          else runQueryAsInstruction(); // no match → treat the query as an instruction
           break;
         default:
-          if (/^[1-9]$/.test(e.key)) {
+          if ((e.ctrlKey || e.altKey) && /^[1-9]$/.test(e.key)) {
             const idx = Number(e.key) - 1;
-            if (idx < n) {
+            if (idx < n && !empty) {
               e.preventDefault();
               setCursor(idx);
-              if (!empty) menuItems[idx]?.activate();
+              menuItems[idx]?.activate();
             }
           }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view.kind, menuItems, cursor, empty]);
+  }, [view.kind, menuItems, cursor, empty, runQueryAsInstruction]);
 
   // Translate view: arrows move across the 2-column grid, Enter picks the language.
   useEffect(() => {
@@ -258,25 +258,20 @@ export default function Menu() {
     const n = langItems.length;
     const COLS = 2;
     const onKey = (e: KeyboardEvent) => {
-      if (isTypingTarget(e.target)) return;
       switch (e.key) {
         case "ArrowRight":
-        case "l":
           e.preventDefault();
           setLangCursor((c) => Math.min(n - 1, c + 1));
           break;
         case "ArrowLeft":
-        case "h":
           e.preventDefault();
           setLangCursor((c) => Math.max(0, c - 1));
           break;
         case "ArrowDown":
-        case "j":
           e.preventDefault();
           setLangCursor((c) => Math.min(n - 1, c + COLS));
           break;
         case "ArrowUp":
-        case "k":
           e.preventDefault();
           setLangCursor((c) => Math.max(0, c - COLS));
           break;
@@ -296,124 +291,174 @@ export default function Menu() {
     cursorRef.current?.scrollIntoView({ block: "nearest" });
   }, [cursor, langCursor, view.kind]);
 
+  const dest = status ? (
+    <span className="strip-dest" title="Active AI destination">
+      → {status.active_profile} · <code>{status.active_model}</code>
+      {status.manual_mode && <span className="badge">manual</span>}
+    </span>
+  ) : null;
+
   return (
-    <div className="menu">
-      <header className="menu-head">
-        <span className="brand">GhostPen</span>
-        <span className="head-btns">
-          <button className="icon-btn" title="Playground" onClick={() => openPlayground()}>
-            🧪
-          </button>
-          <button className="icon-btn" title="Settings" onClick={() => openSettings()}>
-            ⚙
-          </button>
-        </span>
-      </header>
-
-      {status && (
-        <div className="dest" title="Active AI destination">
-          → {status.active_profile} · <code>{status.active_model}</code>
-          {status.manual_mode && <span className="badge">manual</span>}
-        </div>
-      )}
-
+    <div className="palette">
       {view.kind === "menu" && (
         <>
-          <div className={`selection ${empty ? "empty" : ""}`}>
+          {/* Top search/prompt input — autofocused, dual-purpose (filter + instruction). */}
+          <div className="search-row">
+            <Icon name="custom" className="search-glyph" />
+            <input
+              ref={searchRef}
+              className="search-input"
+              value={query}
+              disabled={empty}
+              placeholder={
+                empty
+                  ? status?.manual_mode
+                    ? "Copy text first (Ctrl+C)…"
+                    : "Select text first…"
+                  : "Search actions or describe a change…"
+              }
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setCursor(0);
+              }}
+              autoFocus
+            />
+            <button className="icon-btn" title="Playground" tabIndex={-1} onClick={() => openPlayground()}>
+              🧪
+            </button>
+            <button className="icon-btn" title="Settings" tabIndex={-1} onClick={() => openSettings()}>
+              ⚙
+            </button>
+          </div>
+
+          <div className="palette-body">
             {empty ? (
-              status?.manual_mode ? (
-                "Copy some text (Ctrl+C), then pick an action."
-              ) : (
-                "No text selected."
-              )
+              <div className="palette-empty">
+                {status?.manual_mode
+                  ? "Copy some text (Ctrl+C), then summon GhostPen again."
+                  : "No text selected. Highlight something and re-trigger."}
+              </div>
+            ) : menuItems.length === 0 ? (
+              <div className="palette-empty run-hint">
+                Press <kbd>↵</kbd> to run “{query.trim()}” as a custom instruction.
+              </div>
             ) : (
-              <span>{selection.length > 140 ? selection.slice(0, 140) + "…" : selection}</span>
+              <div className="list" role="listbox">
+                {menuItems.map((a, i) => (
+                  <button
+                    key={a.id}
+                    ref={i === cursor ? cursorRef : undefined}
+                    className={`row ${i === cursor ? "selected" : ""}`}
+                    onClick={() => a.activate()}
+                    onMouseEnter={() => setCursor(i)}
+                  >
+                    <Icon name={a.icon} className="row-icon" />
+                    <span className="row-text">
+                      <span className="row-label">{a.label}</span>
+                      <span className="row-hint">{a.hint}</span>
+                    </span>
+                    {i < 9 && <span className="row-badge">{i + 1}</span>}
+                  </button>
+                ))}
+              </div>
             )}
           </div>
-          <LevelBar level={level} setLevel={setLevel} />
-          <div className="actions">
-            {menuItems.map((a, i) => (
-              <button
-                key={a.id}
-                ref={i === cursor ? cursorRef : undefined}
-                className={`action ${i === cursor ? "selected" : ""}`}
-                disabled={empty}
-                onClick={() => a.activate()}
-                onMouseEnter={() => setCursor(i)}
-              >
-                <Icon name={a.icon} className="action-icon" />
-                <span className="action-text">
-                  <span className="action-label">{a.label}</span>
-                  <span className="action-hint">{a.hint}</span>
-                </span>
-              </button>
-            ))}
+
+          {/* Footer: compact intensity control + Raycast-style keybinding hint strip. */}
+          <div className="kbd-strip">
+            <div className="seg compact" title="Applies to Professional / Casual / Concise / Expand">
+              {LEVELS.map((l) => (
+                <button
+                  key={l}
+                  className={`seg-btn ${level === l ? "active" : ""}`}
+                  tabIndex={-1}
+                  onClick={() => setLevel(l)}
+                >
+                  {l[0].toUpperCase() + l.slice(1)}
+                </button>
+              ))}
+            </div>
+            <span className="strip-keys">
+              <kbd>↑↓</kbd> navigate · <kbd>↵</kbd> run · <kbd>esc</kbd> close
+            </span>
+            {dest}
           </div>
-          <form
-            className="prompt-bar"
-            onSubmit={(e) => {
-              e.preventDefault();
-              runCustom();
-            }}
-          >
-            <input
-              className="prompt-input"
-              value={prompt}
-              disabled={empty}
-              placeholder={empty ? "Select text first…" : "Tell GhostPen what to do…"}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-            <button
-              type="submit"
-              className="prompt-send"
-              disabled={empty || prompt.trim().length === 0}
-              title="Run instruction (Enter)"
-            >
-              <Icon name="send" />
-            </button>
-          </form>
         </>
       )}
 
       {view.kind === "translate" && (
-        <div className="lang-grid">
-          {langItems.map((lang, i) => (
-            <button
-              key={lang.label}
-              ref={i === langCursor ? cursorRef : undefined}
-              className={`lang ${lang.back ? "back" : ""} ${i === langCursor ? "selected" : ""}`}
-              onClick={() => lang.activate()}
-              onMouseEnter={() => setLangCursor(i)}
-            >
-              {lang.label}
+        <>
+          <div className="view-head">
+            <button className="back-btn" onClick={() => setView({ kind: "menu" })}>
+              ← Back
             </button>
-          ))}
-        </div>
+            <span className="view-title">Translate into…</span>
+          </div>
+          <div className="palette-body">
+            <div className="lang-grid">
+              {langItems.map((lang, i) => (
+                <button
+                  key={lang.label}
+                  ref={i === langCursor ? cursorRef : undefined}
+                  className={`lang ${lang.back ? "back" : ""} ${i === langCursor ? "selected" : ""}`}
+                  onClick={() => lang.activate()}
+                  onMouseEnter={() => setLangCursor(i)}
+                >
+                  {lang.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="kbd-strip">
+            <span className="strip-keys">
+              <kbd>↑↓←→</kbd> move · <kbd>↵</kbd> pick · <kbd>esc</kbd> back
+            </span>
+            {dest}
+          </div>
+        </>
       )}
 
-      {view.kind === "loading" && (
+      {view.kind === "preview" && (
+        <PreviewView
+          target={view.target}
+          selection={selection}
+          status={status}
+          onBack={() => {
+            setView({ kind: "menu" });
+            requestAnimationFrame(() => searchRef.current?.focus());
+          }}
+          onApplying={(label) => setView({ kind: "applying", label })}
+          onDone={(result) => setView({ kind: "done", result })}
+          onError={(message) => setView({ kind: "error", message })}
+          dest={dest}
+        />
+      )}
+
+      {view.kind === "applying" && (
         <div className="state">
           <div className="spinner" />
           <div className="state-label">{view.label}…</div>
         </div>
       )}
 
-      {view.kind === "result" && (
+      {view.kind === "done" && (
         <div className="state result">
           <div className="state-label ok">
-            {view.result.pasted ? "✓ Pasted" : "✓ Result copied"}
+            {view.result.pasted ? "✓ Pasted" : "✓ Copied to clipboard"}
           </div>
           {!view.result.pasted && (
-            <div className="hint">On the clipboard — press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.</div>
+            <div className="hint">
+              On the clipboard — press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.
+            </div>
           )}
           <pre className="output">{view.result.output}</pre>
-          <div className="row">
-            <button className="action small" onClick={() => setView({ kind: "menu" })}>
-              Back
+          <div className="kbd-strip">
+            <button className="back-btn" onClick={() => setView({ kind: "menu" })}>
+              ← Back
             </button>
-            <button className="action small" onClick={() => hideWindow()}>
-              Close
-            </button>
+            <span className="strip-keys">
+              <kbd>esc</kbd> close
+            </span>
           </div>
         </div>
       )}
@@ -421,11 +466,192 @@ export default function Menu() {
       {view.kind === "error" && (
         <div className="state error">
           <div className="state-label bad">⚠ {view.message}</div>
-          <button className="action small" onClick={() => setView({ kind: "menu" })}>
-            Back
-          </button>
+          <div className="kbd-strip">
+            <button className="back-btn" onClick={() => setView({ kind: "menu" })}>
+              ← Back
+            </button>
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+// ---- Result-preview view -------------------------------------------------------------
+// Streams the model output over the current selection (no clipboard side-effects), then
+// offers Paste/Replace · Copy · Retry · Edit · Back. Paste/Replace re-runs the model via
+// processAiAction/processAiCustom (which owns the clipboard snapshot + paste + restore).
+function PreviewView({
+  target,
+  selection,
+  status,
+  onBack,
+  onApplying,
+  onDone,
+  onError,
+  dest,
+}: {
+  target: RunTarget;
+  selection: string;
+  status: Status | null;
+  onBack: () => void;
+  onApplying: (label: string) => void;
+  onDone: (result: ProcessResult) => void;
+  onError: (message: string) => void;
+  dest: React.ReactNode;
+}) {
+  const [text, setText] = useState("");
+  const [streaming, setStreaming] = useState(true);
+  const [streamErr, setStreamErr] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [nonce, setNonce] = useState(0); // bump to re-stream (Retry)
+  const manual = status?.manual_mode ?? false;
+  // Custom instructions have no streaming command, so we can't live-preview them.
+  const customNoPreview = target.kind === "custom";
+
+  const header =
+    target.kind === "action"
+      ? target.label
+      : `“${target.label.length > 40 ? target.label.slice(0, 40) + "…" : target.label}”`;
+
+  // Stream a fresh preview for action targets. `nonce` lets Retry re-run.
+  useEffect(() => {
+    if (target.kind !== "action") {
+      setStreaming(false);
+      return;
+    }
+    let cancelled = false;
+    const unlisten: UnlistenFn[] = [];
+    let acc = "";
+    setText("");
+    setStreamErr("");
+    setStreaming(true);
+    (async () => {
+      try {
+        unlisten.push(
+          await listen<string>("ghostpen://chunk", (e) => {
+            if (cancelled) return;
+            acc += e.payload;
+            setText(acc);
+          }),
+        );
+        unlisten.push(
+          await listen<string>("ghostpen://done", (e) => {
+            if (cancelled) return;
+            setText(e.payload);
+            setStreaming(false);
+          }),
+        );
+        unlisten.push(
+          await listen<string>("ghostpen://error", (e) => {
+            if (cancelled) return;
+            setStreamErr(e.payload);
+            setStreaming(false);
+          }),
+        );
+        await processTextStream(target.id, target.targetLang, target.level, selection);
+      } catch (e) {
+        if (!cancelled) {
+          setStreamErr(String(e));
+          setStreaming(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten.forEach((u) => u());
+    };
+  }, [target, selection, nonce]);
+
+  // Apply: re-run through the clipboard-owning command to actually paste/replace.
+  const apply = useCallback(async () => {
+    onApplying(target.kind === "action" ? target.label : "Applying");
+    try {
+      const result =
+        target.kind === "action"
+          ? await processAiAction(target.id, target.targetLang, target.level)
+          : await processAiCustom(target.instruction);
+      onDone(result);
+    } catch (e) {
+      onError(String(e));
+    }
+  }, [target, onApplying, onDone, onError]);
+
+  const copy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* ignore */
+    }
+  }, [text]);
+
+  // Keyboard: Enter = paste/replace, c = copy, r = retry, e = edit (back).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (!streaming) apply();
+      } else if (e.key === "c" || e.key === "C") {
+        if (customNoPreview) return;
+        e.preventDefault();
+        copy();
+      } else if (e.key === "r" || e.key === "R") {
+        if (customNoPreview) return;
+        e.preventDefault();
+        setNonce((nn) => nn + 1);
+      } else if (e.key === "e" || e.key === "E") {
+        e.preventDefault();
+        onBack();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [streaming, apply, copy, onBack, customNoPreview]);
+
+  return (
+    <>
+      <div className="view-head">
+        <button className="back-btn" onClick={onBack}>
+          ← Back
+        </button>
+        <span className="view-title">
+          {header}
+          {status && <span className="view-dest"> → {status.active_profile}</span>}
+        </span>
+      </div>
+
+      <div className="palette-body preview-body">
+        {streamErr ? (
+          <div className="state error">
+            <div className="state-label bad">⚠ {streamErr}</div>
+          </div>
+        ) : customNoPreview ? (
+          <div className="preview-note">
+            Live preview isn’t available for freeform instructions yet. Press <kbd>↵</kbd> to
+            run “{target.label}” and apply it.
+          </div>
+        ) : (
+          <pre className="output preview-output">
+            {text}
+            {streaming && <span className="caret">▍</span>}
+          </pre>
+        )}
+      </div>
+
+      <div className="kbd-strip preview-strip">
+        <span className="strip-keys">
+          <kbd>↵</kbd> {manual ? "copy" : "paste/replace"}
+          {!customNoPreview && (
+            <>
+              {" "}· <kbd>c</kbd> {copied ? "copied ✓" : "copy"} · <kbd>r</kbd> retry
+            </>
+          )}{" "}
+          · <kbd>e</kbd> edit · <kbd>esc</kbd> back
+        </span>
+        {dest}
+      </div>
+    </>
   );
 }

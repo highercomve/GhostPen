@@ -29,6 +29,8 @@ export default function Captions() {
   // "Ghost" = click-through: the mouse passes through to the video/meeting underneath.
   const [ghost, setGhost] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Hover-reveal: idle shows caption text only; mouse-over fades in the control bar (macOS-style).
+  const [hover, setHover] = useState(false);
   const nextId = useRef(0);
 
   const refreshStatus = async () => {
@@ -116,11 +118,19 @@ export default function Captions() {
   };
 
   const running = status?.running ?? false;
+  // Subtle "listening" state: running, but nothing transcribed yet.
+  const listening = running && lines.length === 0 && !error;
+  // Reveal the control bar on hover (not in ghost mode — the mouse passes through there).
+  const showControls = !ghost && hover;
 
   return (
-    <div className={`captions ${ghost ? "ghost" : ""}`}>
+    <div
+      className={`captions ${ghost ? "ghost" : ""}`}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
       {!ghost && (
-        <div className="cap-bar">
+        <div className={`cap-bar ${showControls ? "" : "hidden"}`}>
           <span className="cap-brand">GhostPen Captions</span>
           <span className="cap-controls">
             {running ? (
@@ -168,16 +178,18 @@ export default function Captions() {
       <div className="cap-stage" style={{ fontSize }}>
         {error ? (
           <div className="cap-error">⚠ {error}</div>
+        ) : listening ? (
+          <div className="cap-listening">
+            <span className="cap-dot" /> listening…
+          </div>
         ) : lines.length === 0 ? (
           !ghost && (
             <div className="cap-idle">
               {status && !status.available
                 ? "Captions support isn’t compiled into this build."
-                : running
-                  ? "Listening… play some audio."
-                  : status && !status.model_ready
-                    ? `Model “${status.model}” not downloaded — open Settings → Captions.`
-                    : "Press Start to caption your system audio."}
+                : status && !status.model_ready
+                  ? `Model “${status.model}” not downloaded — open Settings → Captions.`
+                  : "Press Start to caption your system audio."}
             </div>
           )
         ) : (

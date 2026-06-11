@@ -33,6 +33,14 @@ function newProfile(): Profile {
   };
 }
 
+type Tab = "general" | "profiles" | "actions" | "captions";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "profiles", label: "AI Profiles" },
+  { id: "actions", label: "Actions" },
+  { id: "captions", label: "Captions" },
+];
+
 export default function Settings() {
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
@@ -43,6 +51,7 @@ export default function Settings() {
   const [capDevices, setCapDevices] = useState<string[]>([]);
   const [capMsg, setCapMsg] = useState<string>("");
   const [downloading, setDownloading] = useState(false);
+  const [tab, setTab] = useState<Tab>("general");
 
   useEffect(() => {
     getSettings().then(setSettings);
@@ -102,7 +111,6 @@ export default function Settings() {
       const list = await fetchModels(active.baseUrl, active.apiKey);
       setModels(list);
       setModelMsg(`${list.length} model${list.length === 1 ? "" : "s"} found`);
-      // If the current model isn't actually available, select the first real one.
       if (list.length > 0 && !list.includes(active.model)) {
         updateProfile(active.id, { model: list[0] });
       }
@@ -136,12 +144,11 @@ export default function Settings() {
     update({ captions: { ...captions, ...patch } });
   };
 
-  // Download the configured whisper model, then save + refresh status so the UI reflects it.
   const downloadModel = async () => {
     setDownloading(true);
     setCapMsg(`Downloading ${captions.model}… (this can take a while)`);
     try {
-      await saveSettings(settings); // persist so the backend reads the chosen model id
+      await saveSettings(settings);
       await captionsDownloadModel(captions.model);
       setCapMsg(`Model “${captions.model}” ready ✓`);
       captionsStatus().then(setCapStatus).catch(() => {});
@@ -160,249 +167,269 @@ export default function Settings() {
 
   return (
     <div className="settings">
-      <h1>GhostPen Settings</h1>
+      <nav className="settings-rail">
+        <div className="rail-brand">GhostPen</div>
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            className={`rail-tab ${tab === t.id ? "active" : ""}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
 
-      {/* Diagnostics */}
-      {status && (
-        <section className="card diag">
-          <h2>Diagnostics</h2>
-          <div className="diag-grid">
-            <span>Session</span><b>{status.session}</b>
-            <span>Clipboard</span><b>{status.clipboard_backend}</b>
-            <span>Input synthesis</span><b>{status.input_available ? "available" : "unavailable"}</b>
-            <span>Mode</span><b>{status.manual_mode ? "manual-copy" : "auto (synthetic)"}</b>
-          </div>
-        </section>
-      )}
+      <div className="settings-main">
+        <div className="settings-scroll">
+          {tab === "general" && (
+            <>
+              <section className="card">
+                <h2>Behaviour</h2>
+                <label>
+                  Hotkey <span className="muted">(Windows/macOS/X11; on Wayland bind in your compositor)</span>
+                  <input value={settings.hotkey} onChange={(e) => update({ hotkey: e.target.value })} placeholder="Ctrl+Shift+A" />
+                </label>
+                <label className="checkbox">
+                  <input type="checkbox" checked={settings.forceSynthetic}
+                    onChange={(e) => update({ forceSynthetic: e.target.checked })} />
+                  Force synthetic copy/paste on Wayland (needs libei; off = manual-copy mode)
+                </label>
+                <label>
+                  Clipboard restore delay (ms)
+                  <input type="number" min={0} max={2000} value={settings.restoreDelayMs}
+                    onChange={(e) => update({ restoreDelayMs: parseInt(e.target.value || "0", 10) })} />
+                </label>
+              </section>
 
-      {/* Profiles */}
-      <section className="card">
-        <h2>AI Profiles</h2>
-        <div className="profile-tabs">
-          {settings.profiles.map((p) => (
-            <button
-              key={p.id}
-              className={`tab ${p.id === settings.activeProfileId ? "active" : ""}`}
-              onClick={() => update({ activeProfileId: p.id })}
-            >
-              {p.name}
-            </button>
-          ))}
-          <button className="tab add" onClick={addProfile}>+ Add</button>
+              {status && (
+                <section className="card diag">
+                  <h2>Diagnostics</h2>
+                  <div className="diag-grid">
+                    <span>Session</span><b>{status.session}</b>
+                    <span>Clipboard</span><b>{status.clipboard_backend}</b>
+                    <span>Input synthesis</span><b>{status.input_available ? "available" : "unavailable"}</b>
+                    <span>Mode</span><b>{status.manual_mode ? "manual-copy" : "auto (synthetic)"}</b>
+                  </div>
+                </section>
+              )}
+            </>
+          )}
+
+          {tab === "profiles" && (
+            <section className="card">
+              <h2>AI Profiles</h2>
+              <div className="profile-tabs">
+                {settings.profiles.map((p) => (
+                  <button
+                    key={p.id}
+                    className={`tab ${p.id === settings.activeProfileId ? "active" : ""}`}
+                    onClick={() => update({ activeProfileId: p.id })}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+                <button className="tab add" onClick={addProfile}>+ Add</button>
+              </div>
+
+              {active && (
+                <div className="profile-form">
+                  <label>
+                    Preset
+                    <select defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
+                      <option value="" disabled>Choose a preset…</option>
+                      {PRESETS.map((p) => (
+                        <option key={p.name} value={p.name}>{p.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Name
+                    <input value={active.name} onChange={(e) => updateProfile(active.id, { name: e.target.value })} />
+                  </label>
+                  <label>
+                    Base URL
+                    <input value={active.baseUrl} onChange={(e) => updateProfile(active.id, { baseUrl: e.target.value })} placeholder="http://localhost:11434/v1" />
+                  </label>
+                  <label>
+                    API key <span className="muted">(blank = no auth header)</span>
+                    <input type="password" value={active.apiKey} onChange={(e) => updateProfile(active.id, { apiKey: e.target.value })} placeholder="sk-…" />
+                  </label>
+                  <label>
+                    Model
+                    <div className="row">
+                      <input value={active.model} onChange={(e) => updateProfile(active.id, { model: e.target.value })} placeholder="gemma4:e4b" />
+                      <button className="btn" type="button" onClick={doFetchModels}>Fetch models</button>
+                    </div>
+                    {models.length > 0 && (
+                      <select
+                        value={models.includes(active.model) ? active.model : ""}
+                        onChange={(e) => updateProfile(active.id, { model: e.target.value })}
+                      >
+                        <option value="" disabled>Pick a fetched model…</option>
+                        {models.map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    )}
+                    {modelMsg && <span className="muted small">{modelMsg}</span>}
+                  </label>
+                  <label>
+                    Temperature: {active.temperature.toFixed(2)}
+                    <input type="range" min={0} max={1} step={0.05} value={active.temperature}
+                      onChange={(e) => updateProfile(active.id, { temperature: parseFloat(e.target.value) })} />
+                  </label>
+                  {settings.profiles.length > 1 && (
+                    <button className="btn danger" onClick={() => deleteProfile(active.id)}>Delete profile</button>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
+          {tab === "actions" && (
+            <section className="card">
+              <h2>Custom Actions</h2>
+              {customActions.length === 0 && (
+                <p className="muted small">None yet. Add one to define your own prompt — it appears in the menu and Playground.</p>
+              )}
+              {customActions.map((a) => (
+                <div key={a.id} className="custom-action">
+                  <input
+                    value={a.label}
+                    placeholder="Label (e.g. Bullet points)"
+                    onChange={(e) => updateCustomAction(a.id, { label: e.target.value })}
+                  />
+                  <textarea
+                    value={a.prompt}
+                    placeholder="System prompt — e.g. 'Convert the text into concise bullet points. Return ONLY the bullets.'"
+                    onChange={(e) => updateCustomAction(a.id, { prompt: e.target.value })}
+                  />
+                  <div className="row">
+                    <input
+                      value={a.model}
+                      placeholder="Model override (optional — blank uses the active profile's model)"
+                      onChange={(e) => updateCustomAction(a.id, { model: e.target.value })}
+                    />
+                    <button className="btn danger" onClick={() => deleteCustomAction(a.id)}>Delete</button>
+                  </div>
+                </div>
+              ))}
+              <button className="btn" onClick={addCustomAction}>+ Add custom action</button>
+            </section>
+          )}
+
+          {tab === "captions" && (
+            <section className="card">
+              <h2>Live Captions <span className="muted small">system audio → subtitles</span></h2>
+              {capStatus && !capStatus.available && (
+                <p className="muted small">
+                  This build was compiled without captions support. Rebuild with
+                  {" "}<code>--features captions</code> to enable on-device transcription.
+                </p>
+              )}
+              <p className="muted small">
+                Captures what you hear (meetings, videos, podcasts), transcribes it on-device with
+                Whisper, and shows subtitles in a click-through overlay. Optionally translate via your
+                active AI profile.
+              </p>
+
+              <label>
+                Whisper model <span className="muted">(top = faster · bottom = more accurate)</span>
+                <div className="row">
+                  <select value={captions.model} onChange={(e) => updateCaptions({ model: e.target.value })}>
+                    {WHISPER_MODELS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {`${m.id} · ${m.note} · ${m.size}`}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="btn" type="button" onClick={downloadModel} disabled={downloading}>
+                    {capStatus?.model_ready && capStatus.model === captions.model ? "Re-download" : "Download model"}
+                  </button>
+                </div>
+                {(() => {
+                  const m = WHISPER_MODELS.find((x) => x.id === captions.model);
+                  return m ? (
+                    <span className="muted small">
+                      Speed {scoreMeter(m.speed)} · Accuracy {scoreMeter(m.accuracy)} · {m.size} download
+                    </span>
+                  ) : null;
+                })()}
+                <span className="muted small">
+                  On your GPU, <code>small</code> is the live-caption sweet spot; <code>medium</code> for max accuracy.
+                </span>
+                {capStatus && (
+                  <span className="muted small">
+                    {capStatus.model_ready ? `“${capStatus.model}” downloaded ✓` : `“${captions.model}” not downloaded`}
+                  </span>
+                )}
+                {capMsg && <span className="muted small">{capMsg}</span>}
+              </label>
+
+              <label>
+                Source language
+                <select value={captions.language} onChange={(e) => updateCaptions({ language: e.target.value })}>
+                  {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+                </select>
+              </label>
+
+              <label className="checkbox">
+                <input type="checkbox" checked={captions.whisperTranslate}
+                  onChange={(e) => updateCaptions({ whisperTranslate: e.target.checked })} />
+                Translate to English with Whisper <span className="muted">(free, English-only target)</span>
+              </label>
+
+              <label className="checkbox">
+                <input type="checkbox" checked={captions.aiTranslate}
+                  onChange={(e) => updateCaptions({ aiTranslate: e.target.checked })} />
+                Translate transcript via AI profile <span className="muted">(for non-English targets)</span>
+              </label>
+              {captions.aiTranslate && (
+                <label>
+                  Target language
+                  <select value={captions.targetLang} onChange={(e) => updateCaptions({ targetLang: e.target.value })}>
+                    {TRANSLATE_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+                  </select>
+                </label>
+              )}
+
+              <label>
+                Chunk length: {captions.chunkSeconds.toFixed(0)}s
+                <span className="muted small">lower = snappier captions, less context (may clip words); higher = more accurate, more lag</span>
+                <input type="range" min={1} max={15} step={1} value={captions.chunkSeconds}
+                  onChange={(e) => updateCaptions({ chunkSeconds: parseInt(e.target.value, 10) })} />
+              </label>
+
+              <label>
+                Capture device <span className="muted">(what to transcribe — “Auto” follows your current system output)</span>
+                <select value={captions.device} onChange={(e) => updateCaptions({ device: e.target.value })}>
+                  <option value="">Auto — current system output (recommended)</option>
+                  {capDevices.map((d) => (
+                    <option key={d} value={d}>
+                      {d.includes(".monitor") ? `🔊 ${d} — system audio` : `🎙 ${d}`}
+                    </option>
+                  ))}
+                </select>
+                <span className="muted small">
+                  Pick a <code>.monitor</code> source to caption what you hear; a mic/input to caption your voice.
+                </span>
+              </label>
+
+              <label>
+                Caption font size: {captions.fontSize}px
+                <input type="range" min={16} max={48} step={2} value={captions.fontSize}
+                  onChange={(e) => updateCaptions({ fontSize: parseInt(e.target.value, 10) })} />
+              </label>
+
+              <button className="btn" onClick={() => openCaptions()}>Open captions overlay</button>
+            </section>
+          )}
         </div>
 
-        {active && (
-          <div className="profile-form">
-            <label>
-              Preset
-              <select defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
-                <option value="" disabled>Choose a preset…</option>
-                {PRESETS.map((p) => (
-                  <option key={p.name} value={p.name}>{p.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Name
-              <input value={active.name} onChange={(e) => updateProfile(active.id, { name: e.target.value })} />
-            </label>
-            <label>
-              Base URL
-              <input value={active.baseUrl} onChange={(e) => updateProfile(active.id, { baseUrl: e.target.value })} placeholder="http://localhost:11434/v1" />
-            </label>
-            <label>
-              API key <span className="muted">(blank = no auth header)</span>
-              <input type="password" value={active.apiKey} onChange={(e) => updateProfile(active.id, { apiKey: e.target.value })} placeholder="sk-…" />
-            </label>
-            <label>
-              Model
-              <div className="row">
-                <input value={active.model} onChange={(e) => updateProfile(active.id, { model: e.target.value })} placeholder="gemma4:e4b" />
-                <button className="btn" type="button" onClick={doFetchModels}>Fetch models</button>
-              </div>
-              {models.length > 0 && (
-                <select
-                  value={models.includes(active.model) ? active.model : ""}
-                  onChange={(e) => updateProfile(active.id, { model: e.target.value })}
-                >
-                  <option value="" disabled>Pick a fetched model…</option>
-                  {models.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              )}
-              {modelMsg && <span className="muted small">{modelMsg}</span>}
-            </label>
-            <label>
-              Temperature: {active.temperature.toFixed(2)}
-              <input type="range" min={0} max={1} step={0.05} value={active.temperature}
-                onChange={(e) => updateProfile(active.id, { temperature: parseFloat(e.target.value) })} />
-            </label>
-            {settings.profiles.length > 1 && (
-              <button className="btn danger" onClick={() => deleteProfile(active.id)}>Delete profile</button>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* Behaviour */}
-      <section className="card">
-        <h2>Behaviour</h2>
-        <label>
-          Hotkey <span className="muted">(Windows/macOS/X11; on Wayland bind in your compositor)</span>
-          <input value={settings.hotkey} onChange={(e) => update({ hotkey: e.target.value })} placeholder="Ctrl+Shift+A" />
-        </label>
-        <label className="checkbox">
-          <input type="checkbox" checked={settings.forceSynthetic}
-            onChange={(e) => update({ forceSynthetic: e.target.checked })} />
-          Force synthetic copy/paste on Wayland (needs libei; off = manual-copy mode)
-        </label>
-        <label>
-          Clipboard restore delay (ms)
-          <input type="number" min={0} max={2000} value={settings.restoreDelayMs}
-            onChange={(e) => update({ restoreDelayMs: parseInt(e.target.value || "0", 10) })} />
-        </label>
-      </section>
-
-      {/* Custom actions */}
-      <section className="card">
-        <h2>Custom Actions</h2>
-        {customActions.length === 0 && (
-          <p className="muted small">None yet. Add one to define your own prompt — it appears in the menu and Playground.</p>
-        )}
-        {customActions.map((a) => (
-          <div key={a.id} className="custom-action">
-            <input
-              value={a.label}
-              placeholder="Label (e.g. Bullet points)"
-              onChange={(e) => updateCustomAction(a.id, { label: e.target.value })}
-            />
-            <textarea
-              value={a.prompt}
-              placeholder="System prompt — e.g. 'Convert the text into concise bullet points. Return ONLY the bullets.'"
-              onChange={(e) => updateCustomAction(a.id, { prompt: e.target.value })}
-            />
-            <div className="row">
-              <input
-                value={a.model}
-                placeholder="Model override (optional — blank uses the active profile's model)"
-                onChange={(e) => updateCustomAction(a.id, { model: e.target.value })}
-              />
-              <button className="btn danger" onClick={() => deleteCustomAction(a.id)}>Delete</button>
-            </div>
-          </div>
-        ))}
-        <button className="btn" onClick={addCustomAction}>+ Add custom action</button>
-      </section>
-
-      {/* Live captions (system audio) */}
-      <section className="card">
-        <h2>Live Captions <span className="muted small">system audio → subtitles</span></h2>
-        {capStatus && !capStatus.available && (
-          <p className="muted small">
-            This build was compiled without captions support. Rebuild with
-            {" "}<code>--features captions</code> to enable on-device transcription.
-          </p>
-        )}
-        <p className="muted small">
-          Captures what you hear (meetings, videos, podcasts), transcribes it on-device with
-          Whisper, and shows subtitles in a click-through overlay. Optionally translate via your
-          active AI profile.
-        </p>
-
-        <label>
-          Whisper model <span className="muted">(top = faster · bottom = more accurate)</span>
-          <div className="row">
-            <select value={captions.model} onChange={(e) => updateCaptions({ model: e.target.value })}>
-              {WHISPER_MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {`${m.id} · ${m.note} · ${m.size}`}
-                </option>
-              ))}
-            </select>
-            <button className="btn" type="button" onClick={downloadModel} disabled={downloading}>
-              {capStatus?.model_ready && capStatus.model === captions.model ? "Re-download" : "Download model"}
-            </button>
-          </div>
-          {(() => {
-            const m = WHISPER_MODELS.find((x) => x.id === captions.model);
-            return m ? (
-              <span className="muted small">
-                Speed {scoreMeter(m.speed)} · Accuracy {scoreMeter(m.accuracy)} · {m.size} download
-              </span>
-            ) : null;
-          })()}
-          <span className="muted small">
-            On your GPU, <code>small</code> is the live-caption sweet spot; <code>medium</code> for max accuracy.
-          </span>
-          {capStatus && (
-            <span className="muted small">
-              {capStatus.model_ready ? `“${capStatus.model}” downloaded ✓` : `“${captions.model}” not downloaded`}
-            </span>
-          )}
-          {capMsg && <span className="muted small">{capMsg}</span>}
-        </label>
-
-        <label>
-          Source language
-          <select value={captions.language} onChange={(e) => updateCaptions({ language: e.target.value })}>
-            {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
-          </select>
-        </label>
-
-        <label className="checkbox">
-          <input type="checkbox" checked={captions.whisperTranslate}
-            onChange={(e) => updateCaptions({ whisperTranslate: e.target.checked })} />
-          Translate to English with Whisper <span className="muted">(free, English-only target)</span>
-        </label>
-
-        <label className="checkbox">
-          <input type="checkbox" checked={captions.aiTranslate}
-            onChange={(e) => updateCaptions({ aiTranslate: e.target.checked })} />
-          Translate transcript via AI profile <span className="muted">(for non-English targets)</span>
-        </label>
-        {captions.aiTranslate && (
-          <label>
-            Target language
-            <select value={captions.targetLang} onChange={(e) => updateCaptions({ targetLang: e.target.value })}>
-              {TRANSLATE_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
-            </select>
-          </label>
-        )}
-
-        <label>
-          Chunk length: {captions.chunkSeconds.toFixed(0)}s
-          <span className="muted small">lower = snappier captions, less context (may clip words); higher = more accurate, more lag</span>
-          <input type="range" min={1} max={15} step={1} value={captions.chunkSeconds}
-            onChange={(e) => updateCaptions({ chunkSeconds: parseInt(e.target.value, 10) })} />
-        </label>
-
-        <label>
-          Capture device <span className="muted">(what to transcribe — “Auto” follows your current system output)</span>
-          <select value={captions.device} onChange={(e) => updateCaptions({ device: e.target.value })}>
-            <option value="">Auto — current system output (recommended)</option>
-            {capDevices.map((d) => (
-              <option key={d} value={d}>
-                {d.includes(".monitor") ? `🔊 ${d} — system audio` : `🎙 ${d}`}
-              </option>
-            ))}
-          </select>
-          <span className="muted small">
-            Pick a <code>.monitor</code> source to caption what you hear; a mic/input to caption your voice.
-          </span>
-        </label>
-
-        <label>
-          Caption font size: {captions.fontSize}px
-          <input type="range" min={16} max={48} step={2} value={captions.fontSize}
-            onChange={(e) => updateCaptions({ fontSize: parseInt(e.target.value, 10) })} />
-        </label>
-
-        <button className="btn" onClick={() => openCaptions()}>Open captions overlay</button>
-      </section>
-
-      <div className="footer">
-        {saved && <span className="muted">Saved ✓</span>}
-        <button className="btn" onClick={() => closeSettings()}>Close</button>
-        <button className="btn primary" onClick={save}>Save</button>
+        <div className="footer">
+          {saved && <span className="muted">Saved ✓</span>}
+          <button className="btn" onClick={() => closeSettings()}>Close</button>
+          <button className="btn primary" onClick={save}>Save</button>
+        </div>
       </div>
     </div>
   );
