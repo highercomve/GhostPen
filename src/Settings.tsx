@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Settings as SettingsType,
   Profile,
@@ -44,12 +44,40 @@ export default function Settings() {
   const [capMsg, setCapMsg] = useState<string>("");
   const [downloading, setDownloading] = useState(false);
 
+  // Skip auto-saving the initial load (and the load itself, which sets settings once).
+  const loaded = useRef(false);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     getSettings().then(setSettings);
     getStatus().then(setStatus).catch(() => {});
     captionsStatus().then(setCapStatus).catch(() => {});
     captionsListDevices().then(setCapDevices).catch(() => {});
   }, []);
+
+  // Auto-save on change (debounced), with a gentle transient "Saved ✓". The explicit Save
+  // button remains as a fallback / immediate save.
+  useEffect(() => {
+    if (!settings) return;
+    if (!loaded.current) {
+      loaded.current = true;
+      return;
+    }
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await saveSettings(settings);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1600);
+        getStatus().then(setStatus).catch(() => {});
+      } catch {
+        /* ignore */
+      }
+    }, 600);
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
+  }, [settings]);
 
   if (!settings) return <div className="settings loading-page">Loading…</div>;
 
@@ -400,9 +428,10 @@ export default function Settings() {
       </section>
 
       <div className="footer">
-        {saved && <span className="muted">Saved ✓</span>}
+        <span className={`save-toast ${saved ? "show" : ""}`}>Saved ✓</span>
+        <span className="muted small">Changes save automatically</span>
         <button className="btn" onClick={() => closeSettings()}>Close</button>
-        <button className="btn primary" onClick={save}>Save</button>
+        <button className="btn primary" onClick={save}>Save now</button>
       </div>
     </div>
   );

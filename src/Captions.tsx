@@ -21,6 +21,8 @@ interface Line {
 
 // How many recent caption lines to keep on screen (subtitle convention: 1–2 lines).
 const MAX_LINES = 2;
+const MIN_FONT = 16;
+const MAX_FONT = 48;
 
 export default function Captions() {
   const [lines, setLines] = useState<Line[]>([]);
@@ -29,6 +31,8 @@ export default function Captions() {
   // "Ghost" = click-through: the mouse passes through to the video/meeting underneath.
   const [ghost, setGhost] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Hover-reveal (macOS Live Captions): idle = text only, hover fades the controls in.
+  const [hover, setHover] = useState(false);
   const nextId = useRef(0);
 
   const refreshStatus = async () => {
@@ -115,10 +119,19 @@ export default function Captions() {
     }
   };
 
+  const bumpFont = (d: number) =>
+    setFontSize((f) => Math.min(MAX_FONT, Math.max(MIN_FONT, f + d)));
+
   const running = status?.running ?? false;
+  // Controls reveal on hover (never in ghost mode — hover can't work while click-through).
+  const showControls = !ghost && hover;
 
   return (
-    <div className={`captions ${ghost ? "ghost" : ""}`}>
+    <div
+      className={`captions ${ghost ? "ghost" : ""} ${showControls ? "hovering" : ""}`}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
       {!ghost && (
         <div className="cap-bar">
           <span className="cap-brand">GhostPen Captions</span>
@@ -152,6 +165,24 @@ export default function Captions() {
             >
               🌐 {status?.translate ? status.target_lang || "On" : "Translate"}
             </button>
+            <span className="cap-font" title="Caption font size">
+              <button
+                className="cap-btn"
+                onClick={() => bumpFont(-2)}
+                disabled={fontSize <= MIN_FONT}
+                title="Smaller text"
+              >
+                A−
+              </button>
+              <button
+                className="cap-btn"
+                onClick={() => bumpFont(2)}
+                disabled={fontSize >= MAX_FONT}
+                title="Larger text"
+              >
+                A+
+              </button>
+            </span>
             <button className="cap-btn" onClick={enterGhost} title="Click-through (mouse passes through)">
               👻 Ghost
             </button>

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
-import LevelBar from "./LevelBar";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { Icon, IconName } from "./icons";
+import { wordDiff } from "./diff";
 import {
   Status,
   ProcessResult,
@@ -12,37 +12,38 @@ import {
   getSelection,
   processAiAction,
   processAiCustom,
+  processTextStream,
   hideWindow,
   openSettings,
   openPlayground,
   TRANSLATE_LANGUAGES,
 } from "./api";
 
+// A pending generation: which action ran, against which selection, and how to "apply" it.
+type Pending = {
+  action: string; // backend action id (proofread/professional/casual/concise/expand/translate or a custom-action id)
+  label: string;
+  targetLang: string | null;
+  source: string; // the selection text this result was generated from (used for the diff)
+};
+
 type View =
   | { kind: "menu" }
   | { kind: "translate" }
-  | { kind: "loading"; label: string }
-  | { kind: "result"; result: ProcessResult }
-  | { kind: "error"; message: string };
+  | { kind: "result"; pending: Pending };
 
-const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
-  { id: "proofread", label: "Proofread", hint: "Fix spelling & grammar", icon: "proofread" },
-  { id: "professional", label: "Professional", hint: "Rewrite polished & clear", icon: "professional" },
-  { id: "casual", label: "Casual", hint: "Friendly, conversational", icon: "casual" },
-  { id: "concise", label: "Concise", hint: "Condense, keep meaning", icon: "concise" },
-  { id: "expand", label: "Expand", hint: "Add detail & elaborate", icon: "expand" },
+// Tone chips live under "Rewrite". Each maps to an existing backend action id.
+const TONES: { id: string; label: string; icon: IconName }[] = [
+  { id: "casual", label: "Friendly", icon: "casual" },
+  { id: "professional", label: "Professional", icon: "professional" },
+  { id: "concise", label: "Concise", icon: "concise" },
+  { id: "expand", label: "Expand", icon: "expand" },
 ];
 
 const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 
-// Cycle the intensity level by `dir` (+1 / -1), clamped (no wrap).
-function shiftLevel(level: Level, dir: number): Level {
-  const i = LEVELS.indexOf(level);
-  return LEVELS[Math.min(LEVELS.length - 1, Math.max(0, i + dir))];
-}
-
 // True when a keyboard event originates from a text field — so global menu shortcuts
-// (arrows, Enter, 1–9, j/k/h/l) don't fire while the user is typing in the prompt bar.
+// (arrows, Enter) don't fire while the user is typing in the describe field.
 function isTypingTarget(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
 }
@@ -53,11 +54,20 @@ export default function Menu() {
   const [customActions, setCustomActions] = useState<CustomAction[]>([]);
   const [level, setLevel] = useState<Level>("balanced");
   const [view, setView] = useState<View>({ kind: "menu" });
-  // Keyboard cursor: index into `menuItems` (menu view) and into the language grid (translate view).
+  // Keyboard cursor across the focusable chips on the menu card.
   const [cursor, setCursor] = useState(0);
   const [langCursor, setLangCursor] = useState(0);
-  // Freeform instruction typed in the prompt bar.
+  // Free-text instruction typed in the "Describe your change…" field.
   const [prompt, setPrompt] = useState("");
+
+  // ---- streaming result state (the preview, before any paste) ------------------------
+  const [streamText, setStreamText] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [streamErr, setStreamErr] = useState<string | null>(null);
+  // Set once the user confirms Replace (mirrors the old ProcessResult handling).
+  const [applied, setApplied] = useState<ProcessResult | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -77,50 +87,129 @@ export default function Menu() {
     }
   }, []);
 
-  const run = useCallback(
-    async (action: string, targetLang: string | null, label: string) => {
-      setView({ kind: "loading", label });
-      try {
-        const result = await processAiAction(action, targetLang, level);
-        setView({ kind: "result", result });
-      } catch (e) {
-        setView({ kind: "error", message: String(e) });
-      }
-    },
-    [level],
-  );
-
   const empty = selection.length === 0;
 
-  // Run the freeform instruction from the prompt bar over the current selection.
+  const resetMenu = useCallback(() => {
+    setView({ kind: "menu" });
+    setCursor(0);
+    setStreamText("");
+    setStreaming(false);
+    setStreamErr(null);
+    setApplied(null);
+    setApplying(false);
+    setCopied(false);
+  }, []);
+
+  // Begin a preview: stream the result INTO the card (no clipboard side effects yet).
+  // Uses the existing `process_text_stream` command against the live selection text.
+  const preview = useCallback(
+    async (pending: Pending) => {
+      if (empty) return;
+      setStreamText("");
+      setStreamErr(null);
+      setApplied(null);
+      setApplying(false);
+      setCopied(false);
+      setStreaming(true);
+      setView({ kind: "result", pending });
+
+      const unlisten: UnlistenFn[] = [];
+      let acc = "";
+      try {
+        unlisten.push(
+          await listen<string>("ghostpen://chunk", (e) => {
+            acc += e.payload;
+            setStreamText(acc);
+          }),
+        );
+        unlisten.push(
+          await listen<string>("ghostpen://done", (e) => {
+            if (e.payload) setStreamText(e.payload);
+          }),
+        );
+        unlisten.push(
+          await listen<string>("ghostpen://error", (e) => setStreamErr(e.payload)),
+        );
+        await processTextStream(pending.action, pending.targetLang, level, pending.source);
+      } catch (e) {
+        setStreamErr(String(e));
+      } finally {
+        unlisten.forEach((u) => u());
+        setStreaming(false);
+      }
+    },
+    [empty, level],
+  );
+
+  // Confirm: apply the result via the real clipboard+paste path. Re-runs the model (the
+  // backend generate/apply split is TODO 12.1). Mirrors the old ProcessResult handling
+  // (pasted vs. manual-copy).
+  const applyPending = useCallback(
+    async (pending: Pending) => {
+      if (applying) return;
+      setApplying(true);
+      try {
+        const result = await processAiAction(pending.action, pending.targetLang, level);
+        setApplied(result);
+      } catch (e) {
+        setStreamErr(String(e));
+      } finally {
+        setApplying(false);
+      }
+    },
+    [applying, level],
+  );
+
+  // Run the free-text instruction from the describe field over the current selection.
+  // There is no streaming/generate-only command for arbitrary instructions, so this applies
+  // directly via `process_ai_custom` (clipboard+paste), then shows the same result card.
   const runCustom = useCallback(async () => {
     const instruction = prompt.trim();
     if (!instruction || empty) return;
-    setView({ kind: "loading", label: instruction });
+    const pending: Pending = { action: "__custom", label: instruction, targetLang: null, source: selection };
+    setStreamText("");
+    setStreamErr(null);
+    setApplied(null);
+    setCopied(false);
+    setStreaming(false);
+    setApplying(true);
+    setView({ kind: "result", pending });
     try {
       const result = await processAiCustom(instruction);
+      setStreamText(result.output);
+      setApplied(result);
       setPrompt("");
-      setView({ kind: "result", result });
     } catch (e) {
-      setView({ kind: "error", message: String(e) });
+      setStreamErr(String(e));
+    } finally {
+      setApplying(false);
     }
-  }, [prompt, empty]);
+  }, [prompt, empty, selection]);
 
-  // Flat, ordered list of selectable menu items — the single source of truth for both
-  // rendering and keyboard navigation, so the cursor index always matches what's on screen.
-  const menuItems = useMemo(() => {
-    const items: { id: string; label: string; hint: string; icon: IconName; activate: () => void }[] =
-      ACTIONS.map((a) => ({
-        id: a.id,
-        label: a.label,
-        hint: a.hint,
-        icon: a.icon,
-        activate: () => run(a.id, null, a.label),
-      }));
+  // The verb/tone/custom chips, in keyboard order: Proofread, the four tones, Translate,
+  // then any user custom actions.
+  const chips = useMemo(() => {
+    type Chip = { id: string; label: string; icon: IconName; activate: () => void };
+    const items: Chip[] = [];
+    items.push({
+      id: "proofread",
+      label: "Proofread",
+      icon: "proofread",
+      activate: () =>
+        preview({ action: "proofread", label: "Proofread", targetLang: null, source: selection }),
+    });
+    for (const t of TONES) {
+      items.push({
+        id: t.id,
+        label: t.label,
+        icon: t.icon,
+        activate: () =>
+          preview({ action: t.id, label: t.label, targetLang: null, source: selection }),
+      });
+    }
     items.push({
       id: "__translate",
-      label: "Translate →",
-      hint: "Into another language",
+      label: "Translate",
       icon: "translate",
       activate: () => setView({ kind: "translate" }),
     });
@@ -128,114 +217,103 @@ export default function Menu() {
       items.push({
         id: a.id,
         label: a.label,
-        hint: "Custom action",
         icon: "custom",
-        activate: () => run(a.id, null, a.label),
+        activate: () =>
+          preview({ action: a.id, label: a.label, targetLang: null, source: selection }),
       });
     }
     return items;
-  }, [customActions, run]);
+  }, [customActions, preview, selection]);
 
-  // Language grid items + a trailing "Back" entry, so the keyboard can reach Back too.
+  // Language grid + a trailing Back entry, so the keyboard can reach Back too.
   const langItems = useMemo(() => {
     const items: { label: string; back?: boolean; activate: () => void }[] =
       TRANSLATE_LANGUAGES.map((lang) => ({
         label: lang,
-        activate: () => run("translate", lang, `Translate → ${lang}`),
+        activate: () =>
+          preview({ action: "translate", label: `Translate → ${lang}`, targetLang: lang, source: selection }),
       }));
-    items.push({ label: "← Back", back: true, activate: () => setView({ kind: "menu" }) });
+    items.push({ label: "← Back", back: true, activate: () => resetMenu() });
     return items;
-  }, [run]);
+  }, [preview, selection, resetMenu]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
   // A fresh trigger (hotkey / --trigger / tray) resets to the menu and re-reads the selection.
-  // This is driven by an explicit event from the backend, NOT window focus — otherwise simply
-  // regaining focus (e.g. after the AI call completes) would wipe the result the user wants.
+  // Driven by an explicit backend event, NOT focus — so regaining focus after the AI call
+  // completes won't wipe a result the user is reviewing.
   useEffect(() => {
     const unlisten = listen("ghostpen://show", () => {
-      setView({ kind: "menu" });
-      setCursor(0);
+      resetMenu();
+      setPrompt("");
       refresh();
     });
     return () => {
       unlisten.then((f) => f());
     };
-  }, [refresh]);
+  }, [refresh, resetMenu]);
 
-  // Plain focus just refreshes the selection/status; it must not change the current view.
+  // Plain focus just refreshes selection/status; it must not change the current view.
   useEffect(() => {
-    const onFocus = () => {
-      refresh();
-    };
+    const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
 
-  // Reset the language cursor each time we enter the translate view.
   useEffect(() => {
     if (view.kind === "translate") setLangCursor(0);
   }, [view.kind]);
 
-  // Keep the cursor in range if the item count changes (e.g. custom actions load in).
   useEffect(() => {
-    setCursor((c) => Math.min(c, Math.max(0, menuItems.length - 1)));
-  }, [menuItems.length]);
+    setCursor((c) => Math.min(c, Math.max(0, chips.length - 1)));
+  }, [chips.length]);
 
   // ---- keyboard control --------------------------------------------------------------
-  // Escape closes the menu; from a sub-view it goes back to the menu first.
+  // Escape: sub-view → menu → hide. First Esc while typing just blurs the field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      // First Esc while typing just leaves the prompt field; a second Esc then hides/closes.
       if (isTypingTarget(e.target)) {
         (e.target as HTMLElement).blur();
         return;
       }
-      if (view.kind === "translate" || view.kind === "result" || view.kind === "error") {
-        setView({ kind: "menu" });
+      if (view.kind === "translate" || view.kind === "result") {
+        resetMenu();
       } else {
         hideWindow();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view]);
+  }, [view, resetMenu]);
 
-  // Menu view: ↑/↓ (or j/k) move the cursor, ←/→ (or h/l) change intensity, Enter activates,
-  // and 1–9 jump to and run an action directly.
+  // Menu view: arrows / hjkl move between chips, Enter activates, 1–9 quick-run.
   useEffect(() => {
     if (view.kind !== "menu") return;
-    const n = menuItems.length;
+    const n = chips.length;
     if (n === 0) return;
     const onKey = (e: KeyboardEvent) => {
-      if (isTypingTarget(e.target)) return; // don't hijack keys while typing in the prompt bar
+      if (isTypingTarget(e.target)) return;
       switch (e.key) {
+        case "ArrowRight":
         case "ArrowDown":
+        case "l":
         case "j":
           e.preventDefault();
           setCursor((c) => (c + 1) % n);
           break;
+        case "ArrowLeft":
         case "ArrowUp":
+        case "h":
         case "k":
           e.preventDefault();
           setCursor((c) => (c - 1 + n) % n);
           break;
-        case "ArrowLeft":
-        case "h":
-          e.preventDefault();
-          setLevel((lv) => shiftLevel(lv, -1));
-          break;
-        case "ArrowRight":
-        case "l":
-          e.preventDefault();
-          setLevel((lv) => shiftLevel(lv, 1));
-          break;
         case "Enter":
           e.preventDefault();
-          if (!empty) menuItems[cursor]?.activate();
+          if (!empty) chips[cursor]?.activate();
           break;
         default:
           if (/^[1-9]$/.test(e.key)) {
@@ -243,14 +321,14 @@ export default function Menu() {
             if (idx < n) {
               e.preventDefault();
               setCursor(idx);
-              if (!empty) menuItems[idx]?.activate();
+              if (!empty) chips[idx]?.activate();
             }
           }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view.kind, menuItems, cursor, empty]);
+  }, [view.kind, chips, cursor, empty]);
 
   // Translate view: arrows move across the 2-column grid, Enter picks the language.
   useEffect(() => {
@@ -290,14 +368,24 @@ export default function Menu() {
     return () => window.removeEventListener("keydown", onKey);
   }, [view.kind, langItems, langCursor]);
 
-  // Scroll the active item into view as the cursor moves through a long list.
+  // Scroll the active item into view as the cursor moves.
   const cursorRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     cursorRef.current?.scrollIntoView({ block: "nearest" });
   }, [cursor, langCursor, view.kind]);
 
+  const copyResult = async () => {
+    try {
+      await navigator.clipboard.writeText(streamText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* ignore */
+    }
+  };
+
   return (
-    <div className="menu">
+    <div className="menu card-shell">
       <header className="menu-head">
         <span className="brand">GhostPen</span>
         <span className="head-btns">
@@ -319,59 +407,88 @@ export default function Menu() {
 
       {view.kind === "menu" && (
         <>
-          <div className={`selection ${empty ? "empty" : ""}`}>
-            {empty ? (
-              status?.manual_mode ? (
-                "Copy some text (Ctrl+C), then pick an action."
-              ) : (
-                "No text selected."
-              )
-            ) : (
-              <span>{selection.length > 140 ? selection.slice(0, 140) + "…" : selection}</span>
-            )}
-          </div>
-          <LevelBar level={level} setLevel={setLevel} />
-          <div className="actions">
-            {menuItems.map((a, i) => (
-              <button
-                key={a.id}
-                ref={i === cursor ? cursorRef : undefined}
-                className={`action ${i === cursor ? "selected" : ""}`}
-                disabled={empty}
-                onClick={() => a.activate()}
-                onMouseEnter={() => setCursor(i)}
-              >
-                <Icon name={a.icon} className="action-icon" />
-                <span className="action-text">
-                  <span className="action-label">{a.label}</span>
-                  <span className="action-hint">{a.hint}</span>
-                </span>
-              </button>
-            ))}
-          </div>
           <form
-            className="prompt-bar"
+            className="describe-bar"
             onSubmit={(e) => {
               e.preventDefault();
               runCustom();
             }}
           >
+            <Icon name="custom" className="describe-spark" />
             <input
-              className="prompt-input"
+              className="describe-input"
               value={prompt}
               disabled={empty}
-              placeholder={empty ? "Select text first…" : "Tell GhostPen what to do…"}
+              placeholder={empty ? "Select text first…" : "Describe your change…"}
               onChange={(e) => setPrompt(e.target.value)}
             />
             <button
               type="submit"
-              className="prompt-send"
+              className="describe-send"
               disabled={empty || prompt.trim().length === 0}
               title="Run instruction (Enter)"
             >
               <Icon name="send" />
             </button>
           </form>
+
+          <div className={`selection ${empty ? "empty" : ""}`}>
+            {empty ? (
+              status?.manual_mode
+                ? "Copy some text (Ctrl+C), then pick an action."
+                : "No text selected."
+            ) : (
+              <span>{selection.length > 160 ? selection.slice(0, 160) + "…" : selection}</span>
+            )}
+          </div>
+
+          <div className="verbs">
+            <div className="verb-group-label">Proofread</div>
+            <div className="chip-row">
+              {chips[0] && (
+                <ChipButton
+                  chip={chips[0]}
+                  index={0}
+                  cursor={cursor}
+                  empty={empty}
+                  cursorRef={cursorRef}
+                  onHover={setCursor}
+                  primary
+                />
+              )}
+            </div>
+
+            <div className="verb-group-label">Rewrite</div>
+            <div className="chip-row">
+              {chips.slice(1).map((c, k) => (
+                <ChipButton
+                  key={c.id}
+                  chip={c}
+                  index={k + 1}
+                  cursor={cursor}
+                  empty={empty}
+                  cursorRef={cursorRef}
+                  onHover={setCursor}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="intensity-pill">
+            <span className="intensity-label">Intensity</span>
+            <div className="seg">
+              {LEVELS.map((l) => (
+                <button
+                  key={l}
+                  className={`seg-btn ${level === l ? "active" : ""}`}
+                  onClick={() => setLevel(l)}
+                  title="Applies to Rewrite tones"
+                >
+                  {l[0].toUpperCase() + l.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
         </>
       )}
 
@@ -382,6 +499,7 @@ export default function Menu() {
               key={lang.label}
               ref={i === langCursor ? cursorRef : undefined}
               className={`lang ${lang.back ? "back" : ""} ${i === langCursor ? "selected" : ""}`}
+              disabled={!lang.back && empty}
               onClick={() => lang.activate()}
               onMouseEnter={() => setLangCursor(i)}
             >
@@ -391,41 +509,181 @@ export default function Menu() {
         </div>
       )}
 
-      {view.kind === "loading" && (
-        <div className="state">
-          <div className="spinner" />
-          <div className="state-label">{view.label}…</div>
-        </div>
-      )}
-
       {view.kind === "result" && (
-        <div className="state result">
-          <div className="state-label ok">
-            {view.result.pasted ? "✓ Pasted" : "✓ Result copied"}
-          </div>
-          {!view.result.pasted && (
-            <div className="hint">On the clipboard — press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.</div>
-          )}
-          <pre className="output">{view.result.output}</pre>
-          <div className="row">
-            <button className="action small" onClick={() => setView({ kind: "menu" })}>
-              Back
-            </button>
-            <button className="action small" onClick={() => hideWindow()}>
-              Close
-            </button>
-          </div>
-        </div>
+        <ResultView
+          pending={view.pending}
+          text={streamText}
+          streaming={streaming}
+          error={streamErr}
+          applied={applied}
+          applying={applying}
+          copied={copied}
+          onReplace={() => applyPending(view.pending)}
+          onCopy={copyResult}
+          onBack={resetMenu}
+          onClose={() => hideWindow()}
+          onRetry={() => preview(view.pending)}
+        />
       )}
+    </div>
+  );
+}
 
-      {view.kind === "error" && (
-        <div className="state error">
-          <div className="state-label bad">⚠ {view.message}</div>
-          <button className="action small" onClick={() => setView({ kind: "menu" })}>
-            Back
+// ---- chip button -----------------------------------------------------------------------
+
+function ChipButton({
+  chip,
+  index,
+  cursor,
+  empty,
+  cursorRef,
+  onHover,
+  primary,
+}: {
+  chip: { id: string; label: string; icon: IconName; activate: () => void };
+  index: number;
+  cursor: number;
+  empty: boolean;
+  cursorRef: React.RefObject<HTMLButtonElement | null>;
+  onHover: (i: number) => void;
+  primary?: boolean;
+}) {
+  const selected = index === cursor;
+  return (
+    <button
+      ref={selected ? cursorRef : undefined}
+      className={`chip ${primary ? "chip-primary-verb" : ""} ${selected ? "selected" : ""}`}
+      disabled={empty}
+      onClick={() => chip.activate()}
+      onMouseEnter={() => onHover(index)}
+    >
+      <Icon name={chip.icon} className="chip-icon" />
+      <span className="chip-label">{chip.label}</span>
+    </button>
+  );
+}
+
+// ---- result preview --------------------------------------------------------------------
+
+function ResultView({
+  pending,
+  text,
+  streaming,
+  error,
+  applied,
+  applying,
+  copied,
+  onReplace,
+  onCopy,
+  onBack,
+  onClose,
+  onRetry,
+}: {
+  pending: Pending;
+  text: string;
+  streaming: boolean;
+  error: string | null;
+  applied: ProcessResult | null;
+  applying: boolean;
+  copied: boolean;
+  onReplace: () => void;
+  onCopy: () => void;
+  onBack: () => void;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  const isProofread = pending.action === "proofread";
+  const diff = useMemo(
+    () => (isProofread && text ? wordDiff(pending.source, text) : null),
+    [isProofread, pending.source, text],
+  );
+  const isCustom = pending.action === "__custom";
+
+  // Once applied, mirror the old ProcessResult handling (pasted vs. manual-copy).
+  if (applied) {
+    return (
+      <div className="result">
+        <div className="result-head">
+          <span className="result-title">{pending.label}</span>
+          <span className="result-ok">{applied.pasted ? "Replaced ✓" : "Copied ✓"}</span>
+        </div>
+        {!applied.pasted && (
+          <div className="manual-hint">
+            On the clipboard — press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.
+          </div>
+        )}
+        <div className="result-body">{applied.output}</div>
+        <div className="result-actions">
+          <button className="chip" onClick={onBack}>
+            ← Back
+          </button>
+          <button className="chip chip-primary-verb" onClick={onClose}>
+            Done
           </button>
         </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="result">
+      <div className="result-head">
+        <span className="result-title">{pending.label}</span>
+        {(streaming || applying) && <span className="result-status">generating…</span>}
+      </div>
+
+      {error ? (
+        <div className="result-error">⚠ {error}</div>
+      ) : (
+        <div className={`result-body ${(streaming || applying) && !text ? "shimmer" : ""}`}>
+          {(streaming || applying) && !text ? (
+            <span className="shimmer-line" />
+          ) : diff ? (
+            diff.map((s, i) => (
+              <span key={i} className={s.type === "equal" ? "" : `diff-${s.type}`}>
+                {s.text}
+              </span>
+            ))
+          ) : (
+            text
+          )}
+        </div>
       )}
+
+      <div className="result-actions">
+        <button className="chip" onClick={onBack} title="Back to menu (Esc)">
+          ← Back
+        </button>
+        {error ? (
+          <button className="chip" onClick={onRetry} disabled={streaming}>
+            Retry
+          </button>
+        ) : isCustom ? (
+          // Custom instructions already applied (no generate-only command); offer Copy + Done.
+          <>
+            <button className="chip" onClick={onCopy} disabled={applying || !text}>
+              {copied ? "Copied ✓" : "Copy"}
+            </button>
+            <button className="chip chip-primary-verb" onClick={onClose} disabled={applying}>
+              Done
+            </button>
+          </>
+        ) : (
+          <>
+            <button className="chip" onClick={onCopy} disabled={streaming || !text}>
+              {copied ? "Copied ✓" : "Copy"}
+            </button>
+            <button
+              className="chip chip-primary-verb"
+              onClick={onReplace}
+              disabled={streaming || applying || !text}
+              title="Apply to your document"
+            >
+              {applying ? "Replacing…" : "Replace"}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
