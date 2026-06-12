@@ -47,6 +47,20 @@
         "visible": false
       },
       {
+        "label": "dictation",
+        "title": "GhostPen Dictation",
+        "url": "index.html#/dictation",
+        "width": 520,
+        "height": 200,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "resizable": false,
+        "visible": false
+      },
+      {
         "label": "captions",
         "title": "GhostPen Captions",
         "url": "index.html#/captions",

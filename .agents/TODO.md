@@ -206,6 +206,28 @@ Cargo feature** (default off) so the default build + release CI are untouched.
 - [ ] **11.10** Follow-ups: overlap/VAD chunking; macOS ScreenCaptureKit to avoid BlackHole;
       fold `--features captions` into the tagged `release.yml` once the PR lane is proven green.
 
+## Phase 12 — Voice dictation (ADR-009) — `--voice-input` → mic → whisper → proofread → paste
+
+- [x] **12.1** `config.rs`: `DictationSettings { language, proofread (default true), device }`
+      under `settings.dictation`, serde-defaulted for old settings.json. Whisper model is
+      **shared with captions** (`settings.captions.model`) — downloaded once for both.
+- [x] **12.2** `captions/audio.rs`: mic capture path `start_input` (Linux: default `pactl` source,
+      never `.monitor`, via `PULSE_SOURCE` + cpal `pulse`); `SampleBuffer::snapshot()` + `tail(n)`.
+- [x] **12.3** `dictation.rs`: `DictationManager` in `AppState` (feature-gated stub like captions).
+      Worker: ~10 Hz RMS → `ghostpen://dictation-level`; ~1.5 s cumulative re-transcribe →
+      `ghostpen://dictation {text,state}`. Finalize: whisper → AI proofread → clipboard contract
+      (snapshot/write/hide/paste/restore; manual mode → "Copied — press Ctrl+V"). Busy guard shared.
+- [x] **12.4** `lib.rs`: `--voice-input` toggle in `handle_cli_args` + HELP_TEXT; commands
+      `dictation_status/start/stop/cancel`; tray **Dictation** item; bottom-center placement.
+- [x] **12.5** `tauri.conf.json` `dictation` window + capabilities windows list.
+- [x] **12.6** Frontend: `Dictation.tsx` (#/dictation) — Apple-style opaque pill on transparent
+      window, waveform bars from level events, live transcript, state chips, Esc cancel / Enter
+      finalize; `api.ts` wrappers + types; route in `App.tsx`; styles.
+- [x] **12.7** Docs: README Hyprland bind (`ghostpen --voice-input`), AGENTS note if needed.
+- [x] **12.8** Verified: `cargo check` (default + `--features captions`) ✅, `cargo test
+      --features captions` (16 passed) ✅, `npm run build` (tsc) ✅. _Live mic test on the
+      Arch/Hyprland box still pending._
+
 ### Remaining / next
 - [ ] **8.7** per-platform test matrix (Windows, macOS, Linux/X11).
 - [ ] **6.x** verify the in-process global hotkey on X11/Windows/macOS (Wayland uses the
@@ -215,4 +237,4 @@ Cargo feature** (default off) so the default build + release CI are untouched.
 - [ ] Optional: dedicated monochrome tray glyph (dark tile can blend into dark tray bars).
 
 ---
-*Last updated: 2026-06-05*
+*Last updated: 2026-06-12*

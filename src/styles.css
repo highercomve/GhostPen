@@ -535,3 +535,163 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   color: rgba(255, 255, 255, 0.5);
   text-shadow: 0 1px 2px #000;
 }
+
+/* ---- Voice dictation overlay (ADR-009) ---------------------------------------------- */
+/* Apple-dictation-style HUD: one OPAQUE rounded pill on a transparent window (the opaque
+   backdrop is load-bearing on wlroots/WebKitGTK — see the .cap-lines ghosting note).
+   The pill has a FIXED size for the same reason: a transparent window doesn't clear the
+   previous frame, so a pill that grows/shrinks between states leaves its old outline behind
+   ("opened twice" ghost). Constant geometry → every frame fully repaints the last one. */
+.dictation {
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 10px 12px;
+  user-select: none;
+}
+
+.dict-pill {
+  width: 100%;
+  max-width: 480px;
+  height: 100%;
+  background: #101216;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 22px;
+  padding: 12px 16px 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dict-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Mic badge: pulses softly while listening (Apple's red recording dot, tastefully).
+   Also a button — click to finish a live dictation or start another from a finished pill.
+   Never keyboard-focusable (tabIndex -1): recording must not start from a stray keypress. */
+.dict-mic {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  padding: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.08);
+}
+.dict-mic:not(.live):not(:disabled):hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.dict-mic:disabled { opacity: 0.5; cursor: default; }
+.dict-mic.live {
+  color: #fff;
+  background: #e0414d;
+  animation: dict-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dict-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(224, 65, 77, 0.45); }
+  50% { box-shadow: 0 0 0 7px rgba(224, 65, 77, 0); }
+}
+
+/* The waveform: thin rounded bars, heights driven by mic level events (JS), smoothed here.
+   The explicit pill-colored background (here and on .dict-text/.dict-hint) is load-bearing:
+   WebKitGTK's partial repaints on a transparent wlroots window don't clear old pixels, so a
+   region whose content changes must paint its own opaque backdrop or old glyphs/bars smear
+   through (same class of bug as the .cap-lines ghosting note). */
+.dict-wave {
+  flex: 1;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  overflow: hidden;
+  background: #101216;
+}
+.dict-bar {
+  flex: none;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #9db4ff, var(--accent));
+  transition: height 110ms ease-out;
+}
+/* Indeterminate shimmer while whisper / the AI is working. */
+.dict-wave.busy .dict-bar {
+  animation: dict-shimmer 1.2s ease-in-out infinite;
+}
+@keyframes dict-shimmer {
+  0%, 100% { height: 4px; opacity: 0.45; }
+  50% { height: 16px; opacity: 1; }
+}
+
+/* Spoken-language chip: compact, dark, pill-matched.
+   width:auto overrides the global `input, select { width: 100% }` form styling. */
+.dict-lang {
+  flex: none;
+  width: auto;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dict-lang:hover { background: rgba(255, 255, 255, 0.16); }
+
+.dict-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+.dict-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dict-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); }
+.dict-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.dict-btn.ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dict-btn.ok:hover:not(:disabled) { filter: brightness(1.12); }
+
+/* Live transcript: white on the dark pill, newest words simply extend the line.
+   Always rendered at its flexed size (never display:none) — see the ghosting note above. */
+.dict-text {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  text-align: center;
+  font-size: 15px;
+  line-height: 1.35;
+  color: #fff;
+  background: #101216; /* anti-smear, see .dict-wave note */
+}
+.dict-text.error { color: var(--danger); }
+
+.dict-hint {
+  height: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  background: #101216; /* anti-smear, see .dict-wave note */
+}

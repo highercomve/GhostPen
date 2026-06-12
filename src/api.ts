@@ -37,6 +37,7 @@ export interface Settings {
   restoreDelayMs: number;
   customActions: CustomAction[];
   captions: CaptionsSettings;
+  dictation: DictationSettings;
 }
 
 export interface CaptionsStatus {
@@ -117,6 +118,48 @@ export const captionsSetTranslate = (enable: boolean) =>
 /** Download the configured (or a specific) whisper model. May take a while (~140MB for base). */
 export const captionsDownloadModel = (model?: string) =>
   invoke<void>("captions_download_model", { model: model ?? null });
+
+// ---- dictation (ADR-009) --------------------------------------------------------------
+
+/** Dictation shares the whisper model with captions (`settings.captions.model`). */
+export interface DictationSettings {
+  language: string;
+  proofread: boolean;
+  device: string;
+}
+
+export interface DictationStatus {
+  available: boolean;
+  running: boolean;
+  model_ready: boolean;
+  model: string;
+  proofread: boolean;
+  /** Spoken language ("auto" or an ISO code) — mirrors settings.dictation.language. */
+  language: string;
+  device: string | null;
+}
+
+/** Payload of the `ghostpen://dictation` event. */
+export interface DictationUpdate {
+  text: string;
+  /** listening | transcribing | proofreading | done | cancelled | error */
+  state: string;
+  pasted: boolean;
+  manual: boolean;
+}
+
+/** Microphone candidates for the Settings picker (no monitor/loopback sources). */
+export const dictationListDevices = () => invoke<string[]>("dictation_list_devices");
+export const dictationStatus = () => invoke<DictationStatus>("dictation_status");
+/** Start listening; resolves to the capture device name. */
+export const dictationStart = () => invoke<string>("dictation_start");
+/** Stop & finalize (transcribe → proofread → paste); progress streams via events. */
+export const dictationStop = () => invoke<void>("dictation_stop");
+/** Discard the captured audio and hide the overlay. */
+export const dictationCancel = () => invoke<void>("dictation_cancel");
+/** Set the spoken language (persists; a running session picks it up on the next pass). */
+export const dictationSetLanguage = (language: string) =>
+  invoke<void>("dictation_set_language", { language });
 
 // Whisper models offered in the UI (ggml-{id}.bin on Hugging Face). Ordered fastest →
 // most accurate. `.en` variants are English-only but a bit faster/more accurate for English.

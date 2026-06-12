@@ -4,6 +4,7 @@ import {
   Profile,
   CustomAction,
   CaptionsSettings,
+  DictationSettings,
   Status,
   CaptionsStatus,
   getSettings,
@@ -14,6 +15,7 @@ import {
   captionsStatus,
   captionsDownloadModel,
   captionsListDevices,
+  dictationListDevices,
   openCaptions,
   PRESETS,
   WHISPER_MODELS,
@@ -41,6 +43,7 @@ export default function Settings() {
   const [saved, setSaved] = useState(false);
   const [capStatus, setCapStatus] = useState<CaptionsStatus | null>(null);
   const [capDevices, setCapDevices] = useState<string[]>([]);
+  const [dictDevices, setDictDevices] = useState<string[]>([]);
   const [capMsg, setCapMsg] = useState<string>("");
   const [downloading, setDownloading] = useState(false);
 
@@ -49,6 +52,7 @@ export default function Settings() {
     getStatus().then(setStatus).catch(() => {});
     captionsStatus().then(setCapStatus).catch(() => {});
     captionsListDevices().then(setCapDevices).catch(() => {});
+    dictationListDevices().then(setDictDevices).catch(() => {});
   }, []);
 
   if (!settings) return <div className="settings loading-page">Loading…</div>;
@@ -134,6 +138,11 @@ export default function Settings() {
   const captions = settings.captions;
   const updateCaptions = (patch: Partial<CaptionsSettings>) => {
     update({ captions: { ...captions, ...patch } });
+  };
+
+  const dictation = settings.dictation;
+  const updateDictation = (patch: Partial<DictationSettings>) => {
+    update({ dictation: { ...dictation, ...patch } });
   };
 
   // Download the configured whisper model, then save + refresh status so the UI reflects it.
@@ -397,6 +406,43 @@ export default function Settings() {
         </label>
 
         <button className="btn" onClick={() => openCaptions()}>Open captions overlay</button>
+      </section>
+
+      {/* Voice dictation (microphone) */}
+      <section className="card">
+        <h2>Dictation <span className="muted small">microphone → proofread text on the clipboard</span></h2>
+        <p className="muted small">
+          Speak (<code>ghostpen --voice-input</code>, e.g. Ctrl+Shift+D), stop, and the transcript
+          is proofread by your active AI profile and copied to the clipboard. Uses the same
+          Whisper model as Live Captions above — downloaded once for both.
+        </p>
+
+        <label>
+          Microphone <span className="muted">(“Auto” follows your default input device)</span>
+          <select value={dictation.device} onChange={(e) => updateDictation({ device: e.target.value })}>
+            <option value="">Auto — default microphone (recommended)</option>
+            {dictDevices.map((d) => (
+              <option key={d} value={d}>🎙 {d}</option>
+            ))}
+          </select>
+          <span className="muted small">
+            Captions listen to your <em>output</em> (what you hear); dictation always listens to a
+            real <em>input</em> — monitor sources aren’t offered here.
+          </span>
+        </label>
+
+        <label>
+          Spoken language
+          <select value={dictation.language} onChange={(e) => updateDictation({ language: e.target.value })}>
+            {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        </label>
+
+        <label className="checkbox">
+          <input type="checkbox" checked={dictation.proofread}
+            onChange={(e) => updateDictation({ proofread: e.target.checked })} />
+          Proofread with the AI profile before copying <span className="muted">(off = raw transcript)</span>
+        </label>
       </section>
 
       <div className="footer">

@@ -313,6 +313,63 @@ backend is mandatory there, with a persistent serve thread for clipboard ownersh
   is absent. The Settings → Captions device dropdown lets the user pick any source; "Auto"
   follows the default output. Validated end-to-end (monitor capture rms≈4.5k vs 0 on the mic).
 
+### ADR-009: Voice dictation (`--voice-input` → mic → whisper → AI proofread → paste)
+- **Status**: Accepted — implemented behind the same `captions` Cargo feature.
+- **Context**: Users want to *speak* text into any focused app (Apple-style dictation): trigger
+  a hotkey, see a listening overlay with a waveform and the live transcript, and on finish have
+  the text **proofread by the AI backend** and pasted in place. GhostPen already owns every
+  piece: cpal capture + whisper STT (ADR-008), an OpenAI-compatible AI client with a strict
+  `proofread` prompt, the clipboard/paste contract (ADR-003/005), and a `--flag`-forwarding
+  single-instance trigger pattern (`--trigger`). Dictation is a recombination, not new
+  infrastructure.
+- **Decision**:
+  1. **Same feature gate.** Dictation reuses the `captions` Cargo feature (whisper is the heavy
+     dep; a mic stream adds nothing). Without the feature, `dictation_start` returns the same
+     readable "compiled without captions support" error — degrade, never crash.
+  2. **Trigger is `ghostpen --voice-input`**, handled in `handle_cli_args` and therefore
+     forwarded by single-instance exactly like `--trigger` (Wayland/Hyprland binds it in the
+     compositor, e.g. `bind = CTRL SHIFT, D, exec, ghostpen --voice-input`). The flag is a
+     **toggle**: not running → start listening; running → stop & finalize. One keybind starts
+     and finishes a dictation, which is the natural push-again-to-stop flow for a compositor
+     bind. Esc in the overlay cancels; Enter (or ✓) finalizes. A tray **Dictation** item mirrors it.
+  3. **Mic capture, not loopback.** `captions::audio` gains an input-device path
+     (`start_input`): default microphone via cpal; on Linux it resolves the default **source**
+     via `pactl get-default-source` (never a `.monitor`) and routes cpal's `pulse` device with
+     `PULSE_SOURCE` — the mirror image of the ADR-008 loopback correction. Same
+     downmix→mono→16 kHz pipeline, same `SampleBuffer`.
+  4. **Cumulative live transcript.** Unlike captions (drain per chunk → subtitle lines),
+     dictation **accumulates** the whole utterance and re-transcribes the full buffer on a
+     cadence (~1.5 s), replacing the displayed text — whisper refines earlier words as context
+     grows, which is what Apple dictation does. `SampleBuffer` gains non-draining `snapshot()`
+     and `tail(n)` accessors. The 60 s buffer cap bounds an utterance (v1 limit, stated in UI
+     docs). A ~10 Hz `ghostpen://dictation-level` event (RMS of the last ~100 ms) drives the
+     waveform; transcripts stream via `ghostpen://dictation` `{text, state}`.
+  5. **Finalize = proofread + copy-and-show (never auto-paste).** On stop: final whisper pass
+     → the transcript is routed through `ai::run_completion` with the **built-in `proofread`
+     system prompt** (state `proofreading` in the overlay; off-switch in settings) → the result
+     is **copied to the clipboard and kept on screen** ("Copied — press Ctrl+V") until
+     dismissed. Dictation deliberately does NOT reuse `process_inner`'s auto-paste + clipboard
+     restore: there is no "in place" selection to return to, the user must be able to review
+     what was heard before it lands, and on Wayland a synthetic paste fails silently — paste +
+     restore would wipe the result from both the screen and the clipboard (observed during
+     validation). The clipboard write still shares the `busy` guard with the menu flow.
+  6. **A `dictation` window** (`#/dictation`): transparent, frameless, always-on-top,
+     skip-taskbar, bottom-center (reuses the captions placement helper). The UI renders one
+     **opaque rounded pill** on the transparent window (the ADR-008/11.12 WebKitGTK ghosting
+     lesson) styled after Apple's dictation HUD: system font stack, waveform bars driven by the
+     level events, live transcript, state chips. New `DictationSettings { language, proofread,
+     device }` under `settings.dictation` (serde-defaulted so existing settings.json upgrades
+     cleanly). Dictation deliberately has **no model setting of its own**: it uses
+     `settings.captions.model`, so whisper is downloaded and managed once for both features.
+- **Consequences**: No new dependencies, CI matrices unchanged (the feature flag already has
+  lanes). Mic capture coexists with a running captions session (separate cpal streams, separate
+  managers) but both load a whisper context — acceptable; a shared model cache is a future
+  optimization. Re-transcribing the full buffer is O(n²)-ish over a long utterance — fine for
+  ≤60 s dictation on CPU `base`, comfortable on GPU backends; VAD/segmented finalization is the
+  follow-up if long-form dictation is wanted. On Chromebook/Crostini there is no mic loopback
+  restriction (unlike system audio), but synthetic paste is still unavailable → manual-copy
+  ending, which the overlay communicates.
+
 ## Plan Review (review of `plan.md`)
 
 ### Strengths

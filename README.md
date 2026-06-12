@@ -157,6 +157,8 @@ A second launch with a flag is forwarded into the running instance (no new proce
 
 ```bash
 ghostpen --trigger      # show the action menu
+ghostpen --voice-input  # toggle voice dictation (start / stop, result on the clipboard)
+ghostpen --captions     # toggle live captions (start & show / stop & hide)
 ghostpen --playground   # open the Playground window
 ghostpen --settings     # open the Settings window
 ghostpen --tray         # background tray only (the default; explicit for autostart)
@@ -165,6 +167,22 @@ ghostpen --tray         # background tray only (the default; explicit for autost
 A bare `ghostpen &` starts in the background with the menu hidden; it only appears when
 you trigger it. `--tray` is the same thing made explicit, handy in `.desktop`/autostart
 entries.
+
+### Voice dictation (requires a captions-enabled build)
+
+Press your dictation keybind (or tray → **Dictation**) and speak — an Apple-style pill
+overlay shows a live waveform and the transcript as whisper hears you. Press the keybind
+again (or **⏎** / **✓** / the 🎤 badge) to finish: the transcript gets a final whisper pass,
+is **proofread by your AI profile**, and the polished text is shown in the pill and **copied
+to the clipboard** — review it, then paste with **Ctrl+V**. **Esc** cancels; click 🎤 to
+dictate again. Dictation uses the **same whisper model as Live Captions** (Settings →
+Captions), so the model is downloaded once for both.
+
+On Hyprland, bind it next to the trigger:
+
+```conf
+bind = CTRL SHIFT, D, exec, ghostpen --voice-input
+```
 
 ### Actions & intensity
 

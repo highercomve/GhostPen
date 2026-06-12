@@ -77,6 +77,22 @@ export default function Captions() {
     };
   }, []);
 
+  // Esc dismisses the overlay like every other GhostPen window — and stops capture, so
+  // captions never keep transcribing invisibly behind a hidden window.
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        captionsStop().catch(() => {});
+        hideWindow().catch(() => {});
+        setLines([]);
+        refreshStatus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const onStart = async () => {
     setError(null);
     try {

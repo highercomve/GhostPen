@@ -96,6 +96,36 @@ impl Default for CaptionsSettings {
     }
 }
 
+/// Voice dictation (ADR-009): mic → whisper → optional AI proofread → paste in place.
+/// Uses the SAME whisper model as captions (`settings.captions.model`) so the model is
+/// downloaded and managed once; only the mic/language/proofread knobs are dictation's own.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DictationSettings {
+    /// Spoken language: `auto` (detect) or an ISO code (`en`, `es`, …).
+    #[serde(default = "default_caption_language")]
+    pub language: String,
+    /// Run the final transcript through the AI `proofread` action before pasting.
+    #[serde(default = "default_true")]
+    pub proofread: bool,
+    /// Microphone name substring to match; empty = default input device.
+    #[serde(default)]
+    pub device: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DictationSettings {
+    fn default() -> Self {
+        DictationSettings {
+            language: default_caption_language(),
+            proofread: true,
+            device: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_hotkey")]
@@ -114,6 +144,9 @@ pub struct Settings {
     /// Live system-audio captions configuration (ADR-008).
     #[serde(default)]
     pub captions: CaptionsSettings,
+    /// Voice dictation configuration (ADR-009).
+    #[serde(default)]
+    pub dictation: DictationSettings,
 }
 
 fn default_hotkey() -> String {
@@ -158,6 +191,7 @@ impl Settings {
             restore_delay_ms: default_restore_delay(),
             custom_actions: Vec::new(),
             captions: CaptionsSettings::default(),
+            dictation: DictationSettings::default(),
         }
     }
 }

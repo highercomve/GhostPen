@@ -51,6 +51,26 @@ impl SampleBuffer {
         }
     }
 
+    /// Copy everything captured so far WITHOUT clearing — dictation re-transcribes the whole
+    /// utterance each pass so whisper can refine earlier words (ADR-009).
+    pub fn snapshot(&self) -> Vec<f32> {
+        match self.inner.lock() {
+            Ok(buf) => buf.clone(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Copy at most the last `n` samples (for cheap RMS/level meters).
+    pub fn tail(&self, n: usize) -> Vec<f32> {
+        match self.inner.lock() {
+            Ok(buf) => {
+                let start = buf.len().saturating_sub(n);
+                buf[start..].to_vec()
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().map(|b| b.len()).unwrap_or(0)
     }
@@ -102,6 +122,34 @@ pub fn list_devices() -> Vec<String> {
         }
     }
     cpal_list_devices()
+}
+
+/// List microphone candidates for the dictation settings UI: real input sources only,
+/// never `.monitor` loopbacks (dictation must not transcribe system audio).
+pub fn list_input_devices() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(out) = pactl(&["list", "short", "sources"]) {
+            let names: Vec<String> = out
+                .lines()
+                .filter_map(|l| l.split('\t').nth(1).map(str::to_string))
+                .filter(|n| !n.is_empty() && !n.ends_with(".monitor"))
+                .collect();
+            if !names.is_empty() {
+                return names;
+            }
+        }
+    }
+    let host = cpal::default_host();
+    let mut names = Vec::new();
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if let Ok(name) = d.name() {
+                names.push(name);
+            }
+        }
+    }
+    names
 }
 
 /// cpal device enumeration (used off Linux, and as a Linux fallback if `pactl` is missing).
@@ -227,6 +275,72 @@ fn linux_resolve_source(prefer: &str) -> Option<String> {
     }
 }
 
+/// Point the pulse ALSA plugin at a specific source — or CLEAR the routing. `PULSE_SOURCE`
+/// is process-global and read when a stream opens, so a leftover value from a previous
+/// captions/dictation session would silently re-route the *other* feature's fallback path
+/// (dictation capturing the system-audio monitor, captions capturing the mic). Every capture
+/// start must therefore either set it or remove it — never leave it stale.
+#[cfg(target_os = "linux")]
+fn set_pulse_source(source: Option<&str>) {
+    match source {
+        Some(s) => std::env::set_var("PULSE_SOURCE", s),
+        None => std::env::remove_var("PULSE_SOURCE"),
+    }
+}
+
+/// Resolve which PipeWire/Pulse *input* source to capture for dictation (ADR-009). An explicit
+/// settings value is used verbatim; otherwise the **current default source** (the mic) via
+/// `pactl get-default-source`, and if that is missing or a `.monitor` (system audio — never
+/// what dictation wants), the first real (non-monitor) source. Returns None if `pactl` is
+/// unavailable so the caller falls back to cpal's default input.
+#[cfg(target_os = "linux")]
+fn linux_resolve_input_source(prefer: &str) -> Option<String> {
+    let p = prefer.trim();
+    if !p.is_empty() && !p.eq_ignore_ascii_case("auto") && !p.eq_ignore_ascii_case("default") {
+        return Some(p.to_string());
+    }
+    if let Some(source) = pactl(&["get-default-source"]) {
+        let source = source.trim();
+        if !source.is_empty() && source != "@DEFAULT_SOURCE@" && !source.ends_with(".monitor") {
+            return Some(source.to_string());
+        }
+    }
+    let out = pactl(&["list", "short", "sources"])?;
+    out.lines()
+        .filter_map(|l| l.split('\t').nth(1))
+        .find(|n| !n.is_empty() && !n.ends_with(".monitor"))
+        .map(str::to_string)
+}
+
+/// Pick a microphone: explicit name substring wins, else the default input device.
+/// (Unlike `pick_device`, never considers output/loopback/monitor devices.)
+fn pick_input_device(
+    host: &cpal::Host,
+    prefer: &str,
+) -> Result<(Device, SupportedStreamConfig), String> {
+    if !prefer.trim().is_empty() {
+        let needle = prefer.trim().to_lowercase();
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if d.name().map(|n| n.to_lowercase().contains(&needle)).unwrap_or(false) {
+                    let cfg = d
+                        .default_input_config()
+                        .map_err(|e| format!("device config error: {e}"))?;
+                    return Ok((d, cfg));
+                }
+            }
+        }
+        return Err(format!("No microphone matching \"{prefer}\""));
+    }
+    let device = host
+        .default_input_device()
+        .ok_or("No default microphone found")?;
+    let cfg = device
+        .default_input_config()
+        .map_err(|e| format!("device config error: {e}"))?;
+    Ok((device, cfg))
+}
+
 /// Start capturing system audio into `buffer`. Returns a `Capture` handle that stops on drop.
 pub fn start(prefer_device: &str, buffer: SampleBuffer) -> Result<Capture, String> {
     let host = cpal::default_host();
@@ -238,16 +352,54 @@ pub fn start(prefer_device: &str, buffer: SampleBuffer) -> Result<Capture, Strin
     let (cpal_pick, source_label): (String, Option<String>) =
         match linux_resolve_source(prefer_device) {
             Some(source) => {
-                std::env::set_var("PULSE_SOURCE", &source);
+                set_pulse_source(Some(&source));
                 tracing::info!("captions: routing pulse capture at source '{source}'");
                 ("pulse".to_string(), Some(source))
             }
-            None => (prefer_device.to_string(), None),
+            None => {
+                set_pulse_source(None); // clear any stale dictation routing
+                (prefer_device.to_string(), None)
+            }
         };
     #[cfg(not(target_os = "linux"))]
     let (cpal_pick, source_label): (String, Option<String>) = (prefer_device.to_string(), None);
 
     let (device, supported) = pick_device(&host, &cpal_pick)?;
+    run_capture(device, supported, source_label, buffer)
+}
+
+/// Start capturing the **microphone** into `buffer` (dictation, ADR-009). Same pipeline as
+/// `start` (mono, 16 kHz, capped buffer) but the device is an input source, never a loopback.
+pub fn start_input(prefer_device: &str, buffer: SampleBuffer) -> Result<Capture, String> {
+    let host = cpal::default_host();
+
+    #[cfg(target_os = "linux")]
+    let (cpal_pick, source_label): (String, Option<String>) =
+        match linux_resolve_input_source(prefer_device) {
+            Some(source) => {
+                set_pulse_source(Some(&source));
+                tracing::info!("dictation: routing pulse capture at source '{source}'");
+                ("pulse".to_string(), Some(source))
+            }
+            None => {
+                set_pulse_source(None); // clear any stale captions routing
+                (prefer_device.to_string(), None)
+            }
+        };
+    #[cfg(not(target_os = "linux"))]
+    let (cpal_pick, source_label): (String, Option<String>) = (prefer_device.to_string(), None);
+
+    let (device, supported) = pick_input_device(&host, &cpal_pick)?;
+    run_capture(device, supported, source_label, buffer)
+}
+
+/// Spawn the dedicated capture thread for an opened device (shared by `start`/`start_input`).
+fn run_capture(
+    device: Device,
+    supported: SupportedStreamConfig,
+    source_label: Option<String>,
+    buffer: SampleBuffer,
+) -> Result<Capture, String> {
     let device_name =
         source_label.unwrap_or_else(|| device.name().unwrap_or_else(|_| "unknown".into()));
     let sample_format = supported.sample_format();

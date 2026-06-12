@@ -7,6 +7,7 @@
 pub mod ai;
 pub mod captions;
 pub mod config;
+pub mod dictation;
 pub mod pal;
 
 use pal::Pal;
@@ -28,6 +29,8 @@ struct AppState {
     busy: Mutex<bool>,
     /// Live system-audio captions subsystem (ADR-008).
     captions: captions::CaptionsManager,
+    /// Voice dictation subsystem (ADR-009).
+    dictation: dictation::DictationManager,
 }
 
 impl AppState {
@@ -37,6 +40,7 @@ impl AppState {
             saved_clipboard: Mutex::new(None),
             busy: Mutex::new(false),
             captions: captions::CaptionsManager::new(),
+            dictation: dictation::DictationManager::new(),
         }
     }
 }
@@ -192,6 +196,13 @@ FLAGS:
     --trigger       Show the action menu for the current selection. If GhostPen is
                         already running, this is forwarded to the running daemon (bind
                         this to a hotkey, e.g. Ctrl+Shift+A, in your compositor).
+    --voice-input   Toggle voice dictation: start listening on the microphone, press
+                        again to stop — the transcript is AI-proofread and copied to the
+                        clipboard. Bind it in your compositor (e.g. Ctrl+Shift+D). Needs
+                        a build with the captions feature (whisper).
+    --captions      Toggle live captions: show the overlay and start captioning system
+                        audio; run again to stop and hide it. Bind it in your compositor
+                        (e.g. Ctrl+Shift+L). Needs a build with the captions feature.
     --settings      Open the Settings window.
     --playground    Open the Playground window.
     --tray          Run in system tray only, without showing the action menu. This
@@ -224,11 +235,18 @@ fn handle_help_version(args: &[String]) {
 }
 
 /// Handle CLI args (used at first launch and forwarded by single-instance):
-/// `--trigger` shows the menu, `--playground` / `--settings` open those windows.
+/// `--trigger` shows the menu, `--voice-input` toggles dictation (ADR-009),
+/// `--playground` / `--settings` open those windows.
 /// `--tray` runs in background tray mode only (no menu).
 fn handle_cli_args(app: &AppHandle, args: &[String]) {
     if args.iter().any(|a| a == "--trigger") {
         trigger_menu_flow(app);
+    }
+    if args.iter().any(|a| a == "--voice-input") {
+        voice_input_toggle(app);
+    }
+    if args.iter().any(|a| a == "--captions") {
+        captions_toggle(app);
     }
     if args.iter().any(|a| a == "--playground") {
         show_window(app, "playground");
@@ -246,11 +264,12 @@ fn handle_cli_args(app: &AppHandle, args: &[String]) {
 /// the caller logs and continues so startup never fails on a missing tray.
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show menu", true, None::<&str>)?;
+    let dictate = MenuItem::with_id(app, "dictate", "Dictation", true, None::<&str>)?;
     let captions = MenuItem::with_id(app, "captions", "Captions", true, None::<&str>)?;
     let playground = MenuItem::with_id(app, "playground", "Playground", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &captions, &playground, &settings, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &dictate, &captions, &playground, &settings, &quit])?;
 
     TrayIconBuilder::with_id("ghostpen-tray")
         .icon(app.default_window_icon().unwrap().clone())
@@ -259,6 +278,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => trigger_menu_flow(app),
+            "dictate" => voice_input_toggle(app),
             "captions" => open_captions(app.clone()),
             "playground" => show_window(app, "playground"),
             "settings" => show_window(app, "settings"),
@@ -648,6 +668,35 @@ fn open_captions(app: AppHandle) {
     }
 }
 
+/// Toggle live captions — the `--captions` compositor keybind lands here. Not running →
+/// show the overlay and start capturing; running → stop and hide. Start errors surface in
+/// the overlay via `ghostpen://caption-error` (a keybind has no terminal to print to).
+fn captions_toggle(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.captions.is_running() {
+        state.captions.stop();
+        if let Some(w) = app.get_webview_window("captions") {
+            let _ = w.hide();
+        }
+        return;
+    }
+    open_captions(app.clone());
+    let settings = load_settings(app);
+    let started = {
+        let state = app.state::<AppState>();
+        state.captions.start(app, &settings)
+    };
+    match started {
+        // Re-emit show so the overlay refreshes its status (Start → Stop) now that we run.
+        Ok(_) => {
+            let _ = app.emit("ghostpen://captions-show", ());
+        }
+        Err(e) => {
+            let _ = app.emit("ghostpen://caption-error", e);
+        }
+    }
+}
+
 #[tauri::command]
 fn captions_status(app: AppHandle) -> captions::CaptionsStatus {
     let settings = load_settings(&app);
@@ -718,6 +767,113 @@ async fn captions_download_model(app: AppHandle, model: Option<String>) -> Resul
         _ => load_settings(&app).captions.model,
     };
     captions::model::ensure_model(&model).await.map(|_| ())
+}
+
+// ---- dictation commands (ADR-009) ------------------------------------------------------
+
+/// Toggle dictation — the `--voice-input` flag, the tray item, and the overlay all land here.
+/// Not running → show the overlay and start listening; running → stop & finalize (the detached
+/// worker transcribes, proofreads, and pastes). Errors (model missing, no captions build) are
+/// emitted to the overlay so a keybind trigger still tells the user what's wrong.
+fn voice_input_toggle(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.dictation.is_running() {
+        state.dictation.stop();
+        return;
+    }
+    show_dictation_overlay(app);
+    let settings = load_settings(app);
+    if let Err(e) = state.dictation.start(app, &settings) {
+        let _ = app.emit(
+            "ghostpen://dictation",
+            dictation::DictationUpdate {
+                text: e,
+                state: "error".into(),
+                pasted: false,
+                manual: false,
+            },
+        );
+    }
+}
+
+/// Position the dictation pill bottom-center (like captions) and show it focused, so
+/// Esc/Enter work. `ghostpen://dictation-show` tells the overlay to reset for a new session.
+fn show_dictation_overlay(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("dictation") {
+        place_captions_bottom(&w);
+        let _ = w.show();
+        let _ = w.set_focus();
+        // Compositor window rules can re-center the window as it (re)maps — the Hyprland setup
+        // pins/centers all GhostPen windows — overriding the pre-show placement. Re-place now
+        // and once more after mapping settles. (Captions dodges this only because Start
+        // re-positions it while already visible.)
+        place_captions_bottom(&w);
+        let w2 = w.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            place_captions_bottom(&w2);
+        });
+    }
+    let _ = app.emit("ghostpen://dictation-show", ());
+}
+
+/// Microphone candidates for the Settings picker (never `.monitor`/loopback sources).
+#[tauri::command]
+fn dictation_list_devices() -> Vec<String> {
+    #[cfg(feature = "captions")]
+    {
+        captions::audio::list_input_devices()
+    }
+    #[cfg(not(feature = "captions"))]
+    {
+        Vec::new()
+    }
+}
+
+#[tauri::command]
+fn dictation_status(app: AppHandle) -> dictation::DictationStatus {
+    let settings = load_settings(&app);
+    let state = app.state::<AppState>();
+    state.dictation.status(&settings)
+}
+
+/// Start listening (overlay button path). Resolves to the capture device name.
+#[tauri::command]
+fn dictation_start(app: AppHandle) -> Result<String, String> {
+    let settings = load_settings(&app);
+    let state = app.state::<AppState>();
+    let device = state.dictation.start(&app, &settings)?;
+    show_dictation_overlay(&app);
+    Ok(device)
+}
+
+/// Stop listening and finalize (transcribe → proofread → paste). Returns immediately;
+/// progress streams via `ghostpen://dictation` events.
+#[tauri::command]
+fn dictation_stop(app: AppHandle) {
+    let state = app.state::<AppState>();
+    state.dictation.stop();
+}
+
+/// Set the spoken language from the overlay's chip: persists to settings and flips the
+/// live value so a running session uses it on its very next transcription pass.
+#[tauri::command]
+fn dictation_set_language(app: AppHandle, language: String) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    settings.dictation.language = language.clone();
+    persist_settings(&app, &settings)?;
+    app.state::<AppState>().dictation.set_language(&language);
+    Ok(())
+}
+
+/// Cancel: discard the captured audio and hide the overlay.
+#[tauri::command]
+fn dictation_cancel(app: AppHandle) {
+    let state = app.state::<AppState>();
+    state.dictation.cancel();
+    if let Some(w) = app.get_webview_window("dictation") {
+        let _ = w.hide();
+    }
 }
 
 // ---- entrypoint ----------------------------------------------------------------------
@@ -807,7 +963,13 @@ pub fn run() {
             captions_stop,
             captions_set_click_through,
             captions_set_translate,
-            captions_download_model
+            captions_download_model,
+            dictation_list_devices,
+            dictation_status,
+            dictation_start,
+            dictation_stop,
+            dictation_cancel,
+            dictation_set_language
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostPen");
