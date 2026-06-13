@@ -650,7 +650,45 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .dict-actions {
   flex: none;
   display: flex;
+  align-items: center;
   gap: 6px;
+}
+
+/* AI-proofread slider: iOS-style switch sized to live in the 28px action row. The accent
+   fill on "on" matches `.dict-btn.ok` so the active states across the pill read as one
+   visual language (accent = "on / will commit"). */
+.dict-switch {
+  flex: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.dict-switch:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); }
+.dict-switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.dict-switch.on:hover:not(:disabled) { filter: brightness(1.12); }
+.dict-switch:disabled { opacity: 0.4; cursor: not-allowed; }
+.dict-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  transition: transform 140ms ease, background 140ms ease;
+}
+.dict-switch.on .dict-switch-knob {
+  background: #fff;
+  transform: translateX(16px);
 }
 .dict-btn {
   width: 28px;

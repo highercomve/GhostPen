@@ -8,6 +8,8 @@ import {
   dictationStop,
   dictationCancel,
   dictationSetLanguage,
+  dictationSetProofread,
+  openSettings,
   CAPTION_LANGUAGES,
 } from "./api";
 
@@ -42,12 +44,14 @@ export default function Dictation() {
   phaseRef.current = phase;
 
   const [lang, setLang] = useState("auto");
+  const [proofread, setProofread] = useState(true);
 
   const refreshStatus = async () => {
     try {
       const s = await dictationStatus();
       setStatus(s);
       setLang(s.language || "auto");
+      setProofread(s.proofread);
     } catch {
       /* ignore */
     }
@@ -57,6 +61,17 @@ export default function Dictation() {
   const changeLang = (l: string) => {
     setLang(l);
     dictationSetLanguage(l).catch(() => {});
+  };
+
+  // Applies live: a running session reads the flag at the proofread decision point, so the
+  // toggle even takes effect between clicking Finish and the AI call kicking off.
+  const toggleProofread = () => {
+    const next = !proofread;
+    setProofread(next);
+    dictationSetProofread(next).catch(() => {
+      // Revert on failure so the switch never lies about what's persisted.
+      setProofread(!next);
+    });
   };
 
   // A fresh trigger (hotkey/tray) resets the overlay for the new session.
@@ -242,6 +257,32 @@ export default function Dictation() {
           </select>
 
           <div className="dict-actions">
+            {/* AI-proofread slider switch: persists + flips live (the backend reads it at the
+                proofread decision point, so toggling off after Finish still skips the AI). */}
+            <button
+              className={`dict-switch ${proofread ? "on" : ""}`}
+              role="switch"
+              aria-checked={proofread}
+              onClick={toggleProofread}
+              tabIndex={-1}
+              onMouseDown={(e) => e.preventDefault()}
+              title={
+                proofread
+                  ? "AI proofread: ON — click for raw transcript"
+                  : "AI proofread: OFF — click to polish with AI"
+              }
+            >
+              <span className="dict-switch-knob" aria-hidden="true" />
+            </button>
+            <button
+              className="dict-btn"
+              onClick={() => openSettings()}
+              tabIndex={-1}
+              onMouseDown={(e) => e.preventDefault()}
+              title="Dictation settings"
+            >
+              ⚙
+            </button>
             <button
               className="dict-btn"
               onClick={cancel}

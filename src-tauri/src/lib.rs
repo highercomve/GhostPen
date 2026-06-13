@@ -866,6 +866,19 @@ fn dictation_set_language(app: AppHandle, language: String) -> Result<(), String
     Ok(())
 }
 
+/// Toggle the "AI proofread before pasting" flag from the overlay's switch: persists to
+/// settings and flips the live value so a running session picks it up at the proofread
+/// decision point in `finalize_session` (i.e. you can flip it off after clicking Finish
+/// and still get the raw transcript, as long as the AI call hasn't started yet).
+#[tauri::command]
+fn dictation_set_proofread(app: AppHandle, enable: bool) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    settings.dictation.proofread = enable;
+    persist_settings(&app, &settings)?;
+    app.state::<AppState>().dictation.set_proofread(enable);
+    Ok(())
+}
+
 /// Cancel: discard the captured audio and hide the overlay.
 #[tauri::command]
 fn dictation_cancel(app: AppHandle) {
@@ -969,7 +982,8 @@ pub fn run() {
             dictation_start,
             dictation_stop,
             dictation_cancel,
-            dictation_set_language
+            dictation_set_language,
+            dictation_set_proofread
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostPen");

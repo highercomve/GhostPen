@@ -61,6 +61,13 @@ pub struct DictationManager {
     /// capture. Seeded from `settings.dictation.language` at `start`; updated by
     /// `set_language` (the `dictation_set_language` command also persists it).
     language: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Live "AI proofread before pasting" flag. Read at the proofread decision point inside
+    /// `finalize_session`, so the overlay's switch can flip the behaviour even between the
+    /// user clicking Finish and the AI call starting (useful when you realise mid-finalize
+    /// that you'd rather have the raw transcript). Seeded from `settings.dictation.proofread`
+    /// at `start`; updated by `set_proofread` (the `dictation_set_proofread` command also
+    /// persists it).
+    proofread: std::sync::Arc<AtomicBool>,
     #[cfg(feature = "captions")]
     session: std::sync::Mutex<Option<Session>>,
 }
@@ -96,6 +103,13 @@ impl DictationManager {
         if let Ok(mut l) = self.language.lock() {
             *l = language.to_string();
         }
+    }
+
+    /// Flip the "AI proofread before pasting" flag live; the worker reads it at the
+    /// proofread decision point in `finalize_session`. Persisting to settings is the
+    /// caller's responsibility (see `dictation_set_proofread`).
+    pub fn set_proofread(&self, enable: bool) {
+        self.proofread.store(enable, Ordering::SeqCst);
     }
 
     pub fn status(&self, settings: &crate::config::Settings) -> DictationStatus {
@@ -169,6 +183,10 @@ impl DictationManager {
             *l = cfg.language.clone();
         }
         let language = self.language.clone();
+        // Seed the live proofread flag; the overlay's switch can flip it up to the proofread
+        // decision point in `finalize_session`.
+        self.proofread.store(cfg.proofread, Ordering::SeqCst);
+        let proofread = self.proofread.clone();
 
         // Level meter: ~10 Hz RMS of the newest ~100 ms, for the overlay waveform. Kept on its
         // own thread so a slow transcription pass never freezes the animation.
@@ -228,7 +246,8 @@ impl DictationManager {
                     tracing::info!("dictation session aborted");
                 } else if finalize.load(Ordering::SeqCst) {
                     let lang = read_language(&language);
-                    finalize_session(&app, transcriber, &buffer, &lang, cfg.proofread, &aborted);
+                    let do_proofread = proofread.load(Ordering::SeqCst);
+                    finalize_session(&app, transcriber, &buffer, &lang, do_proofread, &aborted);
                 } else {
                     emit_update(&app, "", "cancelled", false, false);
                     tracing::info!("dictation cancelled");

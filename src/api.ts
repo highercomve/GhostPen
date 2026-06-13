@@ -160,6 +160,9 @@ export const dictationCancel = () => invoke<void>("dictation_cancel");
 /** Set the spoken language (persists; a running session picks it up on the next pass). */
 export const dictationSetLanguage = (language: string) =>
   invoke<void>("dictation_set_language", { language });
+/** Toggle AI proofread live (persists; a running session picks it up before the AI call). */
+export const dictationSetProofread = (enable: boolean) =>
+  invoke<void>("dictation_set_proofread", { enable });
 
 // Whisper models offered in the UI (ggml-{id}.bin on Hugging Face). Ordered fastest →
 // most accurate. `.en` variants are English-only but a bit faster/more accurate for English.
