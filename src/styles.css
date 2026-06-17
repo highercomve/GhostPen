@@ -611,7 +611,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
+  gap: 2px;
   overflow: hidden;
   background: #101216;
 }
@@ -620,7 +620,8 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   width: 3px;
   border-radius: 2px;
   background: linear-gradient(180deg, #9db4ff, var(--accent));
-  transition: height 110ms ease-out;
+  /* No height transition: the rAF wave loop (Dictation.tsx) does its own per-frame easing;
+     a CSS transition here would lag and smear the 60 fps animation. */
 }
 /* Indeterminate shimmer while whisper / the AI is working. */
 .dict-wave.busy .dict-bar {
@@ -647,6 +648,58 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 }
 .dict-lang:hover { background: rgba(255, 255, 255, 0.16); }
 
+/* AI-polish switch: an iOS-style slider. The real checkbox is visually hidden but still
+   drives :checked; the track/thumb are the visible UI. */
+.dict-polish {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0; /* labels inherit a base margin-bottom; align-items:center would shift it up */
+  height: 28px;
+  padding: 0 10px 0 11px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.dict-polish:hover { background: rgba(255, 255, 255, 0.16); }
+.dict-polish input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.dict-polish-label {
+  order: -1; /* label sits before the slider */
+  letter-spacing: 0.2px;
+}
+.dict-polish-track {
+  position: relative;
+  width: 30px;
+  height: 16px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.22);
+  transition: background 0.18s ease;
+}
+.dict-polish-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.18s ease;
+}
+.dict-polish input:checked + .dict-polish-track { background: var(--accent); }
+.dict-polish input:checked + .dict-polish-track .dict-polish-thumb { transform: translateX(14px); }
+.dict-polish input:checked ~ .dict-polish-label { color: rgba(255, 255, 255, 0.92); }
+
 .dict-actions {
   flex: none;
   display: flex;
@@ -654,42 +707,6 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   gap: 6px;
 }
 
-/* AI-proofread slider: iOS-style switch sized to live in the 28px action row. The accent
-   fill on "on" matches `.dict-btn.ok` so the active states across the pill read as one
-   visual language (accent = "on / will commit"). */
-.dict-switch {
-  flex: none;
-  position: relative;
-  width: 36px;
-  height: 20px;
-  padding: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.07);
-  cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease;
-}
-.dict-switch:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); }
-.dict-switch.on {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.dict-switch.on:hover:not(:disabled) { filter: brightness(1.12); }
-.dict-switch:disabled { opacity: 0.4; cursor: not-allowed; }
-.dict-switch-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.85);
-  transition: transform 140ms ease, background 140ms ease;
-}
-.dict-switch.on .dict-switch-knob {
-  background: #fff;
-  transform: translateX(16px);
-}
 .dict-btn {
   width: 28px;
   height: 28px;

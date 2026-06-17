@@ -871,11 +871,11 @@ fn dictation_set_language(app: AppHandle, language: String) -> Result<(), String
 /// decision point in `finalize_session` (i.e. you can flip it off after clicking Finish
 /// and still get the raw transcript, as long as the AI call hasn't started yet).
 #[tauri::command]
-fn dictation_set_proofread(app: AppHandle, enable: bool) -> Result<(), String> {
+fn dictation_set_proofread(app: AppHandle, enabled: bool) -> Result<(), String> {
     let mut settings = load_settings(&app);
-    settings.dictation.proofread = enable;
+    settings.dictation.proofread = enabled;
     persist_settings(&app, &settings)?;
-    app.state::<AppState>().dictation.set_proofread(enable);
+    app.state::<AppState>().dictation.set_proofread(enabled);
     Ok(())
 }
 

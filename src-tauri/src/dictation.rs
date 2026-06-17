@@ -108,8 +108,8 @@ impl DictationManager {
     /// Flip the "AI proofread before pasting" flag live; the worker reads it at the
     /// proofread decision point in `finalize_session`. Persisting to settings is the
     /// caller's responsibility (see `dictation_set_proofread`).
-    pub fn set_proofread(&self, enable: bool) {
-        self.proofread.store(enable, Ordering::SeqCst);
+    pub fn set_proofread(&self, enabled: bool) {
+        self.proofread.store(enabled, Ordering::SeqCst);
     }
 
     pub fn status(&self, settings: &crate::config::Settings) -> DictationStatus {
@@ -183,10 +183,9 @@ impl DictationManager {
             *l = cfg.language.clone();
         }
         let language = self.language.clone();
-        // Seed the live proofread flag; the overlay's switch can flip it up to the proofread
-        // decision point in `finalize_session`.
+        // Seed the live proofread flag; the worker clones it below and the overlay's switch can
+        // flip it up to the proofread decision point in `finalize_session`.
         self.proofread.store(cfg.proofread, Ordering::SeqCst);
-        let proofread = self.proofread.clone();
 
         // Level meter: ~10 Hz RMS of the newest ~100 ms, for the overlay waveform. Kept on its
         // own thread so a slow transcription pass never freezes the animation.
@@ -215,6 +214,7 @@ impl DictationManager {
             let buffer = buffer.clone();
             let app = app.clone();
             let aborted = aborted.clone();
+            let proofread = self.proofread.clone();
             let worker = move || {
                 tracing::info!("dictation worker started (cumulative re-transcribe)");
                 let mut last_len = 0usize;
@@ -327,7 +327,12 @@ fn rms_level(samples: &[f32]) -> f32 {
     }
     let sum: f32 = samples.iter().map(|s| s * s).sum();
     let rms = (sum / samples.len() as f32).sqrt();
-    (rms * 6.0).clamp(0.0, 1.0)
+    // Perceptual curve, not linear: speech RMS sits around 0.03–0.1, so `rms * k` barely lifts
+    // the bars. sqrt expands the quiet range and the gain saturates on loud peaks. Tune GAIN
+    // if the waveform reads too sleepy or too jumpy on your mic.
+    // ponytail: fixed gain; expose in settings only if different mics need very different scaling.
+    const GAIN: f32 = 2.2;
+    (rms.sqrt() * GAIN).clamp(0.0, 1.0)
 }
 
 #[cfg(feature = "captions")]
