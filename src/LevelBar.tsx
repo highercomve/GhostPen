@@ -1,6 +1,4 @@
-import { Level } from "./api";
-
-const LEVELS: Level[] = ["subtle", "balanced", "strong"];
+import { Level, LEVELS } from "./api";
 
 export default function LevelBar({
   level,

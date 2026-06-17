@@ -43,7 +43,6 @@ export interface Settings {
 export interface CaptionsStatus {
   available: boolean;
   running: boolean;
-  device: string | null;
   model_ready: boolean;
   model: string;
   /** Whether AI translation is currently on (mirrors settings.captions.aiTranslate). */
@@ -62,7 +61,6 @@ export interface Status {
   session: string;
   clipboard_backend: string;
   input_available: boolean;
-  use_synthetic: boolean;
   manual_mode: boolean;
   active_profile: string;
   active_model: string;
@@ -84,6 +82,7 @@ export const fetchModels = (baseUrl: string, apiKey: string) =>
 export const getStatus = () => invoke<Status>("get_status");
 export const getSelection = () => invoke<string>("get_selection");
 export type Level = "subtle" | "balanced" | "strong";
+export const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 
 export const processAiAction = (action: string, targetLang: string | null, level: Level) =>
   invoke<ProcessResult>("process_ai_action", { action, targetLang, level });
@@ -97,10 +96,8 @@ export const processText = (action: string, targetLang: string | null, level: Le
 export const processTextStream = (action: string, targetLang: string | null, level: Level, text: string) =>
   invoke<void>("process_text_stream", { action, targetLang, level, text });
 export const openPlayground = () => invoke<void>("open_playground");
-export const showMenu = () => invoke<void>("show_menu");
 export const hideWindow = () => invoke<void>("hide_window");
 export const openSettings = () => invoke<void>("open_settings");
-export const closeSettings = () => invoke<void>("close_settings");
 
 // ---- captions (ADR-008) --------------------------------------------------------------
 
@@ -129,14 +126,11 @@ export interface DictationSettings {
 }
 
 export interface DictationStatus {
-  available: boolean;
-  running: boolean;
   model_ready: boolean;
   model: string;
   proofread: boolean;
   /** Spoken language ("auto" or an ISO code) — mirrors settings.dictation.language. */
   language: string;
-  device: string | null;
 }
 
 /** Payload of the `ghostpen://dictation` event. */
@@ -144,8 +138,6 @@ export interface DictationUpdate {
   text: string;
   /** listening | transcribing | proofreading | done | cancelled | error */
   state: string;
-  pasted: boolean;
-  manual: boolean;
 }
 
 /** Microphone candidates for the Settings picker (no monitor/loopback sources). */

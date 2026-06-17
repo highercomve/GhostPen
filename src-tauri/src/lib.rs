@@ -69,7 +69,6 @@ struct Status {
     session: String,
     clipboard_backend: String,
     input_available: bool,
-    use_synthetic: bool,
     manual_mode: bool,
     active_profile: String,
     active_model: String,
@@ -381,7 +380,7 @@ fn get_status(app: AppHandle) -> Status {
     let settings = load_settings(&app);
     let state = app.state::<AppState>();
     let pal = lock_recover(&state.pal);
-    let synthetic = pal.use_synthetic(settings.force_synthetic);
+    let manual_mode = !pal.use_synthetic(settings.force_synthetic);
     let (profile, model) = settings
         .active()
         .map(|p| (p.name.clone(), p.model.clone()))
@@ -390,8 +389,7 @@ fn get_status(app: AppHandle) -> Status {
         session: pal.session.label().into(),
         clipboard_backend: pal.clipboard_backend_name().into(),
         input_available: pal.input.available(),
-        use_synthetic: synthetic,
-        manual_mode: !synthetic,
+        manual_mode,
         active_profile: profile,
         active_model: model,
     }
@@ -614,14 +612,9 @@ fn open_playground(app: AppHandle) {
 }
 
 #[tauri::command]
-fn show_menu(app: AppHandle) {
-    trigger_menu_flow(&app);
-}
-
-#[tauri::command]
 fn hide_window(window: tauri::WebviewWindow) {
-    // Hide the window that invoked the command (the main overlay or the captions overlay),
-    // not a hardcoded label — so each overlay's ✕ closes itself.
+    // Hide the window that invoked the command (any overlay or the Settings window),
+    // not a hardcoded label — so each window's ✕ closes itself.
     let _ = window.hide();
 }
 
@@ -630,13 +623,6 @@ fn open_settings(app: AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();
         let _ = w.set_focus();
-    }
-}
-
-#[tauri::command]
-fn close_settings(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("settings") {
-        let _ = w.hide();
     }
 }
 
@@ -789,8 +775,6 @@ fn voice_input_toggle(app: &AppHandle) {
             dictation::DictationUpdate {
                 text: e,
                 state: "error".into(),
-                pasted: false,
-                manual: false,
             },
         );
     }
@@ -964,11 +948,9 @@ pub fn run() {
             process_ai_custom,
             process_text,
             process_text_stream,
-            show_menu,
             hide_window,
             open_settings,
             open_playground,
-            close_settings,
             open_captions,
             captions_status,
             captions_list_devices,

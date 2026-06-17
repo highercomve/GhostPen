@@ -25,17 +25,11 @@ pub struct DictationUpdate {
     pub text: String,
     /// `listening` | `transcribing` | `proofreading` | `done` | `cancelled` | `error`.
     pub state: String,
-    /// `done` only: true → GhostPen pasted it; false → it's on the clipboard (manual mode).
-    pub pasted: bool,
-    pub manual: bool,
 }
 
-/// Snapshot of the dictation subsystem for the UI.
+/// Snapshot of the dictation subsystem for the UI (only what the overlay reads).
 #[derive(Clone, Serialize)]
 pub struct DictationStatus {
-    /// Whether this build includes whisper support (the `captions` feature).
-    pub available: bool,
-    pub running: bool,
     /// Whether the configured whisper model is downloaded.
     pub model_ready: bool,
     pub model: String,
@@ -43,8 +37,6 @@ pub struct DictationStatus {
     pub proofread: bool,
     /// Spoken language (`auto` or an ISO code) — mirrors `settings.dictation.language`.
     pub language: String,
-    /// Capture device in use while running.
-    pub device: Option<String>,
 }
 
 /// Owns the running mic capture + workers. Stored in `AppState`.
@@ -55,6 +47,7 @@ pub struct DictationManager {
     /// that session's worker completely — no more events, no proofread delivery, no
     /// clipboard write — so Esc during "Polishing…" (or starting a new dictation) discards
     /// the old one instead of letting two sessions fight over the overlay and clipboard.
+    #[cfg(feature = "captions")]
     abort: std::sync::Mutex<Option<std::sync::Arc<AtomicBool>>>,
     /// Live spoken-language code (`auto`, `en`, …) the transcription worker reads on every
     /// pass, so the overlay's language chip takes effect mid-session without restarting
@@ -80,17 +73,11 @@ struct Session {
     /// true → the transcription worker finalizes (transcribe → proofread → paste) on exit;
     /// false → the session was cancelled and everything is discarded.
     finalize: std::sync::Arc<AtomicBool>,
-    device: String,
 }
 
 impl DictationManager {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// True when this build can actually dictate (the `captions` feature is compiled in).
-    pub fn available(&self) -> bool {
-        cfg!(feature = "captions")
     }
 
     pub fn is_running(&self) -> bool {
@@ -116,27 +103,11 @@ impl DictationManager {
         // Dictation shares the captions whisper model — downloaded once, used by both.
         let model = settings.captions.model.clone();
         DictationStatus {
-            available: self.available(),
-            running: self.is_running(),
             model_ready: crate::captions::model::is_downloaded(&model),
             model,
             proofread: settings.dictation.proofread,
             language: settings.dictation.language.clone(),
-            device: self.device(),
         }
-    }
-
-    #[cfg(feature = "captions")]
-    fn device(&self) -> Option<String> {
-        self.session
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| s.device.clone()))
-    }
-
-    #[cfg(not(feature = "captions"))]
-    fn device(&self) -> Option<String> {
-        None
     }
 }
 
@@ -233,7 +204,7 @@ impl DictationManager {
                             let t = clean_transcript(&t);
                             // A cancel can land while a pass is in flight — stay silent then.
                             if !t.is_empty() && !aborted.load(Ordering::SeqCst) {
-                                emit_update(&app, &t, "listening", false, false);
+                                emit_update(&app, &t, "listening");
                             }
                         }
                         Err(e) => {
@@ -249,7 +220,7 @@ impl DictationManager {
                     let do_proofread = proofread.load(Ordering::SeqCst);
                     finalize_session(&app, transcriber, &buffer, &lang, do_proofread, &aborted);
                 } else {
-                    emit_update(&app, "", "cancelled", false, false);
+                    emit_update(&app, "", "cancelled");
                     tracing::info!("dictation cancelled");
                 }
             };
@@ -263,7 +234,6 @@ impl DictationManager {
             capture,
             stop,
             finalize,
-            device: device.clone(),
         });
         self.running.store(true, Ordering::SeqCst);
         tracing::info!("dictation started on device {device}");
@@ -336,15 +306,13 @@ fn rms_level(samples: &[f32]) -> f32 {
 }
 
 #[cfg(feature = "captions")]
-fn emit_update(app: &tauri::AppHandle, text: &str, state: &str, pasted: bool, manual: bool) {
+fn emit_update(app: &tauri::AppHandle, text: &str, state: &str) {
     use tauri::Emitter;
     let _ = app.emit(
         "ghostpen://dictation",
         DictationUpdate {
             text: text.to_string(),
             state: state.to_string(),
-            pasted,
-            manual,
         },
     );
 }
@@ -397,16 +365,16 @@ fn finalize_session(
 
     let samples = buffer.snapshot();
     if samples.len() < audio::TARGET_RATE as usize / 2 {
-        emit_update(app, "Didn’t catch anything — try again.", "error", false, false);
+        emit_update(app, "Didn’t catch anything — try again.", "error");
         return;
     }
 
-    emit_update(app, "", "transcribing", false, false);
+    emit_update(app, "", "transcribing");
     let transcript = match transcriber.transcribe(&samples, language, false) {
         Ok(t) => clean_transcript(&t),
         Err(e) => {
             if !aborted.load(Ordering::SeqCst) {
-                emit_update(app, &format!("Transcription failed: {e}"), "error", false, false);
+                emit_update(app, &format!("Transcription failed: {e}"), "error");
             }
             return;
         }
@@ -418,14 +386,14 @@ fn finalize_session(
         return;
     }
     if transcript.is_empty() {
-        emit_update(app, "Didn’t catch anything — try again.", "error", false, false);
+        emit_update(app, "Didn’t catch anything — try again.", "error");
         return;
     }
-    emit_update(app, &transcript, "transcribing", false, false);
+    emit_update(app, &transcript, "transcribing");
 
     // Optional AI proofread (the built-in strict prompt — fixes errors, never rewrites).
     let final_text = if proofread {
-        emit_update(app, &transcript, "proofreading", false, false);
+        emit_update(app, &transcript, "proofreading");
         match proofread_text(app, &transcript) {
             Ok(t) => t,
             Err(e) => {
@@ -482,7 +450,7 @@ fn deliver(app: &tauri::AppHandle, text: &str) {
     use tauri::Manager;
 
     if let Err(e) = crate::try_acquire_busy(app) {
-        emit_update(app, &e, "error", false, false);
+        emit_update(app, &e, "error");
         return;
     }
 
@@ -494,7 +462,7 @@ fn deliver(app: &tauri::AppHandle, text: &str) {
     crate::release_busy(app);
 
     match write {
-        Ok(()) => emit_update(app, text, "done", false, true),
-        Err(e) => emit_update(app, &format!("Clipboard error: {e}"), "error", false, false),
+        Ok(()) => emit_update(app, text, "done"),
+        Err(e) => emit_update(app, &format!("Clipboard error: {e}"), "error"),
     }
 }

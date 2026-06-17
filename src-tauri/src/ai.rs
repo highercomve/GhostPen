@@ -98,11 +98,7 @@ pub async fn run_completion(profile: &Profile, system: &str, user: &str) -> Resu
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let mut snippet = body.trim().to_string();
-        if snippet.len() > 200 {
-            snippet.truncate(200);
-            snippet.push('…');
-        }
+        let snippet = truncate(&body);
         return Err(if snippet.is_empty() {
             format!("API returned {status}")
         } else {
@@ -125,7 +121,9 @@ pub async fn run_completion(profile: &Profile, system: &str, user: &str) -> Resu
 fn truncate(s: &str) -> String {
     let s = s.trim();
     if s.len() > 200 {
-        format!("{}…", &s[..200])
+        // Floor to a UTF-8 boundary so a non-ASCII error body doesn't panic on slicing.
+        let end = s.floor_char_boundary(200);
+        format!("{}…", &s[..end])
     } else {
         s.to_string()
     }

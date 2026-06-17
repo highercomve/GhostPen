@@ -7,6 +7,7 @@ import {
   ProcessResult,
   CustomAction,
   Level,
+  LEVELS,
   getStatus,
   getSettings,
   getSelection,
@@ -32,8 +33,6 @@ const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
   { id: "concise", label: "Concise", hint: "Condense, keep meaning", icon: "concise" },
   { id: "expand", label: "Expand", hint: "Add detail & elaborate", icon: "expand" },
 ];
-
-const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 
 // Cycle the intensity level by `dir` (+1 / -1), clamped (no wrap).
 function shiftLevel(level: Level, dir: number): Level {

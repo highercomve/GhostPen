@@ -28,14 +28,12 @@ pub struct Caption {
     pub translated: bool,
 }
 
-/// Snapshot of the captions subsystem for the UI.
+/// Snapshot of the captions subsystem for the UI (only what the overlay reads).
 #[derive(Clone, Serialize)]
 pub struct CaptionsStatus {
     /// Whether this build includes captions support (the `captions` feature).
     pub available: bool,
     pub running: bool,
-    /// Capture device in use while running.
-    pub device: Option<String>,
     /// Whether the configured whisper model is downloaded.
     pub model_ready: bool,
     pub model: String,
@@ -63,7 +61,6 @@ struct RunningSession {
     capture: audio::Capture,
     stop: std::sync::Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
-    device: String,
 }
 
 #[cfg(feature = "captions")]
@@ -102,25 +99,11 @@ impl CaptionsManager {
         CaptionsStatus {
             available: self.available(),
             running: self.is_running(),
-            device: self.device(),
             model_ready: model::is_downloaded(&model),
             model,
             translate: settings.captions.ai_translate,
             target_lang: settings.captions.target_lang.clone(),
         }
-    }
-
-    #[cfg(feature = "captions")]
-    fn device(&self) -> Option<String> {
-        self.session
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| s.device.clone()))
-    }
-
-    #[cfg(not(feature = "captions"))]
-    fn device(&self) -> Option<String> {
-        None
     }
 }
 
@@ -213,7 +196,6 @@ impl CaptionsManager {
             capture,
             stop,
             worker: Some(worker),
-            device: device.clone(),
         });
         self.running.store(true, Ordering::SeqCst);
         tracing::info!("captions started on device {device}");

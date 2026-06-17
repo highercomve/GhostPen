@@ -176,16 +176,6 @@ impl Settings {
                     model: "gemma4:e4b".into(),
                     temperature: 0.2,
                 },
-                Profile {
-                    // LM Studio's OpenAI-compatible server (default port 1234). Model id is left
-                    // blank — LM Studio model ids depend on what's loaded; pick via "Fetch models".
-                    id: "lmstudio-local".into(),
-                    name: "LM Studio".into(),
-                    base_url: "http://localhost:1234/v1".into(),
-                    api_key: String::new(),
-                    model: String::new(),
-                    temperature: 0.2,
-                },
             ],
             force_synthetic: false,
             restore_delay_ms: default_restore_delay(),

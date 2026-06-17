@@ -11,7 +11,7 @@ import {
   saveSettings,
   fetchModels,
   getStatus,
-  closeSettings,
+  hideWindow,
   captionsStatus,
   captionsDownloadModel,
   captionsListDevices,
@@ -447,7 +447,7 @@ export default function Settings() {
 
       <div className="footer">
         {saved && <span className="muted">Saved ✓</span>}
-        <button className="btn" onClick={() => closeSettings()}>Close</button>
+        <button className="btn" onClick={() => hideWindow()}>Close</button>
         <button className="btn primary" onClick={save}>Save</button>
       </div>
     </div>
