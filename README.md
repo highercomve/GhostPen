@@ -38,6 +38,13 @@ The **Professional** preset turns a casual note —
 *"hey just wanted to let u know the thing ur asking about is done, lmk if u need anything else thx"* —
 into *"I have completed the item you requested. Please let me know if you require anything further."*
 
+Voice **dictation**: speak into the pill overlay, watch the live waveform and transcript, then
+press ⏎ to proofread and copy the polished text to the clipboard:
+
+<p align="center">
+  <img src="docs/screenshots/dictation.png" alt="GhostPen voice dictation pill with live waveform and transcript" width="420" />
+</p>
+
 ---
 
 ## Features
@@ -349,13 +356,14 @@ are stored as JSON in the app config directory (`settings.json`) via `tauri-plug
 ## Project layout
 
 ```
-src/             React + TypeScript frontend (Menu, Settings, Playground, LevelBar, Captions)
+src/             React + TypeScript frontend (Menu, Settings, Playground, LevelBar, Captions, Dictation)
 src-tauri/src/   Rust backend
   ├── lib.rs       app wiring, commands, hotkey, tray, trigger flow, window lifecycle
   ├── pal/         Platform Abstraction Layer (clipboard, input, session detection)
   ├── config.rs    settings / profiles / custom actions / captions config
   ├── ai.rs        OpenAI-compatible client (+ streaming, model discovery)
-  └── captions/    live captions (ADR-008): audio loopback, whisper transcription, model mgmt
+  ├── captions/    live captions (ADR-008): audio loopback, whisper transcription, model mgmt
+  └── dictation.rs voice dictation (ADR-009): mic → whisper → AI proofread → clipboard
 scripts/         install-deps.sh (system deps) · tauri.mjs (auto-detects captions + GPU backend)
 .github/         CI: release.yml + pr-build.yml (multi-backend captions artifacts)
 .agents/         design docs: plan, architecture, TODO, agent roles
