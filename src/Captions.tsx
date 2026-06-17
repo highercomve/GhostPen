@@ -19,8 +19,11 @@ interface Line {
   translated: boolean;
 }
 
-// How many recent caption lines to keep on screen (subtitle convention: 1–2 lines).
-const MAX_LINES = 2;
+// Show only the CURRENT caption. Keeping the previous one stacked a dimmed line above the
+// current (hard to read), and a content-sized bar that grew/shrinks per caption ghosts on
+// wlroots' transparent webview (it doesn't clear old frames). One line + the fixed-height
+// bar below = stable geometry → every caption repaints the same rectangle, no stacking.
+const MAX_LINES = 1;
 
 export default function Captions() {
   const [lines, setLines] = useState<Line[]>([]);
