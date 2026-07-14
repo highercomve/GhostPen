@@ -119,7 +119,7 @@ impl DictationManager {
         app: &tauri::AppHandle,
         settings: &crate::config::Settings,
     ) -> Result<String, String> {
-        use crate::captions::{audio, model, transcribe};
+        use crate::captions::{audio, model};
 
         if self.is_running() {
             return Err("Dictation is already running".into());
@@ -141,7 +141,13 @@ impl DictationManager {
                 "Whisper model \"{model}\" isn't downloaded yet. Download it in Settings → Captions.",
             ));
         }
-        let mut transcriber = transcribe::Transcriber::load(&model_path)?;
+        // One shared whisper model across captions/dictation/server (see ModelPool):
+        // load (or reuse) it now so we never stack a second copy in GPU memory.
+        let pool = {
+            use tauri::Manager;
+            app.state::<crate::AppState>().captions.pool()
+        };
+        pool.ensure(&model)?;
 
         let buffer = audio::SampleBuffer::default();
         let capture = audio::start_input(&cfg.device, buffer.clone())?;
@@ -186,6 +192,8 @@ impl DictationManager {
             let app = app.clone();
             let aborted = aborted.clone();
             let proofread = self.proofread.clone();
+            let pool = pool.clone();
+            let model = model.clone();
             let worker = move || {
                 tracing::info!("dictation worker started (cumulative re-transcribe)");
                 let mut last_len = 0usize;
@@ -199,7 +207,7 @@ impl DictationManager {
                     last_len = len;
                     let samples = buffer.snapshot();
                     let lang = read_language(&language);
-                    match transcriber.transcribe(&samples, &lang, false) {
+                    match pool.transcribe(&model, &samples, &lang, false) {
                         Ok(t) => {
                             let t = clean_transcript(&t);
                             // A cancel can land while a pass is in flight — stay silent then.
@@ -218,7 +226,7 @@ impl DictationManager {
                 } else if finalize.load(Ordering::SeqCst) {
                     let lang = read_language(&language);
                     let do_proofread = proofread.load(Ordering::SeqCst);
-                    finalize_session(&app, transcriber, &buffer, &lang, do_proofread, &aborted);
+                    finalize_session(&app, pool, model, &buffer, &lang, do_proofread, &aborted);
                 } else {
                     emit_update(&app, "", "cancelled");
                     tracing::info!("dictation cancelled");
@@ -349,13 +357,14 @@ fn read_language(language: &std::sync::Arc<std::sync::Mutex<String>>) -> String 
 /// profile, then deliver through the clipboard contract. Runs on the detached worker.
 ///
 /// `aborted` is checked at every stage boundary: once set (Esc during finalization, or a new
-/// session started), this worker goes silent — no events, no clipboard write. The whisper
-/// context is dropped as soon as the final pass is done, BEFORE the (slow) AI call, so a new
-/// dictation can load its own context without two of them stacking up in GPU memory.
+/// session started), this worker goes silent — no events, no clipboard write. Transcription
+/// runs on the shared model pool (the same resident model captions and the HTTP server use),
+/// so there's nothing to release here — only the AI proofread call is per-session.
 #[cfg(feature = "captions")]
 fn finalize_session(
     app: &tauri::AppHandle,
-    mut transcriber: crate::captions::transcribe::Transcriber,
+    pool: std::sync::Arc<crate::captions::pool::ModelPool>,
+    model: String,
     buffer: &crate::captions::audio::SampleBuffer,
     language: &str,
     proofread: bool,
@@ -370,7 +379,7 @@ fn finalize_session(
     }
 
     emit_update(app, "", "transcribing");
-    let transcript = match transcriber.transcribe(&samples, language, false) {
+    let transcript = match pool.transcribe(&model, &samples, language, false) {
         Ok(t) => clean_transcript(&t),
         Err(e) => {
             if !aborted.load(Ordering::SeqCst) {
@@ -379,8 +388,6 @@ fn finalize_session(
             return;
         }
     };
-    // Whisper is done for this session — release it now (it may hold GPU memory).
-    drop(transcriber);
     if aborted.load(Ordering::SeqCst) {
         tracing::info!("dictation finalization aborted after final pass");
         return;

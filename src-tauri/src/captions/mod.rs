@@ -17,6 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub mod audio;
 pub mod model;
 #[cfg(feature = "captions")]
+pub mod pool;
+#[cfg(feature = "captions")]
+pub mod server;
+#[cfg(feature = "captions")]
 pub mod transcribe;
 
 /// Payload for the `ghostpen://caption` event consumed by the overlay UI.
@@ -52,6 +56,10 @@ pub struct CaptionsManager {
     /// `settings.captions.ai_translate`: set from settings at `start`, updated by
     /// `set_translate` (the `captions_set_translate` command also persists it to settings).
     translate: std::sync::Arc<AtomicBool>,
+    /// One resident whisper model shared by captions, dictation, and the HTTP
+    /// server — loaded once, never stacked. See `pool::ModelPool`.
+    #[cfg(feature = "captions")]
+    pool: std::sync::Arc<pool::ModelPool>,
     #[cfg(feature = "captions")]
     session: std::sync::Mutex<Option<RunningSession>>,
 }
@@ -109,6 +117,12 @@ impl CaptionsManager {
 
 #[cfg(feature = "captions")]
 impl CaptionsManager {
+    /// The shared whisper model pool — handed to the dictation workers and the
+    /// HTTP server so every path transcribes through one resident model.
+    pub fn pool(&self) -> std::sync::Arc<pool::ModelPool> {
+        self.pool.clone()
+    }
+
     /// Start capturing + transcribing. Returns the capture device name on success.
     pub fn start(
         &self,
@@ -128,7 +142,9 @@ impl CaptionsManager {
                 cfg.model
             ));
         }
-        let mut transcriber = transcribe::Transcriber::load(&model_path)?;
+        // Load (or reuse) the one shared model; the worker transcribes through it.
+        self.pool.ensure(&cfg.model)?;
+        let pool = self.pool.clone();
 
         let buffer = audio::SampleBuffer::default();
         let capture = audio::start(&cfg.device, buffer.clone())?;
@@ -159,7 +175,7 @@ impl CaptionsManager {
                         continue;
                     }
                     let text =
-                        match transcriber.transcribe(&samples, &cfg.language, cfg.whisper_translate)
+                        match pool.transcribe(&cfg.model, &samples, &cfg.language, cfg.whisper_translate)
                         {
                             Ok(t) => t,
                             Err(e) => {

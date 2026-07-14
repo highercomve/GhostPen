@@ -931,6 +931,17 @@ pub fn run() {
             if let Err(e) = build_tray(&handle) {
                 tracing::warn!("system tray unavailable: {e}");
             }
+            // Optional local transcription server (GHOSTPEN_STT_SERVER=1): lets other
+            // local tools transcribe through GhostPen's own whisper model — the SAME
+            // shared pool the captions/dictation workers use, so no second model is
+            // loaded. Defaults to the captions model; override with GHOSTPEN_STT_MODEL.
+            // No-op unless the env flag is set.
+            #[cfg(feature = "captions")]
+            {
+                use tauri::Manager;
+                let pool = handle.state::<AppState>().captions.pool();
+                captions::server::maybe_spawn(pool, handle.clone());
+            }
             // The menu window starts hidden (tauri.conf.json `visible: false`), so a
             // bare launch (or `--tray`) stays in the background. Only an explicit
             // --trigger/--settings/--playground reveals a window at startup.

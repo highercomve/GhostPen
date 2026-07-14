@@ -42,11 +42,15 @@ dirs = "5"
 # `npm run tauri build -- --features captions`.
 cpal = { version = "0.15", optional = true }
 whisper-rs = { version = "0.16", optional = true }
+# Local transcription HTTP server (part of the captions feature): exposes the whisper
+# engine as an OpenAI-compatible /v1/audio/transcriptions endpoint. tokio is already a
+# full dep above; axum adds the router + multipart extractor.
+axum = { version = "0.8", features = ["multipart"], optional = true }
 
 [features]
 default = []
 # On-device captions: cpal loopback capture + local whisper.cpp transcription (CPU backend).
-captions = ["dep:cpal", "dep:whisper-rs"]
+captions = ["dep:cpal", "dep:whisper-rs", "dep:axum"]
 # GPU-accelerated whisper. Each implies `captions` and swaps whisper.cpp's compute backend.
 # The `scripts/tauri.mjs` wrapper auto-picks cuda > vulkan > cpu based on what's installed
 # (and sets the CUDA toolkit env for the build). Pick explicitly with GHOSTPEN_CAPTIONS_GPU.
