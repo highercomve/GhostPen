@@ -10,6 +10,13 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60); // cloud models can be slow
 
+/// Hard cap on generated tokens. Menu actions edit a *selection*, so the output is bounded
+/// by the input — a few thousand tokens is always plenty. Without this, a model that fails
+/// to emit a stop token runs away (observed: ~6000 tokens on a one-line translate), and at a
+/// local model's ~50 tok/s that blows past `TOTAL_TIMEOUT` → "Request timed out". 2048 tokens
+/// finishes in ~40s even at 50 tok/s, comfortably inside the timeout.
+const MAX_TOKENS: u32 = 2048;
+
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -88,6 +95,14 @@ pub async fn run_completion(profile: &Profile, system: &str, user: &str) -> Resu
             { "role": "user", "content": user }
         ],
         "temperature": profile.temperature,
+        "max_tokens": MAX_TOKENS,
+        // These are text-editing actions — the transformed text is the whole answer, so a
+        // model's "thinking" phase is pure latency (observed: a thinking gemma spent its
+        // entire token budget on reasoning and returned EMPTY content → timeout). Ask the
+        // backend to skip it. Both spellings are covered: `chat_template_kwargs.enable_thinking`
+        // (llama.cpp/vLLM/SGLang) and `think` (Ollama). Backends that don't know a field ignore it.
+        "chat_template_kwargs": { "enable_thinking": false },
+        "think": false,
         "stream": false
     }));
     if !profile.api_key.is_empty() {
@@ -148,6 +163,11 @@ pub async fn run_completion_stream<F: FnMut(&str)>(
             { "role": "user", "content": user }
         ],
         "temperature": profile.temperature,
+        "max_tokens": MAX_TOKENS,
+        // See `run_completion`: skip the model's thinking phase — it's pure latency for a
+        // text transform. `chat_template_kwargs.enable_thinking` (llama.cpp/vLLM) + `think` (Ollama).
+        "chat_template_kwargs": { "enable_thinking": false },
+        "think": false,
         "stream": true
     }));
     if !profile.api_key.is_empty() {
