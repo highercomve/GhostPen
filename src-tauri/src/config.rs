@@ -128,8 +128,16 @@ impl Default for DictationSettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
+    /// Global hotkey for the action menu (`--trigger`). Registered in-process on
+    /// X11/Windows/macOS; on Wayland it's advisory (bind it in the compositor).
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// Global hotkey for voice dictation (`--voice-input`). Blank = unbound.
+    #[serde(default = "default_dictation_hotkey", rename = "dictationHotkey")]
+    pub dictation_hotkey: String,
+    /// Global hotkey for live captions (`--captions`). Blank = unbound.
+    #[serde(default = "default_captions_hotkey", rename = "captionsHotkey")]
+    pub captions_hotkey: String,
     #[serde(rename = "activeProfileId")]
     pub active_profile_id: String,
     pub profiles: Vec<Profile>,
@@ -153,6 +161,14 @@ fn default_hotkey() -> String {
     "Ctrl+Shift+A".into()
 }
 
+fn default_dictation_hotkey() -> String {
+    "Ctrl+Shift+D".into()
+}
+
+fn default_captions_hotkey() -> String {
+    "Ctrl+Shift+L".into()
+}
+
 fn default_restore_delay() -> u64 {
     300
 }
@@ -166,6 +182,8 @@ impl Settings {
     pub fn defaults() -> Self {
         Settings {
             hotkey: default_hotkey(),
+            dictation_hotkey: default_dictation_hotkey(),
+            captions_hotkey: default_captions_hotkey(),
             active_profile_id: "ollama-local".into(),
             profiles: vec![
                 Profile {

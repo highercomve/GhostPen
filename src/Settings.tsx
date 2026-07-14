@@ -60,6 +60,10 @@ export default function Settings() {
   const active =
     settings.profiles.find((p) => p.id === settings.activeProfileId) ?? settings.profiles[0];
 
+  // On Wayland the app can't grab global keys — the compositor owns the binds, so the
+  // shortcut fields become "recommended binding" reference rather than something we register.
+  const onWayland = status?.session?.includes("Wayland") ?? false;
+
   const update = (patch: Partial<SettingsType>) => {
     setSettings({ ...settings, ...patch });
     setSaved(false);
@@ -255,10 +259,35 @@ export default function Settings() {
       {/* Behaviour */}
       <section className="card">
         <h2>Behaviour</h2>
+
+        <h3>Keyboard shortcuts</h3>
+        {onWayland ? (
+          <div className="kbd-note">
+            On Wayland an app can’t grab global keys — <b>bind these in your compositor</b> to the
+            commands below. The values here are your own reference (they aren’t registered).
+            <br />
+            On Hyprland, e.g.: <code>bind = CTRL SHIFT, A, exec, ghostpen --trigger</code>
+          </div>
+        ) : (
+          <p className="muted small">
+            Registered globally while GhostPen runs. Blank = unbound. (On Wayland these are bound
+            in your compositor instead.)
+          </p>
+        )}
+
         <label>
-          Hotkey <span className="muted">(Windows/macOS/X11; on Wayland bind in your compositor)</span>
+          Action menu <span className="muted">(ghostpen --trigger)</span>
           <input value={settings.hotkey} onChange={(e) => update({ hotkey: e.target.value })} placeholder="Ctrl+Shift+A" />
         </label>
+        <label>
+          Dictation <span className="muted">(ghostpen --voice-input)</span>
+          <input value={settings.dictationHotkey} onChange={(e) => update({ dictationHotkey: e.target.value })} placeholder="Ctrl+Shift+D" />
+        </label>
+        <label>
+          Live captions <span className="muted">(ghostpen --captions)</span>
+          <input value={settings.captionsHotkey} onChange={(e) => update({ captionsHotkey: e.target.value })} placeholder="Ctrl+Shift+L" />
+        </label>
+
         <label className="checkbox">
           <input type="checkbox" checked={settings.forceSynthetic}
             onChange={(e) => update({ forceSynthetic: e.target.checked })} />

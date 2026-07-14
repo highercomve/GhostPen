@@ -149,9 +149,11 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ### Triggering the menu
 
 - **Windows / macOS / Linux (X11):** select text in any app and press the global hotkey
-  (default **`Ctrl + Shift + A`**, configurable in Settings). On **macOS**, grant
-  **Accessibility** permission first (System Settings → Privacy & Security → Accessibility),
-  or input simulation silently fails.
+  (default **`Ctrl + Shift + A`**). This, plus the **Dictation** (`Ctrl+Shift+D`) and
+  **Live captions** (`Ctrl+Shift+L`) shortcuts, are configurable in **Settings → Behaviour →
+  Keyboard shortcuts** (blank = unbound). On **macOS**, grant **Accessibility** permission
+  first (System Settings → Privacy & Security → Accessibility), or input simulation silently
+  fails.
 - **Linux (Wayland / Hyprland):** in-process global hotkeys aren't allowed; bind a key in
   your compositor to launch GhostPen with `--trigger` (single-instance forwards it to the
   running app), and autostart the daemon. See [`.agents/plan.md` §10](./.agents/plan.md) for

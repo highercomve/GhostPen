@@ -259,6 +259,19 @@ kbd {
 .settings.loading-page { display: flex; align-items: center; justify-content: center; color: var(--muted); }
 .settings h1 { font-size: 20px; margin: 0 0 16px; }
 .settings h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.settings h3 { font-size: 12px; margin: 4px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+
+/* Compositor-bind callout for the shortcuts group (shown on Wayland). */
+.kbd-note {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.kbd-note code { color: var(--text); }
 
 .card {
   background: var(--bg-soft);

@@ -31,6 +31,8 @@ export interface CaptionsSettings {
 
 export interface Settings {
   hotkey: string;
+  dictationHotkey: string;
+  captionsHotkey: string;
   activeProfileId: string;
   profiles: Profile[];
   forceSynthetic: boolean;

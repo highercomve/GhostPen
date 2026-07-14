@@ -131,13 +131,47 @@ fn parse_hotkey(s: &str) -> Option<Shortcut> {
     code.map(|c| Shortcut::new(Some(mods), c))
 }
 
-/// Register the in-process global hotkey (Windows/macOS/X11). On Wayland this is a no-op
-/// (returns `Ok`) — bind the key in the compositor to `ghostpen --trigger` instead (plan §10).
+/// Which flow a global hotkey fires. `Copy` so the enum can be moved into each shortcut
+/// closure without a per-binding heap allocation.
+#[derive(Clone, Copy)]
+enum HotkeyAction {
+    Menu,
+    Dictation,
+    Captions,
+}
+
+/// Bind one global shortcut to its flow. A blank hotkey is treated as "unbound" (Ok, no-op)
+/// so the user can clear a shortcut in Settings. Errors are user-readable (bad combo, or the
+/// OS refused it because another app already grabbed it).
+fn bind_hotkey(app: &AppHandle, hotkey: &str, action: HotkeyAction) -> Result<(), String> {
+    let hotkey = hotkey.trim();
+    if hotkey.is_empty() {
+        return Ok(());
+    }
+    let shortcut =
+        parse_hotkey(hotkey).ok_or_else(|| format!("'{hotkey}' is not a valid hotkey"))?;
+    let handle = app.clone();
+    app.global_shortcut()
+        .on_shortcut(shortcut, move |_app, _sc, event| {
+            if event.state() == ShortcutState::Pressed {
+                match action {
+                    HotkeyAction::Menu => trigger_menu_flow(&handle),
+                    HotkeyAction::Dictation => voice_input_toggle(&handle),
+                    HotkeyAction::Captions => captions_toggle(&handle),
+                }
+            }
+        })
+        .map_err(|e| format!("could not register hotkey '{hotkey}': {e}"))
+}
+
+/// Register the in-process global hotkeys (Windows/macOS/X11): the action menu, voice
+/// dictation, and live captions. On Wayland this is a no-op (returns `Ok`) — the compositor
+/// owns the binds there (`ghostpen --trigger` / `--voice-input` / `--captions`, plan §10).
 ///
-/// Returns `Err` with a user-readable message when the hotkey string is invalid or the OS
-/// refuses the binding (e.g. the combo is already grabbed by another app). Callers surface
-/// it: `save_settings` propagates it to the Settings UI; startup logs it.
-fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
+/// Returns `Err` with a combined, user-readable message if any binding is invalid or refused;
+/// the valid ones still register. Callers surface it: `save_settings` propagates it to the
+/// Settings UI; startup logs it.
+fn register_hotkeys(app: &AppHandle, settings: &config::Settings) -> Result<(), String> {
     let session = {
         let state = app.state::<AppState>();
         let pal = lock_recover(&state.pal);
@@ -151,16 +185,22 @@ fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
     if let Err(e) = gs.unregister_all() {
         tracing::warn!("failed to clear existing global shortcuts: {e}");
     }
-    let shortcut =
-        parse_hotkey(hotkey).ok_or_else(|| format!("'{hotkey}' is not a valid hotkey"))?;
-    let handle = app.clone();
-    gs.on_shortcut(shortcut, move |_app, _sc, event| {
-        if event.state() == ShortcutState::Pressed {
-            trigger_menu_flow(&handle);
+    // Bind all three; collect failures so one bad combo doesn't drop the others.
+    let mut errors = Vec::new();
+    for (label, hotkey, action) in [
+        ("menu", settings.hotkey.as_str(), HotkeyAction::Menu),
+        ("dictation", settings.dictation_hotkey.as_str(), HotkeyAction::Dictation),
+        ("captions", settings.captions_hotkey.as_str(), HotkeyAction::Captions),
+    ] {
+        if let Err(e) = bind_hotkey(app, hotkey, action) {
+            errors.push(format!("{label}: {e}"));
         }
-    })
-    .map_err(|e| format!("could not register hotkey '{hotkey}': {e}"))?;
-    Ok(())
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 // ---- trigger flow --------------------------------------------------------------------
@@ -363,10 +403,10 @@ fn get_settings(app: AppHandle) -> config::Settings {
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: config::Settings) -> Result<(), String> {
     persist_settings(&app, &settings)?;
-    // Settings are already saved; if the hotkey can't be bound, tell the user why
+    // Settings are already saved; if a hotkey can't be bound, tell the user why
     // (the Settings UI shows this) rather than failing silently.
-    register_hotkey(&app, &settings.hotkey)
-        .map_err(|e| format!("Settings saved, but the hotkey wasn't registered: {e}"))?;
+    register_hotkeys(&app, &settings)
+        .map_err(|e| format!("Settings saved, but a hotkey wasn't registered: {e}"))?;
     Ok(())
 }
 
@@ -925,7 +965,7 @@ pub fn run() {
             // Persist defaults on first run so the store always has a valid shape.
             let settings = load_settings(&handle);
             let _ = persist_settings(&handle, &settings);
-            if let Err(e) = register_hotkey(&handle, &settings.hotkey) {
+            if let Err(e) = register_hotkeys(&handle, &settings) {
                 tracing::warn!("global hotkey not registered: {e}");
             }
             if let Err(e) = build_tray(&handle) {
