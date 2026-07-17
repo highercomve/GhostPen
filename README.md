@@ -10,7 +10,9 @@
 
 A cross-platform desktop app for AI-driven text editing. Highlight text anywhere, trigger
 GhostPen, pick an action (proofread, rewrite, translate, …), and the result is pasted back
-in place — or transform text directly in the built-in **Playground**.
+in place — or transform text directly in the built-in **Playground**. GhostPen can also
+**pull the text out of an image** on your clipboard, so you can proofread, translate, or just
+grab a screenshot's text with no manual retyping.
 
 GhostPen talks to **any OpenAI-compatible `/chat/completions` endpoint** (Ollama, OpenAI,
 OpenRouter, Groq, LM Studio, or a custom endpoint). The default, zero-config setup runs a
@@ -52,6 +54,10 @@ press ⏎ to proofread and copy the polished text to the clipboard:
 - **Rewrite actions:** Proofread · Professional · Casual · Concise · Expand · Translate (12 languages).
 - **Intensity levels:** a global **Subtle / Balanced / Strong** control tunes how far the
   tone/length actions go (Professional, Casual, Concise, Expand).
+- **Image text extraction (OCR):** copy an image, trigger GhostPen, and **Extract Text** reads
+  the text out of it through your usual endpoint — then run any action on the result or copy the
+  whole thing with `Ctrl+C`. Uses a **vision-capable model** (the default `gemma4:e4b` is
+  multimodal); no separate OCR engine. See [Usage](#image-text-extraction-ocr).
 - **Custom actions:** define your own action with a custom prompt and optional per-action
   model override — it shows up in the menu and Playground.
 - **Playground:** a window to type/paste text, run any action, and watch the result **stream
@@ -198,6 +204,31 @@ bind = CTRL SHIFT, D, exec, ghostpen --voice-input
 Pick an action from the menu or Playground. The **Intensity** control (Subtle / Balanced /
 Strong) applies to Professional, Casual, Concise, and Expand. Proofread and Translate ignore
 it. **Translate** opens a language submenu.
+
+### Image text extraction (OCR)
+
+When your clipboard holds an **image** instead of text, the menu switches to a focused image
+view: a preview and a single **Extract Text** action (the rewrite grid, intensity, and prompt
+bar are hidden). Copy an image — a screenshot, a browser **Copy image**, or a file-manager copy
+— trigger GhostPen, and press **Enter** (or click **Extract Text**). GhostPen sends the image to
+your active AI profile, and the recognised text becomes the working selection. From there you can:
+
+- run any action on it (Proofread, Translate, Concise, a custom action, …), or
+- copy the **whole** extracted text with **`Ctrl+C`** (shows *Copied ✓*) and paste it with **Ctrl+V**.
+
+This reuses the same OpenAI-compatible endpoint as everything else, so it needs a
+**vision-capable (multimodal) model**:
+
+- **Ollama:** the default `gemma4:e4b` is multimodal — it just works. Other vision models (e.g.
+  `gemma4:31b-cloud`) work too; pick one in **Settings → Model**.
+- **LM Studio / llama.cpp:** load the model **together with its `mmproj` projector**, or the
+  server returns *"image input is not supported"* and extraction fails with a readable hint.
+
+Tune it in **Settings → Image Text Extraction (OCR)**: the max image dimension (images are
+downscaled before sending, default 1024 px), the OCR system prompt, and an optional OCR-only
+model override (handy if your everyday text model isn't multimodal). The image is sent to
+whatever your active profile points at — which may be a cloud endpoint; with the default local
+Ollama it never leaves your machine.
 
 ### Playground
 
@@ -363,7 +394,8 @@ src-tauri/src/   Rust backend
   ├── lib.rs       app wiring, commands, hotkey, tray, trigger flow, window lifecycle
   ├── pal/         Platform Abstraction Layer (clipboard, input, session detection)
   ├── config.rs    settings / profiles / custom actions / captions config
-  ├── ai.rs        OpenAI-compatible client (+ streaming, model discovery)
+  ├── ai.rs        OpenAI-compatible client (+ streaming, multimodal OCR, model discovery)
+  ├── image_util.rs  OCR image helpers: PNG encode/decode, downscale, base64 data-URI
   ├── captions/    live captions (ADR-008): audio loopback, whisper transcription, model mgmt
   └── dictation.rs voice dictation (ADR-009): mic → whisper → AI proofread → clipboard
 scripts/         install-deps.sh (system deps) · tauri.mjs (auto-detects captions + GPU backend)
