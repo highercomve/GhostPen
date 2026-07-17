@@ -8,9 +8,10 @@ pub mod ai;
 pub mod captions;
 pub mod config;
 pub mod dictation;
+pub mod image_util;
 pub mod pal;
 
-use pal::Pal;
+use pal::{ClipboardImage, Pal};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
@@ -21,10 +22,30 @@ use tauri_plugin_store::StoreExt;
 
 // ---- shared state --------------------------------------------------------------------
 
+/// Snapshot of the original clipboard before a synthetic copy (ADR-003, ADR-010).
+/// Empty, Text, or Image are restored by kind after the final paste.
+#[derive(Clone)]
+enum ClipboardSnapshot {
+    Empty,
+    Text(String),
+    Image(ClipboardImage),
+}
+
+/// The current working input for the menu: empty, text, or an image (ADR-010).
+/// Populated by `get_selection` when the overlay refreshes, NOT during `trigger_menu_flow`.
+#[derive(Clone)]
+enum SelectionContent {
+    Empty,
+    Text(String),
+    Image(ClipboardImage),
+}
+
 struct AppState {
     pal: Mutex<Pal>,
     /// The user's clipboard, snapshotted BEFORE synthetic copy, restored after paste (ADR-003).
-    saved_clipboard: Mutex<Option<String>>,
+    saved_clipboard: Mutex<ClipboardSnapshot>,
+    /// The working input for the current menu session (ADR-010).
+    current_input: Mutex<SelectionContent>,
     /// Guards against overlapping triggers corrupting clipboard state.
     busy: Mutex<bool>,
     /// Live system-audio captions subsystem (ADR-008).
@@ -37,7 +58,8 @@ impl AppState {
     fn new() -> Self {
         AppState {
             pal: Mutex::new(Pal::detect()),
-            saved_clipboard: Mutex::new(None),
+            saved_clipboard: Mutex::new(ClipboardSnapshot::Empty),
+            current_input: Mutex::new(SelectionContent::Empty),
             busy: Mutex::new(false),
             captions: captions::CaptionsManager::new(),
             dictation: dictation::DictationManager::new(),
@@ -73,6 +95,16 @@ struct Status {
     active_profile: String,
     active_model: String,
 }
+
+/// Frontend-safe selection DTO (ADR-010). Never carries raw image bytes.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum SelectionInfo {
+    Empty,
+    Text { text: String },
+    Image { preview: String, width: u32, height: u32 },
+}
+
 
 // ---- settings persistence (Rust = source of truth) ----------------------------------
 
@@ -339,25 +371,52 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Entry point for every trigger (hotkey, `--trigger`, or the in-app "show" command).
-/// Snapshots the original clipboard BEFORE synthetic copy (ADR-003); in manual mode it
-/// leaves the clipboard untouched (the user has already copied the selection).
+/// Snapshots the original clipboard BEFORE synthetic copy (ADR-003, ADR-010); in manual mode
+/// it leaves the clipboard untouched (the user has already copied the selection). Always
+/// resets `current_input` so a stale working input from a previous session never leaks in.
 fn trigger_menu_flow(app: &AppHandle) {
     let settings = load_settings(app);
     let state = app.state::<AppState>();
     {
         let mut pal = lock_recover(&state.pal);
         if pal.use_synthetic(settings.force_synthetic) {
-            let original = pal.clipboard.read_text().ok();
+            // Snapshot the original clipboard BEFORE copying. Try text first, then image,
+            // because many clipboards report both (or we want to preserve whichever is there).
+            let original = match pal.clipboard.read_text() {
+                Ok(text) if !text.trim().is_empty() => ClipboardSnapshot::Text(text),
+                _ => match pal.clipboard.read_image() {
+                    Ok(Some(img)) => ClipboardSnapshot::Image(img),
+                    _ => ClipboardSnapshot::Empty,
+                },
+            };
             *lock_recover(&state.saved_clipboard) = original;
             let _ = pal.input.copy();
         } else {
-            *lock_recover(&state.saved_clipboard) = None;
+            *lock_recover(&state.saved_clipboard) = ClipboardSnapshot::Empty;
         }
+        *lock_recover(&state.current_input) = SelectionContent::Empty;
     }
     show_main(app);
     // Tell the overlay this is a fresh trigger: reset to the menu and re-read the selection.
     // (Distinguishes a real trigger from a mere window-focus event — see Menu.tsx.)
     let _ = app.emit("ghostpen://show", ());
+}
+
+/// Restore the snapshotted clipboard by kind. Never panics; errors are logged.
+fn restore_original_clipboard(pal: &mut Pal, snapshot: ClipboardSnapshot) {
+    match snapshot {
+        ClipboardSnapshot::Empty => {}
+        ClipboardSnapshot::Text(text) => {
+            if let Err(e) = pal.clipboard.write_text(&text) {
+                tracing::warn!("failed to restore original text clipboard: {e}");
+            }
+        }
+        ClipboardSnapshot::Image(image) => {
+            if let Err(e) = pal.clipboard.write_image(&image) {
+                tracing::warn!("failed to restore original image clipboard: {e}");
+            }
+        }
+    }
 }
 
 // ---- action resolution ---------------------------------------------------------------
@@ -435,11 +494,116 @@ fn get_status(app: AppHandle) -> Status {
     }
 }
 
+/// Read the current clipboard and populate `current_input` for the menu.
+///
+/// This is the designated population point for `current_input`: the menu calls it on every
+/// `ghostpen://show`, after the synthetic copy has landed (Step 5). It returns a small,
+/// frontend-safe DTO; raw bytes never cross into the WebView (ADR-010).
+///
+/// The PAL lock is held only for the actual OS read; image decode/resize/base64 happen
+/// outside the lock so a large source image doesn't block other clipboard/input operations.
 #[tauri::command]
-fn get_selection(app: AppHandle) -> Result<String, String> {
+fn get_selection(app: AppHandle) -> Result<SelectionInfo, String> {
     let state = app.state::<AppState>();
-    let mut pal = lock_recover(&state.pal);
-    pal.clipboard.read_text().map_err(|e| e.to_string())
+
+    // Prefer text.
+    let text = {
+        let mut pal = lock_recover(&state.pal);
+        pal.clipboard.read_text().map_err(|e| e.to_string())?
+    };
+    if !text.trim().is_empty() {
+        *lock_recover(&state.current_input) = SelectionContent::Text(text.clone());
+        return Ok(SelectionInfo::Text { text });
+    }
+
+    // Then image.
+    let img = {
+        let mut pal = lock_recover(&state.pal);
+        pal.clipboard.read_image().map_err(|e| e.to_string())?
+    };
+    if let Some(img) = img {
+        let (width, height) = crate::image_util::png_dimensions(&img.bytes)
+            .map_err(|e| format!("Image dimensions failed: {e}"))?;
+        // Build a small preview; never send full-res bytes to the WebView.
+        let preview = crate::image_util::thumbnail_to_max_dimension(&img.bytes, 512)
+            .map_err(|e| format!("Preview resize failed: {e}"))?;
+        let preview_uri = crate::image_util::to_data_uri(&preview);
+        tracing::debug!("clipboard image {width}x{height} {} preview ready", img.mime);
+        *lock_recover(&state.current_input) = SelectionContent::Image(img);
+        return Ok(SelectionInfo::Image {
+            preview: preview_uri,
+            width,
+            height,
+        });
+    }
+
+    *lock_recover(&state.current_input) = SelectionContent::Empty;
+    Ok(SelectionInfo::Empty)
+}
+
+/// Extract visible text from the current image input using the active (or override) model.
+/// On success, replaces `current_input` with the extracted text so the normal action grid
+/// can operate on it. Surface a readable hint if the model rejects multimodal input.
+#[tauri::command]
+async fn extract_image_text(app: AppHandle) -> Result<String, String> {
+    try_acquire_busy(&app)?;
+    let result = extract_image_text_inner(&app).await;
+    release_busy(&app);
+    result
+}
+
+async fn extract_image_text_inner(app: &AppHandle) -> Result<String, String> {
+    let settings = load_settings(app);
+    let mut profile = settings
+        .active()
+        .ok_or("No active AI profile configured")?
+        .clone();
+    if !settings.ocr.model_override.trim().is_empty() {
+        profile.model = settings.ocr.model_override.trim().to_string();
+    }
+
+    let image = {
+        let state = app.state::<AppState>();
+        let input = lock_recover(&state.current_input).clone();
+        match input {
+            SelectionContent::Image(img) => img,
+            _ => return Err("No image to extract text from".into()),
+        }
+    }; // lock released before await
+
+    let resized = crate::image_util::resize_to_max_dimension(&image.bytes, settings.ocr.max_dimension)
+        .map_err(|e| format!("Image resize failed: {e}"))?;
+
+    let system = if settings.ocr.system_prompt.trim().is_empty() {
+        ai::ocr_system_prompt().to_string()
+    } else {
+        settings.ocr.system_prompt.clone()
+    };
+    let content = ai::UserContent::image_with_text(
+        "Extract all text from this image.",
+        crate::image_util::to_data_uri(&resized),
+    );
+
+    let text = ai::run_completion(&profile, &system, &content).await;
+    let text = match text {
+        Ok(t) => t,
+        Err(e) => {
+            // Vision-incapable models usually fail with 400/422. Only prepend the hint for
+            // HTTP 4xx rejections; timeouts, connection failures, and parse errors should
+            // surface without the misleading vision-capability framing.
+            let hint = "The active model may not support images (try a vision model like gemma4:e4b). ";
+            if e.starts_with("API 4") {
+                return Err(format!("{hint}{e}"));
+            }
+            return Err(e);
+        }
+    };
+
+    {
+        let state = app.state::<AppState>();
+        *lock_recover(&state.current_input) = SelectionContent::Text(text.clone());
+    }
+    Ok(text)
 }
 
 /// Try to mark the app busy; Err if a request is already in flight. Paired with `release_busy`.
@@ -506,17 +670,30 @@ async fn process_inner(
         profile.model = m;
     }
 
-    // Read the selection (the AI input). Never hold the PAL lock across an await.
+    // Read the selection (the AI input). `current_input` is populated by `get_selection`;
+    // if it is empty (e.g. a non-menu path), fall back to reading the clipboard directly so
+    // existing callers keep working. Never hold the PAL lock across an await.
     let selected = {
         let state = app.state::<AppState>();
-        let mut pal = lock_recover(&state.pal);
-        pal.clipboard.read_text().map_err(|e| e.to_string())?
+        let input = lock_recover(&state.current_input).clone();
+        match input {
+            SelectionContent::Text(s) => s,
+            SelectionContent::Image(_) => {
+                return Err("This is an image — use Extract Text first".into())
+            }
+            SelectionContent::Empty => {
+                // Fallback: read the clipboard directly, exactly as today. Preserves behavior
+                // for any path that runs an action without the menu's get_selection refresh.
+                let mut pal = lock_recover(&state.pal);
+                pal.clipboard.read_text().map_err(|e| e.to_string())?
+            }
+        }
     };
     if selected.trim().is_empty() {
         return Err("No text selected".into());
     }
 
-    let output = ai::run_completion(&profile, system, &selected).await?;
+    let output = ai::run_completion(&profile, system, &ai::UserContent::Text(selected)).await?;
 
     let synthetic = {
         let state = app.state::<AppState>();
@@ -544,21 +721,17 @@ async fn process_inner(
         // Restore the user's original clipboard after the paste lands.
         let saved = {
             let state = app.state::<AppState>();
-            let taken = lock_recover(&state.saved_clipboard).take();
-            taken
+            let mut guard = lock_recover(&state.saved_clipboard);
+            std::mem::replace(&mut *guard, ClipboardSnapshot::Empty)
         };
-        if let Some(original) = saved {
-            let app2 = app.clone();
-            let delay = settings.restore_delay_ms;
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-                let state = app2.state::<AppState>();
-                let mut pal = lock_recover(&state.pal);
-                if let Err(e) = pal.clipboard.write_text(&original) {
-                    tracing::warn!("failed to restore original clipboard: {e}");
-                }
-            });
-        }
+        let app2 = app.clone();
+        let delay = settings.restore_delay_ms;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            let state = app2.state::<AppState>();
+            let mut pal = lock_recover(&state.pal);
+            restore_original_clipboard(&mut pal, saved);
+        });
         Ok(ProcessResult {
             output,
             pasted: true,
@@ -572,6 +745,15 @@ async fn process_inner(
             manual: true,
         })
     }
+}
+
+/// Copy arbitrary text to the clipboard. Used by the menu after OCR so the user can grab
+/// the extracted text directly without running another action.
+#[tauri::command]
+fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut pal = lock_recover(&state.pal);
+    pal.clipboard.write_text(&text).map_err(|e| e.to_string())
 }
 
 /// Playground: transform `text` directly and return the result. No clipboard, no paste —
@@ -597,7 +779,7 @@ async fn process_text(
     if let Some(m) = model_override {
         profile.model = m;
     }
-    ai::run_completion(&profile, &system, &text).await
+    ai::run_completion(&profile, &system, &ai::UserContent::Text(text)).await
 }
 
 /// Streaming variant of `process_text`: emits `ghostpen://chunk` per delta, then
@@ -995,6 +1177,8 @@ pub fn run() {
             fetch_models,
             get_status,
             get_selection,
+            extract_image_text,
+            copy_text,
             process_ai_action,
             process_ai_custom,
             process_text,
@@ -1093,5 +1277,26 @@ mod tests {
     #[test]
     fn session_detect_runs() {
         let _ = pal::detect_session();
+    }
+
+    #[test]
+    fn selection_info_json_tags_match_ts_union() {
+        let empty = serde_json::to_value(&SelectionInfo::Empty).unwrap();
+        assert_eq!(empty["kind"], "empty");
+
+        let text = serde_json::to_value(&SelectionInfo::Text { text: "hi".into() }).unwrap();
+        assert_eq!(text["kind"], "text");
+        assert_eq!(text["text"], "hi");
+
+        let image = serde_json::to_value(&SelectionInfo::Image {
+            preview: "data:image/png;base64,abc".into(),
+            width: 100,
+            height: 200,
+        })
+        .unwrap();
+        assert_eq!(image["kind"], "image");
+        assert_eq!(image["preview"], "data:image/png;base64,abc");
+        assert_eq!(image["width"], 100);
+        assert_eq!(image["height"], 200);
     }
 }

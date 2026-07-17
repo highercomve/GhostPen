@@ -29,6 +29,12 @@ export interface CaptionsSettings {
   fontSize: number;
 }
 
+export interface OcrSettings {
+  maxDimension: number;
+  systemPrompt: string;
+  modelOverride: string;
+}
+
 export interface Settings {
   hotkey: string;
   dictationHotkey: string;
@@ -38,9 +44,15 @@ export interface Settings {
   forceSynthetic: boolean;
   restoreDelayMs: number;
   customActions: CustomAction[];
+  ocr: OcrSettings;
   captions: CaptionsSettings;
   dictation: DictationSettings;
 }
+
+export type SelectionInfo =
+  | { kind: "empty" }
+  | { kind: "text"; text: string }
+  | { kind: "image"; preview: string; width: number; height: number };
 
 export interface CaptionsStatus {
   available: boolean;
@@ -82,7 +94,9 @@ export const saveSettings = (settings: Settings) =>
 export const fetchModels = (baseUrl: string, apiKey: string) =>
   invoke<string[]>("fetch_models", { baseUrl, apiKey });
 export const getStatus = () => invoke<Status>("get_status");
-export const getSelection = () => invoke<string>("get_selection");
+export const getSelection = () => invoke<SelectionInfo>("get_selection");
+export const extractImageText = () => invoke<string>("extract_image_text");
+export const copyText = (text: string) => invoke<void>("copy_text", { text });
 export type Level = "subtle" | "balanced" | "strong";
 export const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 

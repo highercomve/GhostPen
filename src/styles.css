@@ -110,10 +110,137 @@ kbd {
   font-size: 12px;
   color: var(--text);
   min-height: 38px;
-  max-height: 64px;
+  max-height: 160px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  user-select: text;
 }
-.selection.empty { color: var(--muted); font-style: italic; }
+.selection.empty { color: var(--muted); font-style: italic; user-select: none; }
+
+.selection-text-wrap {
+  width: 100%;
+}
+.copy-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+.copy-bar-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+.copy-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.copy-bar-btn:hover { border-color: var(--accent); color: var(--accent); }
+.copy-bar-btn.done { border-color: var(--accent); color: var(--accent); }
+.copy-bar-btn kbd {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.copy-text-icon { width: 14px; height: 14px; }
+
+/* Image mode: a focused, purpose-built step — framed capture + one primary CTA,
+   with the normal action grid / intensity / prompt hidden entirely. */
+.image-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.image-capture {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.image-capture img {
+  max-width: 100%;
+  max-height: 160px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  object-fit: contain;
+}
+.image-capture-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.image-capture-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.extract-cta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  color: #fff;
+  cursor: pointer;
+  text-align: left;
+  transition: filter 0.12s;
+}
+.extract-cta:hover,
+.extract-cta.selected {
+  filter: brightness(1.08);
+}
+.extract-cta-icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  color: #fff;
+}
+.extract-cta-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.extract-cta-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+.extract-cta-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.image-mode-note {
+  margin: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+}
 
 .actions {
   display: flex;

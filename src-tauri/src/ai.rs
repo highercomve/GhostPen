@@ -1,9 +1,11 @@
-//! OpenAI-compatible AI client (plan §5/§8, ADR-006).
+//! OpenAI-compatible AI client (plan §5/§8, ADR-006, ADR-011).
 //!
 //! One code path for every provider (Ollama, OpenAI, OpenRouter, Groq, LM Studio, custom):
 //! only baseUrl, optional bearer key, and model id differ. Every request is timeout-bounded.
+//! Text actions and image-text extraction (OCR) share the same `run_completion` path.
 
 use crate::config::Profile;
+use serde::{ser::SerializeSeq, Serialize, Serializer};
 use serde_json::json;
 use std::time::Duration;
 
@@ -32,6 +34,42 @@ fn map_send_error(e: reqwest::Error) -> String {
         "Could not connect to the endpoint.".into()
     } else {
         format!("Request failed: {e}")
+    }
+}
+
+/// User content sent to the `/chat/completions` endpoint. Text callers produce the same
+/// wire format as before (`"content": "..."`); image callers produce the two-part multimodal
+/// array (`"image_url"` with a complete data URI).
+#[derive(Clone, Debug)]
+pub enum UserContent {
+    Text(String),
+    ImageWithText { text: String, data_uri: String },
+}
+
+impl UserContent {
+    /// Convenience constructor for image extraction: wraps the prompt text and the data URI.
+    pub fn image_with_text(text: impl Into<String>, data_uri: impl Into<String>) -> Self {
+        UserContent::ImageWithText {
+            text: text.into(),
+            data_uri: data_uri.into(),
+        }
+    }
+}
+
+impl Serialize for UserContent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            UserContent::Text(s) => s.serialize(serializer),
+            UserContent::ImageWithText { text, data_uri } => {
+                let mut seq = serializer.serialize_seq(Some(2))?;
+                seq.serialize_element(&json!({"type": "text", "text": text}))?;
+                seq.serialize_element(&json!({
+                    "type": "image_url",
+                    "image_url": { "url": data_uri }
+                }))?;
+                seq.end()
+            }
+        }
     }
 }
 
@@ -85,8 +123,18 @@ pub fn custom_system_prompt(instruction: &str) -> String {
     )
 }
 
+/// System prompt for image-text extraction. Empty `settings.ocr.system_prompt` means use this.
+pub fn ocr_system_prompt() -> &'static str {
+    "Extract all visible text from the image. Preserve line breaks and paragraph structure \
+     as closely as possible. Return ONLY the extracted text, with no markdown, no \
+     explanations, and no wrapper quotes."
+}
+
 /// Run a chat completion and return the trimmed assistant message.
-pub async fn run_completion(profile: &Profile, system: &str, user: &str) -> Result<String, String> {
+///
+/// `user` is either plain text (text actions) or a multimodal text+image payload (OCR).
+/// The wire format for text is byte-identical to the pre-OCR version.
+pub async fn run_completion(profile: &Profile, system: &str, user: &UserContent) -> Result<String, String> {
     let base = profile.base_url.trim_end_matches('/');
     let mut req = client()?.post(format!("{base}/chat/completions")).json(&json!({
         "model": profile.model,
@@ -138,7 +186,7 @@ fn truncate(s: &str) -> String {
     if s.len() > 200 {
         // Floor to a UTF-8 boundary so a non-ASCII error body doesn't panic on slicing.
         let end = s.floor_char_boundary(200);
-        format!("{}…", &s[..end])
+        format!("{}\u{2026}", &s[..end])
     } else {
         s.to_string()
     }
@@ -147,6 +195,8 @@ fn truncate(s: &str) -> String {
 /// Streaming chat completion (SSE). Calls `on_chunk` for each content delta and returns the
 /// full assembled text. Lines are buffered across network chunks so multi-byte UTF-8 and
 /// partial frames are handled correctly.
+///
+/// Stays text-only; no OCR/stream consumer exists.
 pub async fn run_completion_stream<F: FnMut(&str)>(
     profile: &Profile,
     system: &str,
@@ -155,12 +205,13 @@ pub async fn run_completion_stream<F: FnMut(&str)>(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    let user_content = UserContent::Text(user.to_string());
     let base = profile.base_url.trim_end_matches('/');
     let mut req = client()?.post(format!("{base}/chat/completions")).json(&json!({
         "model": profile.model,
         "messages": [
             { "role": "system", "content": system },
-            { "role": "user", "content": user }
+            { "role": "user", "content": user_content }
         ],
         "temperature": profile.temperature,
         "max_tokens": MAX_TOKENS,
@@ -250,4 +301,34 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, S
         return Err("No models returned by the endpoint".into());
     }
     Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn user_content_text_serializes_to_string() {
+        let content = UserContent::Text("hello".into());
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json, json!("hello"));
+    }
+
+    #[test]
+    fn user_content_image_serializes_two_parts() {
+        let content = UserContent::image_with_text("Extract all text from this image.", "data:image/png;base64,abc");
+        let json = serde_json::to_value(&content).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], json!({"type":"text","text":"Extract all text from this image."}));
+        assert_eq!(arr[1], json!({"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}));
+    }
+
+    #[test]
+    fn data_uri_prefix_appears_once() {
+        let content = UserContent::image_with_text("x", "data:image/png;base64,xyz");
+        let json = serde_json::to_string(&content).unwrap();
+        assert_eq!(json.matches("data:image/png;base64,").count(), 1);
+    }
 }

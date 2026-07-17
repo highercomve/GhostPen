@@ -5,6 +5,7 @@ import {
   CustomAction,
   CaptionsSettings,
   DictationSettings,
+  OcrSettings,
   Status,
   CaptionsStatus,
   getSettings,
@@ -147,6 +148,11 @@ export default function Settings() {
   const dictation = settings.dictation;
   const updateDictation = (patch: Partial<DictationSettings>) => {
     update({ dictation: { ...dictation, ...patch } });
+  };
+
+  const ocr = settings.ocr ?? { maxDimension: 1024, systemPrompt: "", modelOverride: "" };
+  const updateOcr = (patch: Partial<OcrSettings>) => {
+    update({ ocr: { ...ocr, ...patch } });
   };
 
   // Download the configured whisper model, then save + refresh status so the UI reflects it.
@@ -329,6 +335,51 @@ export default function Settings() {
           </div>
         ))}
         <button className="btn" onClick={addCustomAction}>+ Add custom action</button>
+      </section>
+
+      {/* Image Text Extraction (OCR) */}
+      <section className="card">
+        <h2>Image Text Extraction (OCR)</h2>
+        <p className="muted small">
+          When the clipboard contains an image, GhostPen can extract its text through your
+          active AI profile. The image is sent to the configured endpoint, which may be a cloud
+          provider. The model must support vision (e.g. <code>gemma4:e4b</code>).
+        </p>
+
+        <label>
+          Max dimension: {ocr.maxDimension}px
+          <span className="muted small">
+            Images are downscaled so their largest side is at most this value before being sent.
+          </span>
+          <input
+            type="range"
+            min={512}
+            max={2048}
+            step={64}
+            value={ocr.maxDimension}
+            onChange={(e) => updateOcr({ maxDimension: parseInt(e.target.value, 10) })}
+          />
+        </label>
+
+        <label>
+          System prompt
+          <span className="muted small">Leave empty to use the built-in default.</span>
+          <textarea
+            value={ocr.systemPrompt}
+            placeholder="Extract all visible text from the image. Preserve line breaks and paragraph structure as closely as possible. Return ONLY the extracted text..."
+            onChange={(e) => updateOcr({ systemPrompt: e.target.value })}
+          />
+        </label>
+
+        <label>
+          Model override
+          <span className="muted small">Blank uses the active profile's model.</span>
+          <input
+            value={ocr.modelOverride}
+            placeholder="gemma4:e4b"
+            onChange={(e) => updateOcr({ modelOverride: e.target.value })}
+          />
+        </label>
       </section>
 
       {/* Live captions (system audio) */}

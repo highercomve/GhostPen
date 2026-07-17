@@ -228,6 +228,23 @@ Cargo feature** (default off) so the default build + release CI are untouched.
       --features captions` (16 passed) ✅, `npm run build` (tsc) ✅. _Live mic test on the
       Arch/Hyprland box still pending._
 
+### Phase 13 — OCR / image-text extraction (multimodal AI backend)
+
+> Detailed plan in `.agents/add-an-ocr-image-text-extraction/plan.md`.
+
+- [ ] **13.1** Extend PAL `ClipboardBackend` with image read/write (`read_image`, `write_image`).
+- [ ] **13.2** Implement image backends for `ArboardClipboard` and `WaylandClipboard` (PNG encoding via `image` crate; Wayland persistent binary serve).
+- [ ] **13.3** Add image utilities (`image_util.rs`): RGBA↔PNG, resize-to-max-dim, base64 data URI.
+- [ ] **13.4** Upgrade `AppState` to hold `SelectionContent` (Empty/Text/Image) and `ClipboardSnapshot`.
+- [ ] **13.5** Update `trigger_menu_flow` to detect image clipboard, snapshot original data, and store working input.
+- [ ] **13.6** Upgrade `ai::run_completion` / `run_completion_stream` to accept multimodal `UserContent`.
+- [ ] **13.7** Add OCR system prompt and `extract_image_text` Tauri command.
+- [ ] **13.8** Refactor `process_inner` to consume `current_input`; block text actions on raw images.
+- [ ] **13.9** Add `OcrSettings` to `config.rs` and wire into `Settings`.
+- [ ] **13.10** Update frontend types/api (`api.ts`) and `Menu.tsx` (image preview + Extract Text affordance).
+- [ ] **13.11** Add OCR settings panel in `Settings.tsx`.
+- [ ] **13.12** Tests: image util unit tests, manual Wayland/X11/macOS/Windows verification, cargo/tsc checks.
+
 ### Remaining / next
 - [ ] **8.7** per-platform test matrix (Windows, macOS, Linux/X11).
 - [ ] **6.x** verify the in-process global hotkey on X11/Windows/macOS (Wayland uses the
@@ -237,4 +254,4 @@ Cargo feature** (default off) so the default build + release CI are untouched.
 - [ ] Optional: dedicated monochrome tray glyph (dark tile can blend into dark tray bars).
 
 ---
-*Last updated: 2026-06-12*
+*Last updated: 2026-07-17*

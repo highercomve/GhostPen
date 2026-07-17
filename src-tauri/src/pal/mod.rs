@@ -4,8 +4,6 @@
 //! backend is chosen at runtime from `detect_session()`, never by compile-time `cfg!` alone,
 //! because a single Linux binary runs on both X11 and Wayland.
 
-use std::fmt;
-
 pub mod clipboard;
 pub mod input;
 
@@ -66,8 +64,8 @@ pub enum PalError {
     Input(String),
 }
 
-impl fmt::Display for PalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for PalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PalError::Clipboard(m) => write!(f, "clipboard error: {m}"),
             PalError::Input(m) => write!(f, "input error: {m}"),
@@ -77,11 +75,22 @@ impl fmt::Display for PalError {
 
 impl std::error::Error for PalError {}
 
+/// Data for an image on the clipboard. Deliberately NOT `Serialize` or `Debug` — raw bytes must
+/// never cross into the WebView (they would serialize as a JSON number array, megabytes over IPC)
+/// and must never be emitted into logs via a stray `tracing::error!("{:?}", img)`.
+#[derive(Clone)]
+pub struct ClipboardImage {
+    pub mime: String,   // always "image/png" after normalization
+    pub bytes: Vec<u8>, // encoded PNG bytes
+}
+
 /// Clipboard read/write. Implementations create OS handles per call so the backend stays
 /// `Send` (no long-lived non-Send OS connection held in shared state).
 pub trait ClipboardBackend: Send {
     fn read_text(&mut self) -> Result<String, PalError>;
     fn write_text(&mut self, text: &str) -> Result<(), PalError>;
+    fn read_image(&mut self) -> Result<Option<ClipboardImage>, PalError>;
+    fn write_image(&mut self, image: &ClipboardImage) -> Result<(), PalError>;
 }
 
 /// Synthetic keyboard input (Ctrl/Cmd+C / +V).

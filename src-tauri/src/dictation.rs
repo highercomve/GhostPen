@@ -428,7 +428,7 @@ fn proofread_text(app: &tauri::AppHandle, text: &str) -> Result<String, String> 
     let system = crate::ai::system_prompt("proofread", None, None)?;
     let text = text.to_string();
     tauri::async_runtime::block_on(async move {
-        crate::ai::run_completion(&profile, &system, &text).await
+        crate::ai::run_completion(&profile, &system, &crate::ai::UserContent::Text(text)).await
     })
 }
 

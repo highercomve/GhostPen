@@ -275,6 +275,6 @@ fn translate_text(
     let profile = profile.clone();
     let text = text.to_string();
     tauri::async_runtime::block_on(async move {
-        crate::ai::run_completion(&profile, &system, &text).await
+        crate::ai::run_completion(&profile, &system, &crate::ai::UserContent::Text(text)).await
     })
 }

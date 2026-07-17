@@ -33,6 +33,34 @@ pub struct CustomAction {
     pub model: String,
 }
 
+/// Image-text extraction (OCR) settings (ADR-011).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OcrSettings {
+    /// Max width/height in px before the image is sent to the model.
+    #[serde(default = "default_ocr_max_dim", rename = "maxDimension")]
+    pub max_dimension: u32,
+    /// Empty = built-in default prompt (so upgrades improve the prompt automatically).
+    #[serde(default, rename = "systemPrompt")]
+    pub system_prompt: String,
+    /// Empty = active profile's model.
+    #[serde(default, rename = "modelOverride")]
+    pub model_override: String,
+}
+
+fn default_ocr_max_dim() -> u32 {
+    1024
+}
+
+impl Default for OcrSettings {
+    fn default() -> Self {
+        OcrSettings {
+            max_dimension: 1024,
+            system_prompt: "".into(),
+            model_override: "".into(),
+        }
+    }
+}
+
 /// Live system-audio captions (ADR-008). Defaults are conservative: transcribe-only
 /// (no translation), auto source language, the small/fast `base` whisper model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -149,6 +177,9 @@ pub struct Settings {
     pub restore_delay_ms: u64,
     #[serde(default, rename = "customActions")]
     pub custom_actions: Vec<CustomAction>,
+    /// Image-text extraction (OCR) configuration (ADR-011).
+    #[serde(default)]
+    pub ocr: OcrSettings,
     /// Live system-audio captions configuration (ADR-008).
     #[serde(default)]
     pub captions: CaptionsSettings,
@@ -198,6 +229,7 @@ impl Settings {
             force_synthetic: false,
             restore_delay_ms: default_restore_delay(),
             custom_actions: Vec::new(),
+            ocr: OcrSettings::default(),
             captions: CaptionsSettings::default(),
             dictation: DictationSettings::default(),
         }

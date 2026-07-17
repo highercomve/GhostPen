@@ -8,9 +8,12 @@ import {
   CustomAction,
   Level,
   LEVELS,
+  SelectionInfo,
   getStatus,
   getSettings,
   getSelection,
+  extractImageText,
+  copyText,
   processAiAction,
   processAiCustom,
   hideWindow,
@@ -46,9 +49,21 @@ function isTypingTarget(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
 }
 
+function isTextSelection(s: SelectionInfo): s is { kind: "text"; text: string } {
+  return s.kind === "text";
+}
+
+function isImageSelection(s: SelectionInfo): s is { kind: "image"; preview: string; width: number; height: number } {
+  return s.kind === "image";
+}
+
+function isEmptySelection(s: SelectionInfo): s is { kind: "empty" } {
+  return s.kind === "empty";
+}
+
 export default function Menu() {
   const [status, setStatus] = useState<Status | null>(null);
-  const [selection, setSelection] = useState<string>("");
+  const [selection, setSelection] = useState<SelectionInfo>({ kind: "empty" });
   const [customActions, setCustomActions] = useState<CustomAction[]>([]);
   const [level, setLevel] = useState<Level>("balanced");
   const [view, setView] = useState<View>({ kind: "menu" });
@@ -57,6 +72,8 @@ export default function Menu() {
   const [langCursor, setLangCursor] = useState(0);
   // Freeform instruction typed in the prompt bar.
   const [prompt, setPrompt] = useState("");
+  // Transient "Copied ✓" feedback after copying the whole selection to the clipboard.
+  const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -65,14 +82,15 @@ export default function Menu() {
       /* ignore */
     }
     try {
-      setCustomActions((await getSettings()).customActions ?? []);
+      const settings = await getSettings();
+      setCustomActions(settings.customActions ?? []);
     } catch {
       /* ignore */
     }
     try {
-      setSelection((await getSelection()).trim());
+      setSelection(await getSelection());
     } catch {
-      setSelection("");
+      setSelection({ kind: "empty" });
     }
   }, []);
 
@@ -89,7 +107,7 @@ export default function Menu() {
     [level],
   );
 
-  const empty = selection.length === 0;
+  const empty = isEmptySelection(selection) || (isTextSelection(selection) && selection.text.trim().length === 0);
 
   // Run the freeform instruction from the prompt bar over the current selection.
   const runCustom = useCallback(async () => {
@@ -104,6 +122,32 @@ export default function Menu() {
       setView({ kind: "error", message: String(e) });
     }
   }, [prompt, empty]);
+
+  const doExtractText = useCallback(async () => {
+    if (!isImageSelection(selection)) return;
+    setView({ kind: "loading", label: "Extracting text" });
+    try {
+      const text = await extractImageText();
+      setCopied(false);
+      setSelection({ kind: "text", text });
+      setView({ kind: "menu" });
+    } catch (e) {
+      setView({ kind: "error", message: String(e) });
+    }
+  }, [selection]);
+
+  // Copy the entire current text selection to the clipboard, with transient feedback.
+  // Bound to Ctrl/Cmd+C in the menu view — the quick way to grab freshly-extracted text.
+  const copyFull = useCallback(async () => {
+    if (!isTextSelection(selection) || !selection.text.trim()) return;
+    try {
+      await copyText(selection.text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      /* ignore */
+    }
+  }, [selection]);
 
   // Flat, ordered list of selectable menu items — the single source of truth for both
   // rendering and keyboard navigation, so the cursor index always matches what's on screen.
@@ -157,6 +201,7 @@ export default function Menu() {
     const unlisten = listen("ghostpen://show", () => {
       setView({ kind: "menu" });
       setCursor(0);
+      setCopied(false);
       refresh();
     });
     return () => {
@@ -211,6 +256,16 @@ export default function Menu() {
     if (n === 0) return;
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return; // don't hijack keys while typing in the prompt bar
+      // Ctrl/Cmd+C copies the whole selection (e.g. just-extracted text). Defer to a manual
+      // in-page text selection if the user has one highlighted.
+      if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C")) {
+        const domSel = window.getSelection();
+        if (isTextSelection(selection) && selection.text.trim() && (!domSel || domSel.isCollapsed)) {
+          e.preventDefault();
+          copyFull();
+        }
+        return;
+      }
       switch (e.key) {
         case "ArrowDown":
         case "j":
@@ -234,7 +289,11 @@ export default function Menu() {
           break;
         case "Enter":
           e.preventDefault();
-          if (!empty) menuItems[cursor]?.activate();
+          if (isImageSelection(selection)) {
+            doExtractText();
+          } else if (!empty) {
+            menuItems[cursor]?.activate();
+          }
           break;
         default:
           if (/^[1-9]$/.test(e.key)) {
@@ -242,14 +301,14 @@ export default function Menu() {
             if (idx < n) {
               e.preventDefault();
               setCursor(idx);
-              if (!empty) menuItems[idx]?.activate();
+              if (!empty && !isImageSelection(selection)) menuItems[idx]?.activate();
             }
           }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view.kind, menuItems, cursor, empty]);
+  }, [view.kind, menuItems, cursor, empty, selection, doExtractText, copyFull]);
 
   // Translate view: arrows move across the 2-column grid, Enter picks the language.
   useEffect(() => {
@@ -304,7 +363,7 @@ export default function Menu() {
             🧪
           </button>
           <button className="icon-btn" title="Settings" onClick={() => openSettings()}>
-            ⚙
+            ⚙️
           </button>
         </span>
       </header>
@@ -316,19 +375,60 @@ export default function Menu() {
         </div>
       )}
 
-      {view.kind === "menu" && (
+      {view.kind === "menu" && isImageSelection(selection) && (
+        <div className="image-mode">
+          <figure className="image-capture">
+            <img src={selection.preview} alt="Captured image" />
+            <figcaption className="image-capture-meta">
+              <Icon name="image" className="image-capture-icon" />
+              Image on clipboard · {selection.width} × {selection.height}
+            </figcaption>
+          </figure>
+
+          <button ref={cursorRef} className="extract-cta selected" onClick={doExtractText}>
+            <Icon name="scan" className="extract-cta-icon" />
+            <span className="extract-cta-text">
+              <span className="extract-cta-label">Extract Text</span>
+              <span className="extract-cta-hint">Read the text out of the image</span>
+            </span>
+          </button>
+
+          <p className="image-mode-note">
+            Proofread, translate, rewrite &amp; more unlock once the text is extracted.
+          </p>
+        </div>
+      )}
+
+      {view.kind === "menu" && !isImageSelection(selection) && (
         <>
           <div className={`selection ${empty ? "empty" : ""}`}>
-            {empty ? (
-              status?.manual_mode ? (
-                "Copy some text (Ctrl+C), then pick an action."
-              ) : (
-                "No text selected."
-              )
+            {isTextSelection(selection) ? (
+              <>
+                <span className="selection-text-wrap">
+                  {selection.text.length > 140 ? selection.text.slice(0, 140) + "…" : selection.text}
+                </span>
+                <div className="copy-bar">
+                  <span className="copy-bar-count">{selection.text.length} chars</span>
+                  <button
+                    className={`copy-bar-btn ${copied ? "done" : ""}`}
+                    title="Copy the whole text (Ctrl+C)"
+                    onClick={copyFull}
+                  >
+                    <Icon name="copy" className="copy-text-icon" />
+                    {copied ? "Copied ✓" : "Copy all"}
+                    <kbd>Ctrl+C</kbd>
+                  </button>
+                </div>
+              </>
             ) : (
-              <span>{selection.length > 140 ? selection.slice(0, 140) + "…" : selection}</span>
+              <span>
+                {status?.manual_mode
+                  ? "Copy some text or an image (Ctrl+C), then pick an action."
+                  : "No text or image selected."}
+              </span>
             )}
           </div>
+
           <LevelBar level={level} setLevel={setLevel} />
           <div className="actions">
             {menuItems.map((a, i) => (

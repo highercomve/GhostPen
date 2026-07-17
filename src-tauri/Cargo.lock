@@ -1615,10 +1615,12 @@ version = "0.1.2"
 dependencies = [
  "arboard",
  "axum",
+ "base64 0.22.1",
  "cpal",
  "dirs 5.0.1",
  "enigo",
  "futures-util",
+ "image",
  "reqwest",
  "serde",
  "serde_json",

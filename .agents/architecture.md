@@ -370,6 +370,39 @@ backend is mandatory there, with a persistent serve thread for clipboard ownersh
   restriction (unlike system audio), but synthetic paste is still unavailable → manual-copy
   ending, which the overlay communicates.
 
+### ADR-010: Image-capable clipboard snapshot, restore, and working selection (supersedes ADR-004)
+- **Status**: Accepted (2026-07-17, OCR feature)
+- **Context**: The OCR feature makes an image a first-class menu input. ADR-004 ("v1 restores
+  text clipboard only") would destroy the user's image during the copy/result loop, and the
+  menu flow had no way to represent non-text input.
+- **Decision**: The PAL `ClipboardBackend` gains `read_image`/`write_image`
+  (`ClipboardImage { mime, bytes }`, PNG-normalized). `AppState.saved_clipboard` becomes a
+  `ClipboardSnapshot` enum (`Empty | Text | Image`) captured in the trigger step per ADR-003;
+  restore matches the snapshot kind. A separate `AppState.current_input:
+  SelectionContent` (`Empty | Text | Image`) holds the *working input*; it is populated by
+  `get_selection` (which runs after the synthetic copy has landed, when the overlay refreshes),
+  never in `trigger_menu_flow` itself. Raw image bytes never cross into the WebView — the
+  frontend receives only a downscaled base64 preview DTO. On Wayland the persistent serve
+  thread caches `Text | Image` and both `read_text` and `read_image` honor the `owned`
+  fast-path (self-read deadlock rule).
+- **Consequences**: Full-fidelity restore for the two dominant clipboard kinds. ADR-004 is
+  superseded. In manual-copy mode (Wayland default) there is still no restore — unchanged
+  contract. Exotic formats (rich text, file lists) remain out of scope.
+
+### ADR-011: OCR via the existing OpenAI-compatible vision path (no local OCR engine)
+- **Status**: Accepted (2026-07-17, OCR feature)
+- **Decision**: Image-text extraction is a `/chat/completions` multimodal request
+  (`content: [{type:"text"…},{type:"image_url", image_url:{url:"data:image/png;base64,…"}}]`)
+  against the **active profile** (optional model override in `settings.ocr`), reusing ADR-006
+  timeouts and the busy guard. No Tesseract/local OCR dependency. Images are downscaled to a
+  configurable max dimension (default 1024 px) before encoding. Flow is two-phase: **Extract
+  Text** turns the image input into text input; the normal actions then operate on that text.
+- **Consequences**: Zero new heavy dependencies (only `image` + `base64` crates); works with
+  any vision-capable endpoint (`gemma4:e4b` multimodal locally). If the configured model is
+  text-only the action fails with a readable error (ADR-005 spirit: degrade, never crash).
+  Privacy note: the image is sent to the configured endpoint, which may be a cloud provider —
+  surfaced in the settings UI. Image bytes/base64 are never logged.
+
 ## Plan Review (review of `plan.md`)
 
 ### Strengths
