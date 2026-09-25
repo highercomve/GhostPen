@@ -1,0 +1,901 @@
+:root {
+  --bg: #16181d;
+  --bg-soft: #1d2026;
+  --bg-elev: #23272f;
+  --border: #30343d;
+  --text: #e6e8ec;
+  --muted: #9aa0ab;
+  --accent: #6d8bff;
+  --accent-soft: #2b3354;
+  --danger: #ff6b6b;
+  --ok: #62d39a;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light dark;
+}
+
+/* Light theme — follows the OS color scheme (ADR: overlay theme = system). */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --bg-soft: #f5f6f8;
+    --bg-elev: #eaecf0;
+    --border: #dcdfe6;
+    --text: #1b1e24;
+    --muted: #6b7280;
+    --accent: #3b6cff;
+    --accent-soft: #e7edff;
+    --danger: #d64545;
+    --ok: #1a9d5f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { margin: 0; height: 100%; }
+
+body {
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+}
+
+code, kbd, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+kbd {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+
+/* ---------- Menu (compact overlay) ---------- */
+
+.menu {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  padding: 10px;
+  gap: 8px;
+}
+
+.menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.brand { font-weight: 700; letter-spacing: 0.3px; }
+
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 4px 8px;
+}
+.icon-btn:hover { background: var(--bg-elev); color: var(--text); }
+
+.dest {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dest code { color: var(--text); }
+
+.badge {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.selection {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text);
+  min-height: 38px;
+  max-height: 160px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  user-select: text;
+}
+.selection.empty { color: var(--muted); font-style: italic; user-select: none; }
+
+.selection-text-wrap {
+  width: 100%;
+}
+.copy-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+.copy-bar-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+.copy-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.copy-bar-btn:hover { border-color: var(--accent); color: var(--accent); }
+.copy-bar-btn.done { border-color: var(--accent); color: var(--accent); }
+.copy-bar-btn kbd {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.copy-text-icon { width: 14px; height: 14px; }
+
+/* Image mode: a focused, purpose-built step — framed capture + one primary CTA,
+   with the normal action grid / intensity / prompt hidden entirely. */
+.image-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.image-capture {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.image-capture img {
+  max-width: 100%;
+  max-height: 160px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  object-fit: contain;
+}
+.image-capture-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.image-capture-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.extract-cta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  color: #fff;
+  cursor: pointer;
+  text-align: left;
+  transition: filter 0.12s;
+}
+.extract-cta:hover,
+.extract-cta.selected {
+  filter: brightness(1.08);
+}
+.extract-cta-icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  color: #fff;
+}
+.extract-cta-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.extract-cta-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+.extract-cta-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.image-mode-note {
+  margin: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.action {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+}
+.action:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+.action.selected:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+.action:disabled { opacity: 0.45; cursor: not-allowed; }
+.action-icon { flex: none; color: var(--muted); }
+.action:hover:not(:disabled) .action-icon,
+.action.selected:not(:disabled) .action-icon { color: var(--accent); }
+.action-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.action-label { font-weight: 600; }
+.action-hint { font-size: 11px; color: var(--muted); }
+.action.small { flex-direction: row; padding: 6px 12px; }
+
+/* Freeform instruction bar (Google-style) pinned at the bottom of the menu. */
+.prompt-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 4px 4px 4px 12px;
+}
+.prompt-bar:focus-within { border-color: var(--accent); }
+.prompt-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 0;
+}
+.prompt-input::placeholder { color: var(--muted); }
+.prompt-input:disabled { cursor: not-allowed; }
+.prompt-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: filter 0.12s, opacity 0.12s;
+}
+.prompt-send:hover:not(:disabled) { filter: brightness(1.1); }
+.prompt-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.lang-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  overflow-y: auto;
+}
+.lang {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+.lang:hover { background: var(--accent-soft); border-color: var(--accent); }
+.lang.selected { background: var(--accent-soft); border-color: var(--accent); }
+.lang.back { grid-column: 1 / -1; color: var(--muted); }
+
+.state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+}
+.state.result, .state.error { justify-content: flex-start; align-items: stretch; }
+.state-label { font-weight: 600; }
+.state-label.ok { color: var(--ok); }
+.state-label.bad { color: var(--danger); }
+.hint { font-size: 12px; color: var(--muted); }
+
+.output {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.row { display: flex; gap: 8px; align-items: center; }
+
+.spinner {
+  width: 26px; height: 26px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Settings ---------- */
+
+.settings {
+  background: var(--bg);
+  min-height: 100vh;
+  padding: 20px;
+  max-width: 540px;
+  margin: 0 auto;
+}
+.settings.loading-page { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.settings h1 { font-size: 20px; margin: 0 0 16px; }
+.settings h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.settings h3 { font-size: 12px; margin: 4px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+
+/* Compositor-bind callout for the shortcuts group (shown on Wayland). */
+.kbd-note {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.kbd-note code { color: var(--text); }
+
+.card {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  font-size: 13px;
+}
+.diag-grid span { color: var(--muted); }
+
+.profile-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.tab {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+.tab.active { border-color: var(--accent); color: var(--accent); }
+.tab.add { color: var(--muted); }
+
+.profile-form, .card > label { display: flex; flex-direction: column; }
+label { gap: 5px; font-size: 13px; margin-bottom: 12px; }
+label.checkbox { flex-direction: row; align-items: center; gap: 8px; }
+
+input, select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: var(--text);
+  font-size: 13px;
+  width: 100%;
+}
+input[type="checkbox"] { width: auto; }
+input[type="range"] { padding: 0; }
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+
+.card textarea {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  line-height: 1.4;
+}
+.card textarea:focus { outline: none; border-color: var(--accent); }
+.custom-action {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.custom-action:first-of-type { border-top: none; padding-top: 0; }
+
+.muted { color: var(--muted); font-weight: 400; }
+.small { font-size: 11px; }
+
+.btn {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 14px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #0b0e16; font-weight: 600; }
+.btn.danger { color: var(--danger); border-color: transparent; align-self: flex-start; }
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  position: sticky;
+  bottom: 0;
+  padding-top: 8px;
+}
+
+.head-btns { display: flex; gap: 2px; }
+
+/* ---------- Intensity level segmented control ---------- */
+
+.level { display: flex; align-items: center; gap: 8px; }
+.level-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.seg {
+  display: flex;
+  flex: 1;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+.seg-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* ---------- Playground ---------- */
+
+.playground {
+  background: var(--bg);
+  min-height: 100vh;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pg-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pg-head h1 { font-size: 18px; margin: 0; }
+.pg-label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.pg-area {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 10px 12px;
+  resize: vertical;
+  min-height: 120px;
+  width: 100%;
+  font-family: inherit;
+  line-height: 1.45;
+}
+.pg-area:focus { outline: none; border-color: var(--accent); }
+.pg-area.result { background: var(--bg-elev); }
+.pg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pg-translate { display: flex; gap: 6px; margin-left: auto; }
+.pg-translate select { width: auto; }
+.pg-error {
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.pg-footer { display: flex; gap: 8px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ---- Live captions overlay (ADR-008) ----------------------------------------------- */
+/* The window is transparent + click-through capable; the caption pill is semi-opaque so it
+   stays legible even on a compositor without alpha (opaque fallback per the overlay rules). */
+.captions {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 10px;
+  user-select: none;
+}
+
+.cap-bar {
+  /* Controls dock at the BOTTOM; caption lines stack on top of them (order below), so text
+     always hugs the bottom edge near the controls instead of floating mid-window. */
+  order: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.cap-brand { color: var(--muted); font-weight: 600; }
+.cap-controls { display: flex; gap: 4px; }
+.cap-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cap-btn:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+.cap-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.cap-btn.stop { color: var(--danger); border-color: var(--danger); }
+.cap-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.cap-stage {
+  order: 1; /* above the control bar (.cap-bar is order 2) */
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
+  min-height: 0;
+  flex: 1;
+}
+
+/* All stage content (captions, idle hint, errors) shares ONE opaque bar with FIXED geometry:
+   it fills the stage regardless of content. Both properties are load-bearing on
+   wlroots/WebKitGTK, where a transparent webview window does NOT clear the previous frame:
+   - opaque backdrop: translucent pills would accumulate into an unreadable smear;
+   - constant size: a content-sized bar ghosts whenever a tall caption (e.g. a translation
+     wrapped to 3 lines) is followed by a shorter one — the uncovered strip keeps showing the
+     old frame's text stacked over the new (the translated-captions squash bug). */
+.cap-lines {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 5px 16px;
+  border-radius: 12px;
+  background: #0b0d11;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+/* A subtitle line: white text with a strong shadow for contrast over the bar. Long lines
+   (translations run wordy) wrap up to 3 lines, then ellipsize so they can't overflow the
+   fixed bar. */
+.cap-line {
+  max-width: 100%;
+  text-align: center;
+  line-height: 1.25;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.cap-line.past { opacity: 0.55; }
+.cap-line.current { opacity: 1; }
+.cap-tag {
+  font-size: 0.5em;
+  vertical-align: super;
+  margin-left: 6px;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+/* Rendered inside the fixed .cap-lines bar (no pill of their own — see ghosting note). */
+.cap-idle, .cap-error {
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+}
+.cap-error { color: var(--danger); }
+
+.cap-ghost-hint {
+  position: fixed;
+  bottom: 2px;
+  right: 6px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  text-shadow: 0 1px 2px #000;
+}
+
+/* ---- Voice dictation overlay (ADR-009) ---------------------------------------------- */
+/* Apple-dictation-style HUD: one OPAQUE rounded pill on a transparent window (the opaque
+   backdrop is load-bearing on wlroots/WebKitGTK — see the .cap-lines ghosting note).
+   The pill has a FIXED size for the same reason: a transparent window doesn't clear the
+   previous frame, so a pill that grows/shrinks between states leaves its old outline behind
+   ("opened twice" ghost). Constant geometry → every frame fully repaints the last one. */
+.dictation {
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 10px 12px;
+  user-select: none;
+}
+
+.dict-pill {
+  width: 100%;
+  max-width: 480px;
+  height: 100%;
+  background: #101216;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 22px;
+  padding: 12px 16px 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dict-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Mic badge: pulses softly while listening (Apple's red recording dot, tastefully).
+   Also a button — click to finish a live dictation or start another from a finished pill.
+   Never keyboard-focusable (tabIndex -1): recording must not start from a stray keypress. */
+.dict-mic {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  padding: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.08);
+}
+.dict-mic:not(.live):not(:disabled):hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.dict-mic:disabled { opacity: 0.5; cursor: default; }
+.dict-mic.live {
+  color: #fff;
+  background: #e0414d;
+  animation: dict-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dict-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(224, 65, 77, 0.45); }
+  50% { box-shadow: 0 0 0 7px rgba(224, 65, 77, 0); }
+}
+
+/* The waveform: thin rounded bars, heights driven by mic level events (JS), smoothed here.
+   The explicit pill-colored background (here and on .dict-text/.dict-hint) is load-bearing:
+   WebKitGTK's partial repaints on a transparent wlroots window don't clear old pixels, so a
+   region whose content changes must paint its own opaque backdrop or old glyphs/bars smear
+   through (same class of bug as the .cap-lines ghosting note). */
+.dict-wave {
+  flex: 1;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+  background: #101216;
+}
+.dict-bar {
+  flex: none;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #9db4ff, var(--accent));
+  /* No height transition: the rAF wave loop (Dictation.tsx) does its own per-frame easing;
+     a CSS transition here would lag and smear the 60 fps animation. */
+}
+/* Indeterminate shimmer while whisper / the AI is working. */
+.dict-wave.busy .dict-bar {
+  animation: dict-shimmer 1.2s ease-in-out infinite;
+}
+@keyframes dict-shimmer {
+  0%, 100% { height: 4px; opacity: 0.45; }
+  50% { height: 16px; opacity: 1; }
+}
+
+/* Spoken-language chip: compact, dark, pill-matched.
+   width:auto overrides the global `input, select { width: 100% }` form styling. */
+.dict-lang {
+  flex: none;
+  width: auto;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dict-lang:hover { background: rgba(255, 255, 255, 0.16); }
+
+/* AI-polish switch: an iOS-style slider. The real checkbox is visually hidden but still
+   drives :checked; the track/thumb are the visible UI. */
+.dict-polish {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0; /* labels inherit a base margin-bottom; align-items:center would shift it up */
+  height: 28px;
+  padding: 0 10px 0 11px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.dict-polish:hover { background: rgba(255, 255, 255, 0.16); }
+.dict-polish input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.dict-polish-label {
+  order: -1; /* label sits before the slider */
+  letter-spacing: 0.2px;
+}
+.dict-polish-track {
+  position: relative;
+  width: 30px;
+  height: 16px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.22);
+  transition: background 0.18s ease;
+}
+.dict-polish-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.18s ease;
+}
+.dict-polish input:checked + .dict-polish-track { background: var(--accent); }
+.dict-polish input:checked + .dict-polish-track .dict-polish-thumb { transform: translateX(14px); }
+.dict-polish input:checked ~ .dict-polish-label { color: rgba(255, 255, 255, 0.92); }
+
+.dict-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dict-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dict-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); }
+.dict-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.dict-btn.ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dict-btn.ok:hover:not(:disabled) { filter: brightness(1.12); }
+
+/* Live transcript: white on the dark pill, newest words simply extend the line.
+   Always rendered at its flexed size (never display:none) — see the ghosting note above. */
+.dict-text {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  text-align: center;
+  font-size: 15px;
+  line-height: 1.35;
+  color: #fff;
+  background: #101216; /* anti-smear, see .dict-wave note */
+}
+.dict-text.error { color: var(--danger); }
+
+.dict-hint {
+  height: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  background: #101216; /* anti-smear, see .dict-wave note */
+}

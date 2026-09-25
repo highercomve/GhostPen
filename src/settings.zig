@@ -1,0 +1,113 @@
+//! GhostPen settings: the same camelCase JSON schema as the Tauri app.
+//! Pure data and parsing (shared with ghostpen-cli); `store.zig` keeps them
+//! in an Oriel store.
+
+const std = @import("std");
+
+pub const Profile = struct {
+    id: []const u8,
+    name: []const u8,
+    baseUrl: []const u8,
+    apiKey: []const u8 = "",
+    model: []const u8,
+    temperature: f64 = 0.2,
+};
+
+pub const CustomAction = struct {
+    id: []const u8,
+    label: []const u8,
+    prompt: []const u8,
+    /// "" = the active profile's model.
+    model: []const u8 = "",
+};
+
+pub const Ocr = struct {
+    maxDimension: u32 = 1024,
+    systemPrompt: []const u8 = "",
+    modelOverride: []const u8 = "",
+};
+
+pub const Captions = struct {
+    model: []const u8 = "base",
+    language: []const u8 = "auto",
+    whisperTranslate: bool = false,
+    aiTranslate: bool = false,
+    targetLang: []const u8 = "English",
+    chunkSeconds: f64 = 5.0,
+    device: []const u8 = "",
+    fontSize: u32 = 28,
+};
+
+pub const Dictation = struct {
+    language: []const u8 = "auto",
+    proofread: bool = true,
+    device: []const u8 = "",
+};
+
+pub const Settings = struct {
+    hotkey: []const u8 = "Ctrl+Shift+A",
+    dictationHotkey: []const u8 = "Ctrl+Shift+D",
+    captionsHotkey: []const u8 = "Ctrl+Shift+L",
+    activeProfileId: []const u8 = "ollama-local",
+    profiles: []const Profile = &.{default_profile},
+    forceSynthetic: bool = false,
+    restoreDelayMs: u32 = 300,
+    customActions: []const CustomAction = &.{},
+    ocr: Ocr = .{},
+    captions: Captions = .{},
+    dictation: Dictation = .{},
+
+    /// The active profile, or the first one, or the built-in default.
+    pub fn activeProfile(self: Settings) Profile {
+        for (self.profiles) |p| if (std.mem.eql(u8, p.id, self.activeProfileId)) return p;
+        return if (self.profiles.len > 0) self.profiles[0] else default_profile;
+    }
+};
+
+pub const default_profile: Profile = .{
+    .id = "ollama-local",
+    .name = "Ollama (local)",
+    .baseUrl = "http://localhost:11434/v1",
+    .model = "gemma4:e4b",
+};
+
+pub const app_id = "dev.ghostpen.Oriel";
+
+/// Parse settings JSON (a bare object, or Tauri's store envelope
+/// `{"settings": {...}}`); missing fields take their defaults.
+pub fn parse(arena: std.mem.Allocator, value: std.json.Value) !Settings {
+    const v = if (value == .object) (value.object.get("settings") orelse value) else value;
+    return std.json.parseFromValueLeaky(Settings, arena, v, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
+
+/// A deep copy through JSON (settings are small; this keeps it obviously right).
+pub fn clone(arena: std.mem.Allocator, s: Settings) !Settings {
+    const json = try std.json.Stringify.valueAlloc(arena, s, .{});
+    return std.json.parseFromSliceLeaky(Settings, arena, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
+
+test "parse: defaults, envelope, unknown fields" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const empty = try std.json.parseFromSliceLeaky(std.json.Value, a, "{}", .{});
+    const d = try parse(a, empty);
+    try std.testing.expectEqualStrings("Ctrl+Shift+A", d.hotkey);
+    try std.testing.expectEqualStrings("gemma4:e4b", d.activeProfile().model);
+
+    const env = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"settings":{"hotkey":"Ctrl+Alt+G","activeProfileId":"groq","futureField":1,
+        \\ "profiles":[{"id":"groq","name":"Groq","baseUrl":"https://api.groq.com/openai/v1","apiKey":"k","model":"llama","temperature":0.5}],
+        \\ "captions":{"model":"small"}}}
+    , .{});
+    const s = try parse(a, env);
+    try std.testing.expectEqualStrings("Ctrl+Alt+G", s.hotkey);
+    try std.testing.expectEqualStrings("llama", s.activeProfile().model);
+    try std.testing.expectEqualStrings("small", s.captions.model);
+    try std.testing.expectEqual(@as(f64, 5.0), s.captions.chunkSeconds);
+    try std.testing.expectEqual(@as(u32, 300), s.restoreDelayMs);
+
+    const copy = try clone(a, s);
+    try std.testing.expectEqualStrings(s.profiles[0].apiKey, copy.profiles[0].apiKey);
+}

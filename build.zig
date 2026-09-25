@@ -10,18 +10,22 @@ pub fn build(b: *std.Build) void {
     const dep = b.dependency("oriel", .{
         .target = target,
         .optimize = optimize,
-        .tray = false,
+        // GhostPen: tray + global hotkeys + clipboard + synthetic copy/paste,
+        // settings store, notifications, and whisper captions/dictation.
+        .tray = true,
+        .store = true,
+        .notification = true,
+        .global_shortcut = true,
+        .input = true,
+        .clipboard = true,
+        .whisper = true,
+        .audio_capture = true,
         .menu = false,
-        .store = false,
         .dialog = false,
-        .notification = false,
         .updater = false,
         .sql = false,
         .fs_watch = false,
         .media_server = false,
-        .global_shortcut = false,
-        .input = false,
-        .clipboard = false,
     });
 
     // Frontend in frontend/ (npm install if needed, vite build, embed).
@@ -38,10 +42,37 @@ pub fn build(b: *std.Build) void {
         .frontend = .{ .dir = "frontend" },
         .package = .{
             .id = "dev.ghostpen.Oriel",
-            .name = "Ghostpen Oriel",
+            .name = "GhostPen",
             // .publisher = "Your Name <you@example.com>", // default: from the app id
-            .summary = "Ghostpen Oriel, built with Oriel",
+            .summary = "AI text editing anywhere on your desktop",
             .version = "0.1.0",
         },
     });
+
+    // ghostpen-cli: an action from the terminal (no GUI, no GTK).
+    const cli = b.addExecutable(.{
+        .name = "ghostpen-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = target,
+            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        }),
+    });
+    b.installArtifact(cli);
+    const run_cli = b.addRunArtifact(cli);
+    if (b.args) |a| run_cli.addArgs(a);
+    b.step("cli", "Run ghostpen-cli (pass arguments after --)").dependOn(&run_cli.step);
+
+    // Unit tests of the app's own modules (AI client, settings).
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "oriel", .module = dep.module("oriel") }},
+    }),
+        // Recent glibc/GCC crt1.o needs LLD (Zig's own linker can't read its .sframe).
+        .use_llvm = true,
+        .use_lld = true,
+    });
+    b.step("test", "Run the unit tests").dependOn(&b.addRunArtifact(tests).step);
 }
