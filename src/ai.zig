@@ -171,8 +171,15 @@ fn exchange(
     var buf: [2]Outcome = undefined;
     var sel = std.Io.Select(Outcome).init(io, &buf);
     sel.concurrent(.done, Fetch.run, .{ io, gpa, method, url, auth, body, sink }) catch return fail(diag, "Could not start the request.");
-    sel.concurrent(.timeout, Fetch.sleep, .{ io, request_timeout_ms }) catch return fail(diag, "Could not start the request.");
-    const first = sel.await() catch return fail(diag, "Request cancelled.");
+    // The fetch points into this frame: never return while it may still run.
+    sel.concurrent(.timeout, Fetch.sleep, .{ io, request_timeout_ms }) catch {
+        sel.cancelDiscard();
+        return fail(diag, "Could not start the request.");
+    };
+    const first = sel.await() catch {
+        sel.cancelDiscard();
+        return fail(diag, "Request cancelled.");
+    };
     sel.cancelDiscard();
     return switch (first) {
         .timeout => fail(diag, "Request timed out \u{2014} is the endpoint reachable?"),

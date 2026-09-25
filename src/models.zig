@@ -91,6 +91,9 @@ pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, id: []const u8, samples: [
     return ctx.transcribe(gpa, samples, .{ .language = lang, .translate = translate, .threads = threads });
 }
 
+/// One download at a time (two would write the same `.part` file).
+var downloading: std.atomic.Value(bool) = .init(false);
+
 /// Download `ggml-<id>.bin` from Hugging Face into the models directory
 /// (to `.part`, renamed when complete). `message` explains a failure.
 pub fn download(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id: []const u8, message: *[]const u8) !void {
@@ -98,6 +101,12 @@ pub fn download(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id
         message.* = "Invalid model name.";
         return error.DownloadFailed;
     }
+    if (downloading.swap(true, .acq_rel)) {
+        message.* = "A model download is already running.";
+        return error.DownloadFailed;
+    }
+    defer downloading.store(false, .release);
+
     const final = try path(gpa, id);
     defer gpa.free(final);
     const d = try dir(gpa);
@@ -107,13 +116,21 @@ pub fn download(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id
     defer gpa.free(part);
     const url = try std.fmt.allocPrint(arena, "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{s}.bin", .{id});
 
-    var file = try std.Io.Dir.cwd().createFile(io, part, .{});
-    var closed = false;
-    defer if (!closed) file.close(io);
-    errdefer std.Io.Dir.cwd().deleteFile(io, part) catch {};
+    fetchTo(io, gpa, arena, url, part, id, message) catch |err| {
+        // Closed by fetchTo already (Windows can't delete an open file).
+        std.Io.Dir.cwd().deleteFile(io, part) catch {};
+        return err;
+    };
+    try std.Io.Dir.cwd().rename(part, std.Io.Dir.cwd(), final, io);
+    log.info("downloaded whisper model {s}", .{id});
+}
+
+/// GET `url` into the file `dest`; the file is closed on return.
+fn fetchTo(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, url: []const u8, dest: []const u8, id: []const u8, message: *[]const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, dest, .{});
+    defer file.close(io);
     var buf: [64 * 1024]u8 = undefined;
     var fw = file.writer(io, &buf);
-
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
     const res = client.fetch(.{ .location = .{ .url = url }, .response_writer = &fw.interface }) catch |err| {
@@ -125,10 +142,6 @@ pub fn download(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id
         return error.DownloadFailed;
     }
     try fw.interface.flush();
-    file.close(io);
-    closed = true;
-    try std.Io.Dir.cwd().rename(part, std.Io.Dir.cwd(), final, io);
-    log.info("downloaded whisper model {s}", .{id});
 }
 
 /// Test hook: when set (from $GHOSTPEN_TEST_AUDIO, a 16 kHz mono PCM16 WAV),

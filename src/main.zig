@@ -61,12 +61,22 @@ fn acquireBusy() !void {
     if (busy.swap(true, .acq_rel)) return oriel.ipc.fail("Another action is still running.", .{});
 }
 
-/// Synthetic copy/paste works here (probed once at startup); without it
-/// GhostPen runs in manual-copy mode (the user copies/pastes).
-var input_available = false;
+/// Synthetic copy/paste works here (probed once at startup, off the UI
+/// thread); without it GhostPen runs in manual-copy mode.
+var input_available: std.atomic.Value(bool) = .init(false);
+var input_probed: std.atomic.Value(bool) = .init(false);
 
 fn useSynthetic(s: Settings) bool {
-    return input_available or s.forceSynthetic;
+    return input_available.load(.acquire) or s.forceSynthetic;
+}
+
+/// Wait (briefly) for the startup probe: a `--trigger` at launch must not
+/// fall into manual mode just because the probe hasn't finished.
+fn waitForInputProbe() void {
+    var waited: u32 = 0;
+    while (!input_probed.load(.acquire) and waited < 2000) : (waited += 20) {
+        io.sleep(.fromMilliseconds(20), .awake) catch return;
+    }
 }
 
 fn sessionName() []const u8 {
@@ -192,19 +202,23 @@ fn deliver(output: []const u8, s: Settings) !ProcessResult {
         return .{ .output = output, .pasted = false, .manual = true };
     };
 
-    // Restore after the target app has read the clipboard.
-    const t = std.Thread.spawn(.{}, restoreSnapshot, .{s.restoreDelayMs}) catch return .{ .output = output, .pasted = true, .manual = false };
-    t.detach();
-    return .{ .output = output, .pasted = true, .manual = false };
-}
-
-fn restoreSnapshot(delay_ms: u32) void {
-    io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
+    // Restore after the target app has read the clipboard. The snapshot is
+    // taken now: a new trigger during the delay must not replace it.
     state_mutex.lockUncancelable(io);
     const snap = snapshot;
     snapshot = .empty;
     state_mutex.unlock(io);
+    const t = std.Thread.spawn(.{}, restoreSnapshot, .{ snap, s.restoreDelayMs }) catch {
+        snap.deinit();
+        return .{ .output = output, .pasted = true, .manual = false };
+    };
+    t.detach();
+    return .{ .output = output, .pasted = true, .manual = false };
+}
+
+fn restoreSnapshot(snap: Content, delay_ms: u64) void {
     defer snap.deinit();
+    io.sleep(.fromMilliseconds(@intCast(@min(delay_ms, 60_000))), .awake) catch {};
     switch (snap) {
         .empty => {},
         .text => |t| oriel.clipboard.writeText(t) catch |err| log.warn("restore clipboard: {s}", .{@errorName(err)}),
@@ -228,6 +242,7 @@ fn triggerWorker() void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const s = shared.get(io, arena_state.allocator()) catch Settings{};
+    waitForInputProbe();
 
     if (useSynthetic(s)) {
         replace(&snapshot, readClipboard());
@@ -246,15 +261,22 @@ fn triggerWorker() void {
     }.show);
 }
 
-/// The clipboard now: text when there is some, else an image.
+/// The clipboard now: text when there is some, else an image; empty when
+/// neither (read errors are ignored: the trigger's snapshot is best effort).
 fn readClipboard() Content {
+    return readClipboardChecked() catch .empty;
+}
+
+/// Like `readClipboard`, but an error when the clipboard can't be read at all.
+fn readClipboardChecked() !Content {
+    var text_err: ?anyerror = null;
     if (oriel.clipboard.readText(gpa)) |text| {
         if (std.mem.trim(u8, text, " \t\r\n").len > 0) return .{ .text = text };
         gpa.free(text);
-    } else |_| {}
+    } else |err| text_err = err;
     if (oriel.clipboard.readImage(gpa)) |maybe| {
         if (maybe) |png| return .{ .image = png };
-    } else |_| {}
+    } else |err| if (text_err != null) return err;
     return .empty;
 }
 
@@ -301,7 +323,7 @@ pub const Commands = struct {
         return .{
             .session = sessionName(),
             .clipboard_backend = "oriel",
-            .input_available = input_available,
+            .input_available = input_available.load(.acquire),
             .manual_mode = !useSynthetic(s),
             .active_profile = p.name,
             .active_model = p.model,
@@ -310,16 +332,14 @@ pub const Commands = struct {
 
     /// The clipboard (after the trigger's copy): text first, then an image.
     pub fn get_selection(arena: std.mem.Allocator) !SelectionInfo {
-        const content = readClipboard();
+        const content = readClipboardChecked() catch |err| return oriel.ipc.fail("Could not read the clipboard ({s}).", .{@errorName(err)});
+        errdefer content.deinit();
         const info: SelectionInfo = switch (content) {
             .empty => .{ .kind = "empty" },
             .text => |t| .{ .kind = "text", .text = try arena.dupe(u8, t) },
             .image => |png| blk: {
                 const size = image.pngSize(png) orelse image.Size{ .width = 0, .height = 0 };
-                const thumb = image.fitWithin(gpa, png, 512) catch |err| {
-                    content.deinit();
-                    return oriel.ipc.fail("Could not read the image ({s}).", .{@errorName(err)});
-                };
+                const thumb = image.fitWithin(gpa, png, 512) catch |err| return oriel.ipc.fail("Could not read the image ({s}).", .{@errorName(err)});
                 defer gpa.free(thumb);
                 const uri = try image.dataUri(gpa, thumb);
                 defer gpa.free(uri);
@@ -443,14 +463,22 @@ pub const Commands = struct {
     pub const dictation_set_proofread = dictation.Commands.dictation_set_proofread;
 };
 
+/// The working selection; when the menu hasn't read one, the clipboard
+/// (as the Tauri app does). Runs on a worker thread (clipboard reads block).
 fn selectionText(arena: std.mem.Allocator) ![]const u8 {
-    state_mutex.lockUncancelable(io);
-    defer state_mutex.unlock(io);
-    return switch (current_input) {
-        .text => |t| try arena.dupe(u8, t),
-        .image => oriel.ipc.fail("An image is selected: extract its text first.", .{}),
-        .empty => oriel.ipc.fail("Nothing selected: highlight some text, then trigger GhostPen.", .{}),
-    };
+    {
+        state_mutex.lockUncancelable(io);
+        defer state_mutex.unlock(io);
+        switch (current_input) {
+            .text => |t| return arena.dupe(u8, t),
+            .image => return oriel.ipc.fail("An image is selected: extract its text first.", .{}),
+            .empty => {},
+        }
+    }
+    const text = oriel.clipboard.readText(gpa) catch |err| return oriel.ipc.fail("Could not read the clipboard ({s}).", .{@errorName(err)});
+    defer gpa.free(text);
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) return oriel.ipc.fail("Nothing selected: highlight some text, then trigger GhostPen.", .{});
+    return arena.dupe(u8, text);
 }
 
 // ---- hotkeys, tray, launch flags -------------------------------------------------------
@@ -586,8 +614,9 @@ fn setup() !void {
 fn probeInput() void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
+    defer input_probed.store(true, .release);
     const check = oriel.input.check(arena.allocator(), .{ .io = io, .icon_png = app.icon_bytes }) catch return;
-    input_available = check.ok;
+    input_available.store(check.ok, .release);
     if (!check.ok) log.info("synthetic input unavailable ({s}): manual-copy mode", .{check.detail});
 }
 

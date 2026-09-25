@@ -2,6 +2,10 @@
 //! optional AI proofread → clipboard, shown in the dictation pill. The text
 //! is copied, never auto-pasted (the user reviews it first). Port of
 //! GhostPen's dictation.rs.
+//!
+//! Ownership: a Session is reference-counted. `current` (the listening
+//! session), `latest` (the last one started, possibly still finalizing: Esc
+//! or a new start silences it) and its worker thread each hold a reference.
 
 const std = @import("std");
 const oriel = @import("oriel");
@@ -16,8 +20,12 @@ const gpa = std.heap.smp_allocator;
 const rate = models.sample_rate;
 const read_chunk = rate / 10;
 
+/// Guards `current` and `latest` (never held across slow work).
 var mutex: std.Io.Mutex = .init;
-var session: ?*Session = null;
+var current: ?*Session = null;
+var latest: ?*Session = null;
+/// A start in progress (device pick, model load): a second toggle is ignored.
+var starting: std.atomic.Value(bool) = .init(false);
 /// Live values the overlay can change mid-session.
 var proofread_live: std.atomic.Value(bool) = .init(true);
 var language_mutex: std.Io.Mutex = .init;
@@ -57,18 +65,41 @@ fn update(text: []const u8, state: []const u8) void {
 }
 
 const Session = struct {
-    /// Capture on; cleared by stop/cancel.
+    refs: std.atomic.Value(u32),
+    /// Capture on; cleared by stop/cancel, or when the microphone fails.
     listening: std.atomic.Value(bool) = .init(true),
     /// Cancelled (Esc, or a newer session): the worker goes silent.
     aborted: std.atomic.Value(bool) = .init(false),
     /// Stop means finalize (transcribe → proofread → copy); false = cancel.
     finalize: std.atomic.Value(bool) = .init(true),
+    /// 0 opening the microphone, 1 open, 2 failed (start() waits for it).
+    opened: std.atomic.Value(u8) = .init(0),
     buf_mutex: std.Io.Mutex = .init,
     samples: std.ArrayList(f32) = .empty,
     source: ?[:0]u8,
     model: []u8,
-    capture_thread: std.Thread = undefined,
-    level_thread: std.Thread = undefined,
+    capture_thread: ?std.Thread = null,
+    level_thread: ?std.Thread = null,
+
+    fn create(source: ?[:0]u8, model: []const u8) !*Session {
+        const s = try gpa.create(Session);
+        errdefer gpa.destroy(s);
+        s.* = .{ .refs = .init(1), .source = source, .model = try gpa.dupe(u8, model) };
+        return s;
+    }
+
+    fn retain(s: *Session) *Session {
+        _ = s.refs.fetchAdd(1, .monotonic);
+        return s;
+    }
+
+    fn release(s: *Session) void {
+        if (s.refs.fetchSub(1, .acq_rel) != 1) return;
+        s.samples.deinit(gpa);
+        if (s.source) |src| gpa.free(src);
+        gpa.free(s.model);
+        gpa.destroy(s);
+    }
 
     fn snapshot(s: *Session) ![]f32 {
         s.buf_mutex.lockUncancelable(main.io);
@@ -88,17 +119,23 @@ const Session = struct {
         s.samples.appendSlice(gpa, part) catch {};
     }
 
+    /// Opens, reads and closes the microphone on this thread (WASAPI/COM
+    /// needs one thread); reports the open's outcome through `opened`.
     fn captureLoop(s: *Session) void {
-        if (models.test_audio != null) return models.feedTestAudio(main.io, &s.listening, s, append);
+        if (models.test_audio != null) {
+            s.opened.store(1, .release);
+            return models.feedTestAudio(main.io, &s.listening, s, append);
+        }
         var stream = audio.Stream.open(s.source, "GhostPen dictation", rate) catch |err| {
-            if (!s.aborted.load(.acquire)) update("Could not open the microphone.", "error");
             log.warn("open microphone: {s}", .{@errorName(err)});
             s.listening.store(false, .release);
             s.finalize.store(false, .release);
             s.aborted.store(true, .release);
+            s.opened.store(2, .release);
             return;
         };
         defer stream.close();
+        s.opened.store(1, .release);
         var buf: [read_chunk]f32 = undefined;
         while (s.listening.load(.acquire)) {
             stream.read(&buf) catch |err| {
@@ -125,9 +162,9 @@ const Session = struct {
 
     /// Re-transcribe the whole utterance while listening (each time a
     /// second of new audio arrived), then finalize or report the cancel.
-    /// Owns the session: frees it when done.
+    /// Holds its own reference, released at the end.
     fn workerLoop(s: *Session) void {
-        defer s.destroy();
+        defer s.release();
         var last_len: usize = 0;
         while (s.listening.load(.acquire)) {
             main.io.sleep(.fromMilliseconds(250), .awake) catch break;
@@ -147,8 +184,8 @@ const Session = struct {
             const text = models.cleanTranscript(arena.allocator(), raw) catch continue;
             if (text.len > 0 and !s.aborted.load(.acquire)) update(text, "listening");
         }
-        s.capture_thread.join();
-        s.level_thread.join();
+        if (s.capture_thread) |t| t.join();
+        if (s.level_thread) |t| t.join();
 
         if (s.aborted.load(.acquire)) return;
         if (!s.finalize.load(.acquire)) return update("", "cancelled");
@@ -195,13 +232,6 @@ const Session = struct {
         };
         update(final, "done");
     }
-
-    fn destroy(s: *Session) void {
-        s.samples.deinit(gpa);
-        if (s.source) |src| gpa.free(src);
-        gpa.free(s.model);
-        gpa.destroy(s);
-    }
 };
 
 /// The configured microphone (substring match), else the default input.
@@ -221,65 +251,83 @@ fn pickMicrophone(device: []const u8) !?[:0]u8 {
 pub fn isRunning() bool {
     mutex.lockUncancelable(main.io);
     defer mutex.unlock(main.io);
-    return if (session) |s| s.listening.load(.acquire) else false;
+    return if (current) |s| s.listening.load(.acquire) else false;
 }
 
-/// Start listening; returns the device name (in `arena`).
+/// Start listening; returns the device name (in `arena`). Slow work (device
+/// list, model load, opening the microphone) runs without holding `mutex`.
 fn start(arena: std.mem.Allocator) ![]const u8 {
+    if (isRunning()) return oriel.ipc.fail("Dictation is already running.", .{});
+    if (starting.swap(true, .acq_rel)) return oriel.ipc.fail("Dictation is already starting.", .{});
+    defer starting.store(false, .release);
+
     const s = try main.shared.get(main.io, arena);
     const model = s.captions.model;
     if (!models.isDownloaded(main.io, gpa, model))
         return oriel.ipc.fail("Whisper model \"{s}\" isn't downloaded yet. Download it in Settings \u{2192} Captions.", .{model});
-
-    mutex.lockUncancelable(main.io);
-    defer mutex.unlock(main.io);
-    if (session) |old| {
-        if (old.listening.load(.acquire)) return oriel.ipc.fail("Dictation is already running.", .{});
-        // A previous session still finalizing: the user moved on, silence it.
-        old.aborted.store(true, .release);
-        session = null;
-    }
-
     const source = if (models.test_audio != null) null else pickMicrophone(s.dictation.device) catch |err| return switch (err) {
         error.DeviceNotFound => oriel.ipc.fail("Microphone \"{s}\" not found.", .{s.dictation.device}),
         else => oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)}),
     };
-    errdefer if (source) |src| gpa.free(src);
+    const device = try arena.dupe(u8, if (source) |src| src else "default");
+    const sess = Session.create(source, model) catch |err| {
+        if (source) |src| gpa.free(src);
+        return err;
+    };
+    defer sess.release(); // start()'s own reference
     models.ensure(main.io, gpa, model) catch |err| return oriel.ipc.fail("Could not load the whisper model \"{s}\" ({s}).", .{ model, @errorName(err) });
     proofread_live.store(s.dictation.proofread, .release);
     setLanguage(s.dictation.language);
 
-    const sess = try gpa.create(Session);
-    errdefer gpa.destroy(sess);
-    sess.* = .{ .source = source, .model = try gpa.dupe(u8, model) };
+    // Threads: capture and level (joined by the worker), then the worker.
     sess.capture_thread = try std.Thread.spawn(.{}, Session.captureLoop, .{sess});
     sess.level_thread = std.Thread.spawn(.{}, Session.levelLoop, .{sess}) catch |err| {
         sess.listening.store(false, .release);
-        sess.capture_thread.join();
+        sess.capture_thread.?.join();
         return err;
     };
-    const worker = std.Thread.spawn(.{}, Session.workerLoop, .{sess}) catch |err| {
+    const worker = std.Thread.spawn(.{}, Session.workerLoop, .{sess.retain()}) catch |err| {
         sess.listening.store(false, .release);
-        sess.capture_thread.join();
-        sess.level_thread.join();
+        sess.capture_thread.?.join();
+        sess.level_thread.?.join();
+        sess.release(); // the worker's reference
         return err;
     };
-    worker.detach(); // owns and frees the session
-    session = sess;
-    return arena.dupe(u8, if (source) |src| src else "default");
+    worker.detach();
+
+    // Fail the start (like the Tauri app) when the microphone doesn't open.
+    var waited: u32 = 0;
+    while (sess.opened.load(.acquire) == 0 and waited < 3000) : (waited += 20) {
+        main.io.sleep(.fromMilliseconds(20), .awake) catch break;
+    }
+    if (sess.opened.load(.acquire) == 2) return oriel.ipc.fail("Could not open the microphone.", .{});
+
+    mutex.lockUncancelable(main.io);
+    defer mutex.unlock(main.io);
+    // A previous session still finalizing: the user moved on, silence it.
+    if (latest) |old| {
+        old.aborted.store(true, .release);
+        old.release();
+    }
+    if (current) |old| old.release();
+    latest = sess.retain();
+    current = sess.retain();
+    return device;
 }
 
-/// Stop listening: finalize (`finalize` true) or cancel.
+/// Stop listening: finalize (`finalize` true) or cancel. Cancel also
+/// silences a session that is still finalizing (Esc during "Polishing…").
 fn end(finalize: bool) void {
     mutex.lockUncancelable(main.io);
     defer mutex.unlock(main.io);
-    const s = session orelse return;
-    session = null;
-    if (!finalize) {
+    if (!finalize) if (latest) |s| {
         s.finalize.store(false, .release);
         s.aborted.store(true, .release);
-    }
+    };
+    const s = current orelse return;
+    current = null;
     s.listening.store(false, .release);
+    s.release();
 }
 
 fn showOverlay() void {
@@ -291,9 +339,10 @@ fn showOverlay() void {
 }
 
 /// The `--voice-input` hotkey / tray item: finish when listening, else show
-/// the pill and start.
+/// the pill and start. Ignored while a start is still in progress.
 pub fn toggle() void {
     if (isRunning()) return end(true);
+    if (starting.load(.acquire)) return;
     showOverlay();
     const t = std.Thread.spawn(.{}, startFromToggle, .{}) catch return;
     t.detach();

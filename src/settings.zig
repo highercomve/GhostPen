@@ -51,7 +51,7 @@ pub const Settings = struct {
     activeProfileId: []const u8 = "ollama-local",
     profiles: []const Profile = &.{default_profile},
     forceSynthetic: bool = false,
-    restoreDelayMs: u32 = 300,
+    restoreDelayMs: u64 = 300,
     customActions: []const CustomAction = &.{},
     ocr: Ocr = .{},
     captions: Captions = .{},
@@ -106,7 +106,7 @@ test "parse: defaults, envelope, unknown fields" {
     try std.testing.expectEqualStrings("llama", s.activeProfile().model);
     try std.testing.expectEqualStrings("small", s.captions.model);
     try std.testing.expectEqual(@as(f64, 5.0), s.captions.chunkSeconds);
-    try std.testing.expectEqual(@as(u32, 300), s.restoreDelayMs);
+    try std.testing.expectEqual(@as(u64, 300), s.restoreDelayMs);
 
     const copy = try clone(a, s);
     try std.testing.expectEqualStrings(s.profiles[0].apiKey, copy.profiles[0].apiKey);

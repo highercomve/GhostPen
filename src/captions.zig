@@ -43,10 +43,15 @@ pub fn isRunning() bool {
     return if (session) |s| s.running.load(.acquire) else false;
 }
 
+/// A start in progress (device pick, model load): a second toggle is ignored.
+var starting: std.atomic.Value(bool) = .init(false);
+
 const Session = struct {
     running: std.atomic.Value(bool) = .init(true),
-    capture_thread: std.Thread = undefined,
-    worker_thread: std.Thread = undefined,
+    /// 0 opening the audio source, 1 open, 2 failed (start() waits for it).
+    opened: std.atomic.Value(u8) = .init(0),
+    capture_thread: ?std.Thread = null,
+    worker_thread: ?std.Thread = null,
     buf_mutex: std.Io.Mutex = .init,
     samples: std.ArrayList(f32) = .empty,
     source: ?[:0]u8 = null,
@@ -56,10 +61,36 @@ const Session = struct {
     chunk_samples: usize,
     target_lang: []u8,
 
+    /// All fields owned; on failure nothing leaks.
+    fn create(source: [:0]const u8, c: @import("settings.zig").Captions) !*Session {
+        const s = try gpa.create(Session);
+        errdefer gpa.destroy(s);
+        const src = try gpa.dupeZ(u8, source);
+        errdefer gpa.free(src);
+        const model = try gpa.dupe(u8, c.model);
+        errdefer gpa.free(model);
+        const lang = try gpa.dupe(u8, c.language);
+        errdefer gpa.free(lang);
+        const target = try gpa.dupe(u8, c.targetLang);
+        // Tauri clamps to ≥ 1 s; the buffer holds at most 60 s.
+        const seconds = std.math.clamp(if (std.math.isNan(c.chunkSeconds)) 5.0 else c.chunkSeconds, 1.0, 60.0);
+        s.* = .{
+            .source = src,
+            .model = model,
+            .language = lang,
+            .whisper_translate = c.whisperTranslate,
+            .chunk_samples = @intFromFloat(seconds * @as(f64, @floatFromInt(rate))),
+            .target_lang = target,
+        };
+        return s;
+    }
+
+    /// Stop the threads and free everything (blocks while a transcription
+    /// or translation in flight finishes: never call it on the UI thread).
     fn destroy(s: *Session) void {
         s.running.store(false, .release);
-        s.capture_thread.join();
-        s.worker_thread.join();
+        if (s.capture_thread) |t| t.join();
+        if (s.worker_thread) |t| t.join();
         s.samples.deinit(gpa);
         if (s.source) |src| gpa.free(src);
         gpa.free(s.model);
@@ -79,13 +110,18 @@ const Session = struct {
     }
 
     fn captureLoop(s: *Session) void {
-        if (models.test_audio != null) return models.feedTestAudio(main.io, &s.running, s, append);
+        if (models.test_audio != null) {
+            s.opened.store(1, .release);
+            return models.feedTestAudio(main.io, &s.running, s, append);
+        }
         var stream = audio.Stream.open(s.source, "GhostPen captions", rate) catch |err| {
-            emitError("Could not open the audio source ({s}).", .{@errorName(err)});
+            log.warn("open audio source: {s}", .{@errorName(err)});
             s.running.store(false, .release);
+            s.opened.store(2, .release);
             return;
         };
         defer stream.close();
+        s.opened.store(1, .release);
         var buf: [read_chunk]f32 = undefined;
         while (s.running.load(.acquire)) {
             stream.read(&buf) catch |err| {
@@ -169,50 +205,48 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
-/// Start a session; returns the device name (in `arena`).
+/// Start a session; returns the device name (in `arena`). Slow work (device
+/// list, model load, opening the source) runs without holding `mutex`.
 fn start(arena: std.mem.Allocator) ![]const u8 {
+    if (isRunning()) return oriel.ipc.fail("Captions are already running.", .{});
+    if (starting.swap(true, .acq_rel)) return oriel.ipc.fail("Captions are already starting.", .{});
+    defer starting.store(false, .release);
+
     const s = try main.shared.get(main.io, arena);
     const c = s.captions;
     if (!models.isDownloaded(main.io, gpa, c.model))
         return oriel.ipc.fail("Whisper model \"{s}\" isn't downloaded yet. Download it in Settings → Captions.", .{c.model});
-
-    mutex.lockUncancelable(main.io);
-    defer mutex.unlock(main.io);
-    if (session) |old| {
-        if (old.running.load(.acquire)) return oriel.ipc.fail("Captions are already running.", .{});
-        session = null;
-        old.destroy();
-    }
 
     const source = if (models.test_audio != null) try gpa.dupeZ(u8, "test-audio") else pickSource(c.device) catch |err| return switch (err) {
         error.NoSystemAudioSource => oriel.ipc.fail("No system-audio source found (on macOS, install a loopback device such as BlackHole).", .{}),
         error.DeviceNotFound => oriel.ipc.fail("Audio device \"{s}\" not found.", .{c.device}),
         else => oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)}),
     };
-    errdefer gpa.free(source);
+    defer gpa.free(source);
     models.ensure(main.io, gpa, c.model) catch |err| return oriel.ipc.fail("Could not load the whisper model \"{s}\" ({s}).", .{ c.model, @errorName(err) });
 
-    const sess = try gpa.create(Session);
-    errdefer gpa.destroy(sess);
-    sess.* = .{
-        .source = source,
-        .model = try gpa.dupe(u8, c.model),
-        .language = try gpa.dupe(u8, c.language),
-        .whisper_translate = c.whisperTranslate,
-        .chunk_samples = @max(rate, @as(usize, @intFromFloat(c.chunkSeconds * @as(f64, @floatFromInt(rate))))),
-        .target_lang = try gpa.dupe(u8, c.targetLang),
-    };
+    const sess = try Session.create(source, c);
+    errdefer sess.destroy();
     translate_live.store(c.aiTranslate, .release);
     sess.capture_thread = try std.Thread.spawn(.{}, Session.captureLoop, .{sess});
-    sess.worker_thread = std.Thread.spawn(.{}, Session.workerLoop, .{sess}) catch |err| {
-        sess.running.store(false, .release);
-        sess.capture_thread.join();
-        return err;
-    };
+    // Fail the start (like the Tauri app) when the source doesn't open.
+    var waited: u32 = 0;
+    while (sess.opened.load(.acquire) == 0 and waited < 3000) : (waited += 20) {
+        main.io.sleep(.fromMilliseconds(20), .awake) catch break;
+    }
+    if (sess.opened.load(.acquire) == 2) return oriel.ipc.fail("Could not open the audio source \"{s}\".", .{source});
+    sess.worker_thread = try std.Thread.spawn(.{}, Session.workerLoop, .{sess});
+
+    mutex.lockUncancelable(main.io);
+    const old = session;
     session = sess;
+    mutex.unlock(main.io);
+    if (old) |o| o.destroy();
     return arena.dupe(u8, source);
 }
 
+/// Stop the running session. The threads are joined off the calling thread,
+/// so the UI never waits for a transcription in flight.
 fn stop() void {
     mutex.lockUncancelable(main.io);
     const s = session orelse {
@@ -221,7 +255,8 @@ fn stop() void {
     };
     session = null;
     mutex.unlock(main.io);
-    s.destroy();
+    s.running.store(false, .release);
+    if (std.Thread.spawn(.{}, Session.destroy, .{s})) |t| t.detach() else |_| s.destroy();
 }
 
 /// Show the overlay with its controls (leave ghost mode), at the bottom.
@@ -236,6 +271,7 @@ pub fn open() void {
 
 /// The `--captions` hotkey: stop and hide when running, else show and start.
 pub fn toggle() void {
+    if (starting.load(.acquire)) return;
     if (isRunning()) {
         const t = std.Thread.spawn(.{}, stopAndHide, .{}) catch return;
         t.detach();
