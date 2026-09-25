@@ -82,7 +82,14 @@ const Session = struct {
         return s.samples.items.len;
     }
 
+    fn append(s: *Session, part: []const f32) void {
+        s.buf_mutex.lockUncancelable(main.io);
+        defer s.buf_mutex.unlock(main.io);
+        s.samples.appendSlice(gpa, part) catch {};
+    }
+
     fn captureLoop(s: *Session) void {
+        if (models.test_audio != null) return models.feedTestAudio(main.io, &s.listening, s, append);
         var stream = audio.Stream.open(s.source, "GhostPen dictation", rate) catch |err| {
             if (!s.aborted.load(.acquire)) update("Could not open the microphone.", "error");
             log.warn("open microphone: {s}", .{@errorName(err)});
@@ -99,9 +106,7 @@ const Session = struct {
                 s.listening.store(false, .release);
                 return;
             };
-            s.buf_mutex.lockUncancelable(main.io);
-            defer s.buf_mutex.unlock(main.io);
-            s.samples.appendSlice(gpa, &buf) catch continue;
+            s.append(&buf);
         }
     }
 
@@ -235,7 +240,7 @@ fn start(arena: std.mem.Allocator) ![]const u8 {
         session = null;
     }
 
-    const source = pickMicrophone(s.dictation.device) catch |err| return switch (err) {
+    const source = if (models.test_audio != null) null else pickMicrophone(s.dictation.device) catch |err| return switch (err) {
         error.DeviceNotFound => oriel.ipc.fail("Microphone \"{s}\" not found.", .{s.dictation.device}),
         else => oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)}),
     };

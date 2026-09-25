@@ -604,6 +604,13 @@ pub fn main(init: std.process.Init) !u8 {
     }
     launch_args = args[1..];
 
+    // Test hook: $GHOSTPEN_TEST_AUDIO (16 kHz mono PCM16 WAV) replaces the
+    // sound server for captions and dictation.
+    if (init.environ_map.get("GHOSTPEN_TEST_AUDIO")) |wav| {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, wav, init.arena.allocator(), .limited(256 << 20));
+        @import("models.zig").test_audio = try @import("models.zig").decodeWav(init.arena.allocator(), data);
+    }
+
     return oriel.main(init, .{ .commands = Commands, .events = Events }, .{
         .id = settings_mod.app_id,
         .title = "GhostPen",

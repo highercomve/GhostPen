@@ -69,7 +69,17 @@ const Session = struct {
     }
 
     /// Owns the audio stream: opened, read and closed on this thread.
+    fn append(s: *Session, part: []const f32) void {
+        s.buf_mutex.lockUncancelable(main.io);
+        defer s.buf_mutex.unlock(main.io);
+        s.samples.appendSlice(gpa, part) catch return;
+        if (s.samples.items.len > max_buffer) {
+            s.samples.replaceRangeAssumeCapacity(0, s.samples.items.len - max_buffer, &.{});
+        }
+    }
+
     fn captureLoop(s: *Session) void {
+        if (models.test_audio != null) return models.feedTestAudio(main.io, &s.running, s, append);
         var stream = audio.Stream.open(s.source, "GhostPen captions", rate) catch |err| {
             emitError("Could not open the audio source ({s}).", .{@errorName(err)});
             s.running.store(false, .release);
@@ -83,12 +93,7 @@ const Session = struct {
                 s.running.store(false, .release);
                 return;
             };
-            s.buf_mutex.lockUncancelable(main.io);
-            defer s.buf_mutex.unlock(main.io);
-            s.samples.appendSlice(gpa, &buf) catch continue;
-            if (s.samples.items.len > max_buffer) {
-                s.samples.replaceRangeAssumeCapacity(0, s.samples.items.len - max_buffer, &.{});
-            }
+            s.append(&buf);
         }
     }
 
@@ -179,7 +184,7 @@ fn start(arena: std.mem.Allocator) ![]const u8 {
         old.destroy();
     }
 
-    const source = pickSource(c.device) catch |err| return switch (err) {
+    const source = if (models.test_audio != null) try gpa.dupeZ(u8, "test-audio") else pickSource(c.device) catch |err| return switch (err) {
         error.NoSystemAudioSource => oriel.ipc.fail("No system-audio source found (on macOS, install a loopback device such as BlackHole).", .{}),
         error.DeviceNotFound => oriel.ipc.fail("Audio device \"{s}\" not found.", .{c.device}),
         else => oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)}),

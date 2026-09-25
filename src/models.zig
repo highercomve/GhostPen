@@ -131,6 +131,57 @@ pub fn download(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id
     log.info("downloaded whisper model {s}", .{id});
 }
 
+/// Test hook: when set (from $GHOSTPEN_TEST_AUDIO, a 16 kHz mono PCM16 WAV),
+/// captions and dictation stream these samples instead of the sound server,
+/// so tests never capture the user's real audio.
+pub var test_audio: ?[]const f32 = null;
+
+/// Stream `test_audio` in real time (100 ms chunks, then silence) to `sink`
+/// while `running` is set.
+pub fn feedTestAudio(io: std.Io, running: *std.atomic.Value(bool), ctx: anytype, comptime sink: fn (@TypeOf(ctx), []const f32) void) void {
+    const samples = test_audio orelse return;
+    const chunk = sample_rate / 10;
+    const silence = [_]f32{0} ** (sample_rate / 10);
+    var pos: usize = 0;
+    while (running.load(.acquire)) {
+        io.sleep(.fromMilliseconds(100), .awake) catch return;
+        const end = @min(pos + chunk, samples.len);
+        sink(ctx, if (pos < samples.len) samples[pos..end] else &silence);
+        pos = end;
+    }
+}
+
+/// 16 kHz mono PCM16 WAV → samples. Caller frees.
+pub fn decodeWav(gpa: std.mem.Allocator, data: []const u8) ![]f32 {
+    if (data.len < 12 or !std.mem.eql(u8, data[0..4], "RIFF") or !std.mem.eql(u8, data[8..12], "WAVE")) return error.NotWav;
+    var pos: usize = 12;
+    var fmt_ok = false;
+    while (pos + 8 <= data.len) {
+        const id = data[pos..][0..4];
+        const size = std.mem.readInt(u32, data[pos + 4 ..][0..4], .little);
+        const body_start = pos + 8;
+        const body_end = std.math.add(usize, body_start, size) catch return error.BadWav;
+        if (body_end > data.len) return error.BadWav;
+        const body = data[body_start..body_end];
+        if (std.mem.eql(u8, id, "fmt ")) {
+            if (body.len < 16) return error.BadWav;
+            const format = std.mem.readInt(u16, body[0..2], .little);
+            const channels = std.mem.readInt(u16, body[2..4], .little);
+            const sr = std.mem.readInt(u32, body[4..8], .little);
+            const bits = std.mem.readInt(u16, body[14..16], .little);
+            if (format != 1 or channels != 1 or sr != sample_rate or bits != 16) return error.UnsupportedWav;
+            fmt_ok = true;
+        } else if (std.mem.eql(u8, id, "data")) {
+            if (!fmt_ok) return error.BadWav;
+            const out = try gpa.alloc(f32, body.len / 2);
+            for (out, 0..) |*o, i| o.* = @as(f32, @floatFromInt(std.mem.readInt(i16, body[i * 2 ..][0..2], .little))) / 32768.0;
+            return out;
+        }
+        pos = body_end + (size & 1);
+    }
+    return error.BadWav;
+}
+
 /// Strip whisper's bracketed sound tags ("[MUSIC]", "[BLANK_AUDIO]") and
 /// collapse whitespace. Result points into `arena`.
 pub fn cleanTranscript(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
