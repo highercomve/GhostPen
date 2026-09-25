@@ -567,6 +567,14 @@ fn setup() !void {
     const failed = registerHotkeys(arena.allocator(), s);
     if (failed.len > 0) log.warn("hotkeys not registered: {s} (bind `ghostpen-oriel --trigger` in your desktop instead)", .{failed});
 
+    // macOS gates synthetic keystrokes behind Accessibility: ask once (the
+    // prompt lists GhostPen; elsewhere this is already granted).
+    switch (oriel.permissions.status(.accessibility)) {
+        .granted => {},
+        .denied => log.info("Accessibility is off for GhostPen: synthetic copy/paste won't work (System Settings → Privacy & Security → Accessibility)", .{}),
+        .prompt, .unknown => _ = oriel.permissions.request(.accessibility),
+    }
+
     // Synthetic input available? (Probed off the UI thread: it may talk to the compositor.)
     if (std.Thread.spawn(.{}, probeInput, .{})) |t| t.detach() else |_| {}
 

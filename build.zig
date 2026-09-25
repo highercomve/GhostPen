@@ -57,6 +57,11 @@ pub fn build(b: *std.Build) void {
             .summary = "AI text editing anywhere on your desktop",
             .version = "0.1.0",
         },
+        .permissions = .{
+            .microphone = "GhostPen transcribes your voice for dictation.",
+            .accessibility = "GhostPen copies your selection and pastes the result by sending keystrokes to the app you're using.",
+            .system_audio = "GhostPen captions the audio other apps play.",
+        },
     });
 
     // ghostpen-cli: an action from the terminal (no GUI, no GTK).
