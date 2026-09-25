@@ -35,10 +35,14 @@ pub fn build(b: *std.Build) void {
     // zig build types    regenerate frontend/src/oriel.ts
     // zig build check    type-check src/ without building
     // zig build package  installers: deb/rpm/AppImage (Linux), setup.exe (Windows), .app/.dmg (macOS)
+    // PNG decode/resize/encode for clipboard images (OCR, previews).
+    const zigimg = b.dependency("zigimg", .{ .target = target, .optimize = optimize }).module("zigimg");
+
     _ = oriel.addApp(b, dep, .{
         .name = "ghostpen-oriel",
         .root_source_file = b.path("src/main.zig"),
         .icon = b.path("icon.png"), // High-resolution PNG (1024x1024 recommended)
+        .imports = &.{.{ .name = "zigimg", .module = zigimg }},
         .frontend = .{ .dir = "frontend" },
         .package = .{
             .id = "dev.ghostpen.Oriel",
@@ -63,12 +67,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_cli.addArgs(a);
     b.step("cli", "Run ghostpen-cli (pass arguments after --)").dependOn(&run_cli.step);
 
-    // Unit tests of the app's own modules (AI client, settings).
+    // Unit tests of the app's own modules (AI client, settings, images).
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "oriel", .module = dep.module("oriel") }},
+        .imports = &.{
+            .{ .name = "oriel", .module = dep.module("oriel") },
+            .{ .name = "zigimg", .module = zigimg },
+        },
     }),
         // Recent glibc/GCC crt1.o needs LLD (Zig's own linker can't read its .sframe).
         .use_llvm = true,
