@@ -20,6 +20,12 @@ pub fn build(b: *std.Build) void {
         .clipboard = true,
         .whisper = true,
         .audio_capture = true,
+        // Whisper on an NVIDIA GPU: `oriel build -Dcuda` (Linux, CUDA toolkit).
+        .ggml_cuda = b.option(bool, "cuda", "Run whisper on an NVIDIA GPU (libggml-cuda.so; needs the CUDA toolkit)") orelse false,
+        // Wayland: the menu, captions and dictation overlays as layer surfaces
+        // (always on top, anchored) where the compositor supports them.
+        .layer_shell = target.result.os.tag == .linux and
+            (b.option(bool, "layer_shell", "Wayland overlays via gtk4-layer-shell (default on)") orelse true),
         .menu = false,
         .dialog = false,
         .updater = false,

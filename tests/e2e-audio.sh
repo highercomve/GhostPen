@@ -35,5 +35,5 @@ case "$got" in
   OK:*HELLO*TEST*) echo "ok: dictation copied \"$got\"" ;;
   *) echo "FAIL: dictation clipboard \"$got\""; fail=1 ;;
 esac
-grep -iE "caption|whisper|dictation|error" "$tmp/app.log" | grep -v atspi | tail -8
+grep -iE "whisper backend|caption|dictation|error" "$tmp/app.log" | grep -v atspi | tail -8
 exit $fail

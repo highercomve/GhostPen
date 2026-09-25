@@ -38,3 +38,14 @@ if [ "$got" = "OK: TEH QUICK BROWN FOX" ]; then
 else
   echo "FAIL: the field holds \"$got\""; tail -20 "$tmp/app.log"; exit 1
 fi
+
+# Playground streaming: Proofread button → chunks → done, in the Result box.
+xdotool mousemove 63 273 click 1; sleep 3
+import -window root "$out/playground-stream.png"
+xdotool mousemove 300 430 click 1; xdotool key ctrl+a ctrl+c; sleep 0.5
+got=$(xsel -ob)
+if [ "$got" = "OK: OK: TEH QUICK BROWN FOX" ]; then
+  echo "ok: streamed \"$got\""
+else
+  echo "FAIL: the Result box holds \"$got\""; exit 1
+fi
