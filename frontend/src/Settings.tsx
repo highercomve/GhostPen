@@ -47,6 +47,7 @@ export default function Settings() {
   const [models, setModels] = useState<string[]>([]);
   const [modelMsg, setModelMsg] = useState<string>("");
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [capStatus, setCapStatus] = useState<CaptionsStatus | null>(null);
   const [capDevices, setCapDevices] = useState<string[]>([]);
   const [dictDevices, setDictDevices] = useState<string[]>([]);
@@ -75,6 +76,7 @@ export default function Settings() {
   const update = (patch: Partial<SettingsType>) => {
     setSettings({ ...settings, ...patch });
     setSaved(false);
+    setSaveError("");
   };
 
   const updateProfile = (id: string, patch: Partial<Profile>) => {
@@ -209,9 +211,16 @@ export default function Settings() {
     }
   };
 
+  // The backend can reject after saving (e.g. a hotkey that didn't register): show why.
   const save = async () => {
-    await saveSettings(settings);
-    setSaved(true);
+    try {
+      await saveSettings(settings);
+      setSaved(true);
+      setSaveError("");
+    } catch (e) {
+      setSaved(false);
+      setSaveError(e instanceof Error ? e.message : String(e));
+    }
     getStatus().then(setStatus).catch(() => {});
   };
 
@@ -607,6 +616,7 @@ export default function Settings() {
       </section>
 
       <div className="footer">
+        {saveError && <span className="save-error">⚠ {saveError}</span>}
         {saved && <span className="muted">Saved ✓</span>}
         <button className="btn" onClick={() => hideWindow()}>Close</button>
         <button className="btn primary" onClick={save}>Save</button>
