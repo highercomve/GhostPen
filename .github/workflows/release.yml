@@ -19,7 +19,7 @@ permissions:
 env:
   ZIG_VERSION: 0.16.0
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
-  ORIEL_VERSION: v0.6.5
+  ORIEL_VERSION: v0.6.6
   NFPM_VERSION: 2.43.0
   ARCH_PACKAGES: >-
     git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols
@@ -61,10 +61,11 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     timeout-minutes: 240
+    env:
+      CUDA_ARCHS: 75,86,89,120a
     steps:
       - name: System packages
-        # nvcc compiles host code with GCC (optional for the cuda package).
-        run: pacman -Syu --noconfirm --needed $ARCH_PACKAGES cuda gcc
+        run: pacman -Syu --noconfirm --needed $ARCH_PACKAGES
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
@@ -73,14 +74,40 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/highercomve/Oriel/main/install.sh | ORIEL_VERSION=$ORIEL_VERSION ORIEL_INSTALL_DIR=/usr/local/bin sh
           curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" | tar xz -C /usr/local/bin nfpm
-      - name: Package (deb, rpm, AppImage with CUDA and Vulkan)
+      # libggml-cuda.so takes ~70 min of nvcc on a hosted runner, and only
+      # changes with Oriel's ggml, the GPU list or the CUDA version: it is
+      # cached under those, and the toolkit is only installed to rebuild it.
+      - name: CUDA library cache key
         run: |
+          # What the library is built from: Oriel's pinned llama.cpp (ggml)
+          # and its ggml build script (nvcc flags), not the Oriel version.
+          zig build --fetch >/dev/null
+          ORIEL_DIR=$(ls -d zig-pkg/oriel-$(sed -n 's/.*\.hash = "oriel-\([^"]*\)".*/\1/p' build.zig.zon))
+          GGML_KEY=$( { grep -A2 '\.llama = ' "$ORIEL_DIR/build.zig.zon"; cat "$ORIEL_DIR/build/ggml.zig"; } | sha256sum | cut -c1-16)
+          echo "GGML_KEY=$GGML_KEY" >> "$GITHUB_ENV"
+          echo "CUDA_VERSION=$(pacman -Si cuda | sed -n 's/^Version *: *//p')" >> "$GITHUB_ENV"
+      - name: CUDA library cache
+        id: cuda-cache
+        uses: actions/cache@v4
+        with:
+          path: cuda-cache/libggml-cuda.so
+          key: ggml-cuda-${{ env.GGML_KEY }}-${{ env.CUDA_ARCHS }}-cuda-${{ env.CUDA_VERSION }}
+      - name: Build libggml-cuda.so (cache miss)
+        if: steps.cuda-cache.outputs.cache-hit != 'true'
+        run: |
+          # nvcc compiles host code with GCC (optional for the cuda package).
+          pacman -S --noconfirm --needed cuda gcc
           # The toolkit, and the host compiler nvcc supports (NVCC_CCBIN, from
           # Arch's profile script, which a non-login shell doesn't read).
           export CUDA_PATH=/opt/cuda PATH="/opt/cuda/bin:$PATH"
           eval "$(grep '^export NVCC_CCBIN=' /etc/profile.d/cuda.sh)"
           nvcc --version | tail -1; echo "NVCC_CCBIN=$NVCC_CCBIN"
-          oriel package -Dvulkan -Dcuda -Dcuda_arch=75,86,89,120a -Dupdate_target=x86_64-linux-cuda
+          oriel build -Dcuda -Dcuda_arch=$CUDA_ARCHS
+          mkdir -p cuda-cache
+          cp zig-out/bin/libggml-cuda.so cuda-cache/
+      - name: Package (deb, rpm, AppImage with CUDA and Vulkan)
+        run: |
+          oriel package -Dvulkan -Dcuda_prebuilt="$PWD/cuda-cache/libggml-cuda.so" -Dupdate_target=x86_64-linux-cuda
           cd zig-out/package
           for f in *.AppImage *.deb *.rpm; do mv "$f" "${f%.*}-cuda.${f##*.}"; done
           ls -la

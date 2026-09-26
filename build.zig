@@ -37,6 +37,8 @@ pub fn build(b: *std.Build) void {
         // Releases: the GPU generations to build for, and cuBLAS linked in (needs only the driver).
         .cuda_arch = b.option([]const u8, "cuda_arch", "With -Dcuda: nvcc -arch, or compute capabilities like 75,86,89,120 (default: this machine's GPU)"),
         .cuda_static = b.option(bool, "cuda_static", "With -Dcuda: link cuBLAS statically (needs only the NVIDIA driver)") orelse false,
+        // CI: a libggml-cuda.so cached from an earlier build with the same Oriel and options (skips nvcc).
+        .ggml_cuda_prebuilt = b.option([]const u8, "cuda_prebuilt", "Absolute path of a libggml-cuda.so built earlier by the same Oriel version and options; implies -Dcuda"),
         // ... or on any GPU through Vulkan: `oriel build -Dvulkan` (Linux; Vulkan headers, glslc).
         .ggml_vulkan = b.option(bool, "vulkan", "Run whisper and the local model on any GPU through Vulkan (libggml-vulkan.so; needs Vulkan headers and glslc)") orelse false,
         // Wayland: the menu, captions and dictation overlays as layer surfaces
