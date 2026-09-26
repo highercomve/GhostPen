@@ -82,10 +82,12 @@ jobs:
       - name: CUDA library cache key
         run: |
           # What the library is built from: Oriel's pinned llama.cpp (ggml)
-          # and its ggml build script (nvcc flags), not the Oriel version.
+          # and the CUDA parts of its ggml build script (nvcc flags, sources),
+          # not the Oriel version or its other backends.
           zig build --fetch >/dev/null
           ORIEL_DIR=$(ls -d zig-pkg/oriel-$(sed -n 's/.*\.hash = "oriel-\([^"]*\)".*/\1/p' build.zig.zon))
-          GGML_KEY=$( { grep -A2 '\.llama = ' "$ORIEL_DIR/build.zig.zon"; cat "$ORIEL_DIR/build/ggml.zig"; } | sha256sum | cut -c1-16)
+          CUDA_PARTS='/^pub const CudaOptions/,/^};/{print} /^fn cudaArchArgs/,/^}/{print} /^fn isComputeCapability/,/^}/{print} /^fn addCudaBackend/,/^}/{print} /^const cuda_sources/,/^};/{print}'
+          GGML_KEY=$( { grep -A2 '\.llama = ' "$ORIEL_DIR/build.zig.zon"; awk "$CUDA_PARTS" "$ORIEL_DIR/build/ggml.zig"; } | sha256sum | cut -c1-16)
           echo "GGML_KEY=$GGML_KEY" >> "$GITHUB_ENV"
           # Cache keys can't contain commas.
           echo "CUDA_ARCHS_KEY=${CUDA_ARCHS//,/_}" >> "$GITHUB_ENV"
