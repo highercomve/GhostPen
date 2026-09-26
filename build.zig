@@ -2,7 +2,9 @@ const std = @import("std");
 const oriel = @import("oriel");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // macOS: runs on macOS 13+ and any Mac CPU (Oriel's default), for the
+    // CLI and zigimg too, not only the app.
+    const target = oriel.resolveTarget(b, b.standardTargetOptions(.{}));
     const optimize = b.standardOptimizeOption(.{});
 
     // Oriel's built-in modules and plugins. Switch on what the app uses:
@@ -66,7 +68,7 @@ pub fn build(b: *std.Build) void {
             .name = "GhostPen",
             // .publisher = "Your Name <you@example.com>", // default: from the app id
             .summary = "AI text editing anywhere on your desktop",
-            .version = "0.2.1",
+            .version = "0.2.2",
             // The CLI ships in every package, next to the app (and in /usr/bin on Linux).
             .contents = .{ .executables = &.{cli} },
             // The Rust/Tauri GhostPen's packages were named ghost-pen (and

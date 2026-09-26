@@ -114,9 +114,12 @@ fn settingsFileExists(io: std.Io, gpa: std.mem.Allocator) bool {
 }
 
 fn importTauri(arena: std.mem.Allocator, gpa: std.mem.Allocator) ?Settings {
-    const tauri_dir = oriel.store.dataDir(gpa, tauri_app_id) catch return null;
-    defer gpa.free(tauri_dir);
-    const tauri_path = std.fs.path.join(gpa, &.{ tauri_dir, "settings.json" }) catch return null;
+    // Next to our own data folder (which exists): only read, never create
+    // the other app's folder (oriel.store.dataDir would).
+    const own = oriel.store.dataDir(gpa, "GhostPen") catch return null;
+    defer gpa.free(own);
+    const base = std.fs.path.dirname(own) orelse return null;
+    const tauri_path = std.fs.path.join(gpa, &.{ base, tauri_app_id, "settings.json" }) catch return null;
     defer gpa.free(tauri_path);
     const old = oriel.store.Store.openPath(gpa, tauri_path) catch return null;
     old.auto_save = false; // never write the other app's file

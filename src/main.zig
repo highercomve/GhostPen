@@ -783,7 +783,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         }
         if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
-            std.debug.print("ghostpen 0.2.1\n", .{});
+            std.debug.print("ghostpen 0.2.2\n", .{});
             return 0;
         }
     }

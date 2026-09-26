@@ -18,6 +18,10 @@ var gpu: ?[:0]const u8 = null;
 
 /// Load the GPU backend (libggml-cuda.so next to the executable) once.
 pub fn init(io: std.Io) void {
+    // Held while the backend loads (it runs off the main thread): a model
+    // loaded meanwhile waits for the GPU instead of falling back to the CPU.
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
     whisper.silenceLogs();
     if (oriel.ggml_gpu.load(io) > 0) gpu = oriel.ggml_gpu.gpuName();
     log.info("whisper backend: {s}", .{gpu orelse "CPU"});

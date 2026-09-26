@@ -22,7 +22,10 @@ var session: ?*Session = null;
 var translate_live: std.atomic.Value(bool) = .init(false);
 
 pub fn init() void {
-    models.init(main.io);
+    // Loading the GPU backend can take seconds (Metal compiles its shaders
+    // on a new build's first launch): off the main thread, so the tray and
+    // windows come up at once. Captions and dictation load models later.
+    if (std.Thread.spawn(.{}, models.init, .{main.io})) |t| t.detach() else |_| models.init(main.io);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     if (main.shared.get(main.io, arena.allocator())) |s| translate_live.store(s.captions.aiTranslate, .release) else |_| {}
