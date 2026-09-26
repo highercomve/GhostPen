@@ -24,7 +24,7 @@ AppImage, the Windows installer and the macOS app update themselves
 | --- | --- | --- |
 | Linux | AppImage, .deb, .rpm | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
 | Linux, `-cuda` | AppImage, .deb, .rpm | NVIDIA GPUs through **CUDA** (RTX 20xx–50xx; needs the CUDA 13 runtime), else Vulkan |
-| Windows 10/11 | setup.exe (per user) | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
+| Windows 10/11 | setup.exe (per user), `winget install Highercomve.GhostPen` | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
 | macOS 13+ | .dmg (Apple Silicon) | the GPU through **Metal** |
 
 The React frontend is GhostPen's own; the commands, events and settings keep

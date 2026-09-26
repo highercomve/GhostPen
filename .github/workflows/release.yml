@@ -19,7 +19,7 @@ permissions:
 env:
   ZIG_VERSION: 0.16.0
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
-  ORIEL_VERSION: v0.6.6
+  ORIEL_VERSION: v0.6.7
   NFPM_VERSION: 2.43.0
   # Windows GPU builds: glslc and the Vulkan headers (LunarG SDK).
   VULKAN_SDK_VERSION: 1.4.357.0
@@ -51,7 +51,7 @@ jobs:
         run: oriel package -Dvulkan
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
+          name: dist-linux
           path: zig-out/package/*
 
   # The same Linux packages with CUDA as well ("-cuda" in the file names):
@@ -117,7 +117,7 @@ jobs:
           ls -la
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-cuda
+          name: dist-linux-cuda
           path: zig-out/package/*
 
   windows:
@@ -161,8 +161,16 @@ jobs:
           }
           & "$root\Bin\glslc.exe" --version
           Add-Content $env:GITHUB_ENV "VULKAN_SDK=$root"
+      # On a tag, also the WinGet manifests for this setup.exe (the release
+      # URL it will have); the winget job submits them once it's published.
       - name: Package (setup.exe)
-        run: oriel package -Dvulkan
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            oriel package -Dvulkan -Dwinget-url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          else
+            oriel package -Dvulkan
+          fi
       # What the in-app updater installs on Windows: the exe itself (built
       # the same way, or updates would replace the GPU build with a CPU one).
       - name: Updater payload
@@ -170,9 +178,18 @@ jobs:
         run: |
           oriel build -Dvulkan
           Copy-Item zig-out/bin/ghostpen.exe zig-out/package/ghostpen-x86_64-windows.exe
+      - name: WinGet manifests
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget
+          path: zig-out/package/winget/*
+      - name: Remove the manifests from the release files
+        shell: bash
+        run: rm -rf zig-out/package/winget
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: dist-windows
           path: zig-out/package/*
 
   macos:
@@ -225,7 +242,7 @@ jobs:
           rm -rf GhostPen.app GhostPen.entitlements
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
+          name: dist-macos
           path: zig-out/package/*
 
   release:
@@ -245,6 +262,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: dist-*
           merge-multiple: true
       # One signed latest.json for the in-app updater (Settings → About &
       # updates): an entry per platform, each signed with the release key.
@@ -285,3 +303,29 @@ jobs:
           files: dist/*
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+
+  # WinGet (`winget install Highercomve.GhostPen`): a pull request to
+  # microsoft/winget-pkgs with this release's manifests, once its setup.exe is
+  # downloadable. Needs the WINGET_TOKEN secret (a GitHub token with
+  # public_repo, for the fork and the pull request); skipped without it.
+  winget:
+    needs: [release]
+    if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: winget
+          path: winget
+      - name: Submit to winget-pkgs
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if (-not $env:WINGET_TOKEN) {
+            Write-Output "::warning::WINGET_TOKEN is not set: the WinGet manifests were not submitted."
+            exit 0
+          }
+          Get-ChildItem winget | ForEach-Object { Write-Output "== $($_.Name)"; Get-Content $_.FullName }
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe submit --token $env:WINGET_TOKEN --prtitle "GhostPen ${{ github.ref_name }}" winget

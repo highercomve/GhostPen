@@ -3,7 +3,7 @@ const oriel = @import("oriel");
 
 /// GhostPen's version: the packages, `ghostpen --version`, Settings → About
 /// and the updater all read it from here.
-const version = "0.2.5";
+const version = "0.2.6";
 
 /// Public half of the release signing key (the private half is the
 /// GHOSTPEN_UPDATE_KEY secret the release workflow signs latest.json with).
