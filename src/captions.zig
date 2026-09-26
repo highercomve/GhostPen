@@ -148,7 +148,8 @@ const Session = struct {
                 continue;
             };
             defer gpa.free(raw);
-            const text = std.mem.trim(u8, raw, " \t\r\n");
+            // Silence comes back as "[BLANK_AUDIO]": never show sound tags.
+            const text = models.cleanTranscript(arena.allocator(), raw) catch continue;
             if (text.len == 0 or !s.running.load(.acquire)) continue;
 
             if (translate_live.load(.acquire)) {
