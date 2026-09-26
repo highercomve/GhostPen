@@ -17,6 +17,8 @@ const store = @import("store.zig");
 const image = @import("image.zig");
 const captions = @import("captions.zig");
 const dictation = @import("dictation.zig");
+const local_llm = @import("local_llm.zig");
+const llm_models = @import("llm_models.zig");
 
 const App = oriel.App;
 pub const Settings = settings_mod.Settings;
@@ -139,7 +141,43 @@ pub const Events = struct {
     @"ghostpen://dictation": struct { text: []const u8, state: []const u8 },
     @"ghostpen://dictation-level": f32,
     @"ghostpen://dictation-show": struct {},
+    /// Local model downloads (to the Settings window).
+    @"ghostpen://llm-download": llm_models.Progress,
 };
+
+// ---- built-in models (GhostPen runs them) -------------------------------------------------------
+
+var environ_map: *const std.process.Environ.Map = undefined;
+/// This executable (the runner is it, in helper mode).
+var self_exe: ?[]const u8 = null;
+
+fn llmDirs(arena: std.mem.Allocator) !llm_models.Dirs {
+    const base = try oriel.store.dataDir(arena, "GhostPen");
+    return llm_models.dirs(arena, try std.fs.path.join(arena, &.{ base, "models" }), environ_map);
+}
+
+/// `ai.local_resolver`: the runner's configuration for a local profile.
+fn resolveLocal(arena: std.mem.Allocator, profile: settings_mod.Profile, diag: *ai.Diag) ai.Error!local_llm.Config {
+    const s = shared.get(io, arena) catch Settings{};
+    const d = llmDirs(arena) catch return error.OutOfMemory;
+    const model = if (profile.model.len > 0) profile.model else llm_models.default_id;
+    const path = llm_models.resolve(io, arena, d, model) orelse {
+        diag.message = std.fmt.allocPrint(arena, "The model \"{s}\" isn't downloaded: download it in Settings → Built-in models.", .{model}) catch return error.OutOfMemory;
+        return error.AiFailed;
+    };
+    const exe = self_exe orelse {
+        diag.message = "Can't find GhostPen's executable to start the built-in model.";
+        return error.AiFailed;
+    };
+    return .{ .exe = exe, .model = path, .ctx = s.localLlm.ctxTokens, .gpu = s.localLlm.gpu, .idle_minutes = s.localLlm.idleMinutes };
+}
+
+/// A local model setting for display: the catalog name, or the file's name.
+fn localModelName(model: []const u8) []const u8 {
+    if (llm_models.find(model)) |e| return e.name;
+    const base = std.fs.path.basename(if (std.mem.startsWith(u8, model, "file:")) model["file:".len..] else model);
+    return if (std.ascii.endsWithIgnoreCase(base, ".gguf")) base[0 .. base.len - ".gguf".len] else base;
+}
 
 // ---- AI helpers ------------------------------------------------------------------------
 
@@ -295,6 +333,7 @@ pub const Commands = struct {
         "get_selection",           "extract_image_text",  "process_ai_action",     "process_ai_custom",
         "process_text",            "process_text_stream", "fetch_models",          "captions_start",
         "captions_download_model", "dictation_start",     "captions_list_devices", "dictation_list_devices",
+        "llm_models_status",       "llm_download_model",  "llm_delete_model",      "llm_unload",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -326,7 +365,7 @@ pub const Commands = struct {
             .input_available = input_available.load(.acquire),
             .manual_mode = !useSynthetic(s),
             .active_profile = p.name,
-            .active_model = p.model,
+            .active_model = if (p.isLocal()) localModelName(p.model) else p.model,
         };
     }
 
@@ -435,6 +474,76 @@ pub const Commands = struct {
             return;
         };
         App.emitTo("playground", "ghostpen://done", final) catch {};
+    }
+
+    // ---- built-in models (Settings → Built-in models) ----
+
+    pub const LlmStatus = struct {
+        status: llm_models.Status,
+        downloading: bool,
+        loaded: bool,
+    };
+
+    pub fn llm_models_status(arena: std.mem.Allocator) !LlmStatus {
+        const d = try llmDirs(arena);
+        return .{
+            .status = try llm_models.status(io, arena, d),
+            .downloading = llm_models.isDownloading(),
+            .loaded = local_llm.loaded(),
+        };
+    }
+
+    /// Progress goes to the Settings window as `ghostpen://llm-download`.
+    pub fn llm_download_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        const d = try llmDirs(arena);
+        const Emit = struct {
+            fn progress(_: void, p: llm_models.Progress) void {
+                App.emitTo("settings", "ghostpen://llm-download", p) catch {};
+            }
+        };
+        var status: std.http.Status = .ok;
+        _ = llm_models.download(io, gpa, arena, d, args.id, {}, Emit.progress, &status) catch |err| {
+            // Another download is running: its progress bar stays as it is.
+            if (err == error.Busy) return oriel.ipc.fail("Another model is downloading.", .{});
+            const message: []const u8 = switch (err) {
+                error.Cancelled => "",
+                error.UnknownModel => "Unknown model.",
+                error.ChecksumMismatch => "The download was damaged (checksum mismatch) and was deleted: try again.",
+                error.RangeIgnored => "The server can't resume this download: try again to start over.",
+                error.Incomplete => "The download stopped early: try again to resume it.",
+                error.Stalled => "The download stalled (no data for a minute): check the connection, then resume it.",
+                error.HttpError => try std.fmt.allocPrint(arena, "Download failed: HTTP {d} {s}.", .{ @intFromEnum(status), status.phrase() orelse "" }),
+                else => try std.fmt.allocPrint(arena, "Download failed ({s}).", .{@errorName(err)}),
+            };
+            Emit.progress({}, .{ .id = args.id, .state = if (err == error.Cancelled) "cancelled" else "error", .message = message });
+            if (err == error.Cancelled) return;
+            return oriel.ipc.fail("{s}", .{message});
+        };
+        Emit.progress({}, .{ .id = args.id, .state = "done" });
+    }
+
+    pub fn llm_cancel_download(_: std.mem.Allocator) void {
+        llm_models.cancelDownload();
+    }
+
+    pub fn llm_delete_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        local_llm.unload(io); // it may be the loaded one
+        const d = try llmDirs(arena);
+        llm_models.remove(io, arena, d, args.id) catch |err| return if (err == error.Busy)
+            oriel.ipc.fail("Wait for the download to finish (or pause it) first.", .{})
+        else
+            oriel.ipc.fail("Could not delete the model ({s}).", .{@errorName(err)});
+    }
+
+    /// Stop the running AI request, when it runs on the built-in model (it
+    /// returns what it has; an endpoint request runs to its timeout).
+    pub fn cancel_ai(_: std.mem.Allocator) void {
+        local_llm.cancel(io);
+    }
+
+    /// Free the built-in model's memory now.
+    pub fn llm_unload(_: std.mem.Allocator) void {
+        local_llm.unload(io);
     }
 
     pub fn open_playground(_: std.mem.Allocator) void {
@@ -623,6 +732,12 @@ fn probeInput() void {
 pub fn main(init: std.process.Init) !u8 {
     io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    // The built-in model runner (started by local_llm.zig): no GUI.
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--llm-helper"))
+        return @import("llm_helper.zig").main(io, gpa, args[2..]);
+    environ_map = init.environ_map;
+    self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
+    ai.local_resolver = &resolveLocal;
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             std.debug.print(

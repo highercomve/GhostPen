@@ -17,6 +17,7 @@ import {
   processAiAction,
   processAiCustom,
   hideWindow,
+  cancelAi,
   openSettings,
   openPlayground,
   TRANSLATE_LANGUAGES,
@@ -240,6 +241,11 @@ export default function Menu() {
       }
       if (view.kind === "translate" || view.kind === "result" || view.kind === "error") {
         setView({ kind: "menu" });
+      } else if (view.kind === "loading") {
+        // Stop the built-in model's answer instead of pasting it later.
+        cancelAi().catch(() => {});
+        setView({ kind: "menu" });
+        hideWindow();
       } else {
         hideWindow();
       }

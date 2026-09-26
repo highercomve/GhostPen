@@ -19,9 +19,11 @@ pub fn build(b: *std.Build) void {
         .input = true,
         .clipboard = true,
         .whisper = true,
+        // The local model runner ("This computer" profiles; src/llm_helper.zig).
+        .llama = true,
         .audio_capture = true,
-        // Whisper on an NVIDIA GPU: `oriel build -Dcuda` (Linux, CUDA toolkit).
-        .ggml_cuda = b.option(bool, "cuda", "Run whisper on an NVIDIA GPU (libggml-cuda.so; needs the CUDA toolkit)") orelse false,
+        // Whisper and the local model on an NVIDIA GPU: `oriel build -Dcuda` (Linux, CUDA toolkit).
+        .ggml_cuda = b.option(bool, "cuda", "Run whisper and the local model on an NVIDIA GPU (libggml-cuda.so; needs the CUDA toolkit)") orelse false,
         // Wayland: the menu, captions and dictation overlays as layer surfaces
         // (always on top, anchored) where the compositor supports them.
         .layer_shell = target.result.os.tag == .linux and

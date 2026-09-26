@@ -7,10 +7,27 @@ const std = @import("std");
 pub const Profile = struct {
     id: []const u8,
     name: []const u8,
-    baseUrl: []const u8,
+    /// "openai" (an OpenAI-compatible endpoint) or "local" (built-in: GhostPen runs
+    /// the model itself with its embedded llama.cpp; `model` is a catalog id or `file:<path>`).
+    provider: []const u8 = "openai",
+    baseUrl: []const u8 = "",
     apiKey: []const u8 = "",
     model: []const u8,
     temperature: f64 = 0.2,
+
+    pub fn isLocal(self: Profile) bool {
+        return std.mem.eql(u8, self.provider, "local");
+    }
+};
+
+/// The built-in runner ("Built-in" profiles: GhostPen runs the model itself).
+pub const LocalLlm = struct {
+    /// Context window in tokens (prompt + answer).
+    ctxTokens: u32 = 8192,
+    /// Offload to the GPU when there is one.
+    gpu: bool = true,
+    /// Unload the model after this many minutes without use (0 = never).
+    idleMinutes: u32 = 10,
 };
 
 pub const CustomAction = struct {
@@ -56,6 +73,7 @@ pub const Settings = struct {
     ocr: Ocr = .{},
     captions: Captions = .{},
     dictation: Dictation = .{},
+    localLlm: LocalLlm = .{},
 
     /// The active profile, or the first one, or the built-in default.
     pub fn activeProfile(self: Settings) Profile {
@@ -110,4 +128,14 @@ test "parse: defaults, envelope, unknown fields" {
 
     const copy = try clone(a, s);
     try std.testing.expectEqualStrings(s.profiles[0].apiKey, copy.profiles[0].apiKey);
+    try std.testing.expect(!s.activeProfile().isLocal());
+    try std.testing.expectEqual(@as(u32, 8192), s.localLlm.ctxTokens);
+
+    const local = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"activeProfileId":"here","profiles":[{"id":"here","name":"Built-in (GhostPen)","provider":"local","model":"gemma-4-e4b-it"}],
+        \\ "localLlm":{"ctxTokens":4096}}
+    , .{});
+    const l = try parse(a, local);
+    try std.testing.expect(l.activeProfile().isLocal());
+    try std.testing.expectEqual(@as(u32, 4096), l.localLlm.ctxTokens);
 }

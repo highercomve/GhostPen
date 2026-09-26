@@ -8,8 +8,13 @@
 
 const std = @import("std");
 const settings = @import("settings.zig");
+const local_llm = @import("local_llm.zig");
 
 pub const Profile = settings.Profile;
+
+/// Resolves a "Built-in" profile to the runner's configuration (model
+/// file, context, GPU); set by the app and the CLI. Null: no built-in models.
+pub var local_resolver: ?*const fn (arena: std.mem.Allocator, profile: Profile, diag: *Diag) Error!local_llm.Config = null;
 
 /// Total time for one request (the Tauri app's reqwest timeout).
 pub const request_timeout_ms: u32 = 60_000;
@@ -231,6 +236,37 @@ fn postCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, 
     return stripReasoning(arena, content);
 }
 
+/// One completion on GhostPen's built-in model; `on_chunk` gets the visible deltas.
+fn localCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, thinking: bool, ctx: anytype, comptime on_chunk: fn (@TypeOf(ctx), []const u8) void, diag: *Diag) Error![]const u8 {
+    const text = switch (req.user) {
+        .text => |t| t,
+        .image_with_text => return fail(diag, "The built-in model reads text only: extracting text from images needs a vision model endpoint (choose an endpoint profile)."),
+    };
+    const resolver = local_resolver orelse return fail(diag, "Built-in models aren't available in this build.");
+    const cfg = try resolver(arena, req.profile, diag);
+    var message: []const u8 = "";
+    const res = local_llm.chat(io, gpa, arena, cfg, .{
+        .system = req.system,
+        .user = text,
+        .temperature = req.profile.temperature,
+        .think = thinking,
+        .max_tokens = max_tokens,
+    }, ctx, on_chunk, &message) catch |err| switch (err) {
+        error.LocalFailed => return fail(diag, message),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    if (res.cancelled) return fail(diag, "Cancelled.");
+    return stripReasoning(arena, res.text);
+}
+
+fn ignoreChunk(_: void, _: []const u8) void {}
+
+/// A non-streamed completion from the profile's endpoint or the built-in model.
+fn completion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, thinking: bool, diag: *Diag) Error![]const u8 {
+    if (req.profile.isLocal()) return localCompletion(io, gpa, arena, req, thinking, {}, ignoreChunk, diag);
+    return postCompletion(io, gpa, arena, req, thinking, diag);
+}
+
 /// Thinking off first (fast); retried with thinking on only when the answer
 /// came back empty or is visibly the model's reasoning.
 pub fn complete(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, diag: *Diag) Error![]const u8 {
@@ -238,10 +274,10 @@ pub fn complete(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, re
         .text => |t| t,
         .image_with_text => null,
     };
-    const first = try postCompletion(io, gpa, arena, req, false, diag);
+    const first = try completion(io, gpa, arena, req, false, diag);
     if (first.len > 0 and !looksLikeReasoning(first, input)) return first;
     std.log.warn("model leaked reasoning instead of the answer; retrying with thinking enabled", .{});
-    const retry = try postCompletion(io, gpa, arena, req, true, diag);
+    const retry = try completion(io, gpa, arena, req, true, diag);
     if (retry.len > 0) return retry;
     if (first.len == 0) return fail(diag, "Model returned empty output");
     return first;
@@ -259,6 +295,19 @@ pub fn completeStream(
     comptime on_chunk: fn (@TypeOf(ctx), []const u8) void,
     diag: *Diag,
 ) Error![]const u8 {
+    if (req.profile.isLocal()) {
+        const input = switch (req.user) {
+            .text => |t| t,
+            .image_with_text => |iw| iw.text,
+        };
+        const out = try localCompletion(io, gpa, arena, req, false, ctx, on_chunk, diag);
+        if (out.len > 0 and !looksLikeReasoning(out, input)) return out;
+        std.log.warn("model leaked reasoning into the stream; retrying with thinking enabled", .{});
+        const retry = try completion(io, gpa, arena, req, true, diag);
+        if (retry.len > 0) return retry;
+        if (out.len == 0) return fail(diag, "Model returned empty output");
+        return out;
+    }
     const body = try buildBody(arena, req, false, true);
     var sink: SseSink(@TypeOf(ctx), on_chunk) = .{ .arena = arena, .ctx = ctx };
     sink.init();
@@ -274,7 +323,7 @@ pub fn completeStream(
     const out = try stripReasoning(arena, sink.full.items);
     if (out.len > 0 and !looksLikeReasoning(out, input)) return out;
     std.log.warn("model leaked reasoning into the stream; retrying with thinking enabled", .{});
-    const retry = try postCompletion(io, gpa, arena, req, true, diag);
+    const retry = try completion(io, gpa, arena, req, true, diag);
     if (retry.len > 0) return retry;
     if (out.len == 0) return fail(diag, "Model returned empty output");
     return out;

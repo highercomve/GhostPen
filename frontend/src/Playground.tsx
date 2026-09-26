@@ -30,11 +30,18 @@ export default function Playground() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
 
+  // On load and whenever the window comes back (the profile or its custom
+  // actions may have changed in Settings meanwhile).
   useEffect(() => {
-    getStatus().then(setStatus).catch(() => {});
-    getSettings()
-      .then((s) => setCustomActions(s.customActions ?? []))
-      .catch(() => {});
+    const load = () => {
+      getStatus().then(setStatus).catch(() => {});
+      getSettings()
+        .then((s) => setCustomActions(s.customActions ?? []))
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
   }, []);
 
   const run = async (action: string, targetLang: string | null, label: string) => {

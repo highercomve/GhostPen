@@ -11,6 +11,8 @@ const invoke = <T>(cmd: string, args?: unknown): Promise<T> => window.oriel.invo
 export interface Profile {
   id: string;
   name: string;
+  /** "openai" (an OpenAI-compatible endpoint) or "local" (built-in: GhostPen runs the model itself). */
+  provider?: "openai" | "local";
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -53,7 +55,17 @@ export interface Settings {
   ocr: OcrSettings;
   captions: CaptionsSettings;
   dictation: DictationSettings;
+  localLlm: LocalLlmSettings;
 }
+
+/** The built-in runner ("Built-in" profiles). */
+export interface LocalLlmSettings {
+  ctxTokens: number;
+  gpu: boolean;
+  idleMinutes: number;
+}
+
+export const isLocal = (p: Profile | undefined) => p?.provider === "local";
 
 export type SelectionInfo =
   | { kind: "empty" }
@@ -230,3 +242,57 @@ export const TRANSLATE_LANGUAGES = [
   "English", "Spanish", "French", "German", "Italian", "Portuguese",
   "Dutch", "Chinese", "Japanese", "Korean", "Russian", "Arabic",
 ];
+
+// ---- built-in models (GhostPen runs them) -----------------------------------------------------
+
+export interface LlmModel {
+  id: string;
+  name: string;
+  file: string;
+  size: number;
+  speed: number;
+  quality: number;
+  note: string;
+  /** Where it is ("" = not downloaded). */
+  path: string;
+  /** Found in another app's folder (LM Studio, GhostReel): reused, not removable here. */
+  external: boolean;
+  /** Bytes of an interrupted download. */
+  partial: number;
+}
+
+/** A GGUF found on disk that isn't in the catalog (id = "file:<path>"). */
+export interface LlmLocalFile {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+}
+
+export interface LlmStatus {
+  status: { dir: string; models: LlmModel[]; others: LlmLocalFile[] };
+  downloading: boolean;
+  loaded: boolean;
+}
+
+/** Payload of `ghostpen://llm-download`. */
+export interface LlmProgress {
+  id: string;
+  state: "downloading" | "verifying" | "done" | "cancelled" | "error";
+  done: number;
+  total: number;
+  message: string;
+}
+
+/** Stop the running request (built-in model only). */
+export const cancelAi = () => invoke<void>("cancel_ai");
+export const llmModelsStatus = () => invoke<LlmStatus>("llm_models_status");
+/** Resolves when the download finishes; progress arrives as `ghostpen://llm-download`. */
+export const llmDownloadModel = (id: string) => invoke<void>("llm_download_model", { id });
+export const llmCancelDownload = () => invoke<void>("llm_cancel_download");
+export const llmDeleteModel = (id: string) => invoke<void>("llm_delete_model", { id });
+/** Free the loaded model's memory now. */
+export const llmUnload = () => invoke<void>("llm_unload");
+
+export const formatBytes = (n: number) =>
+  n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`;
