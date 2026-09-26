@@ -496,6 +496,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   bottom: 0;
   padding-top: 8px;
 }
+.footer .save-error { color: var(--danger); margin-right: auto; }
 
 .head-btns { display: flex; gap: 2px; }
 
