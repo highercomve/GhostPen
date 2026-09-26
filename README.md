@@ -15,6 +15,18 @@ Studio, OpenAI, OpenRouter, Groq, …; the default is a local Ollama with
 `gemma4:e4b`), or GhostPen runs a downloaded model itself: see
 [Built-in models](#built-in-models).
 
+**Downloads** ([website](https://highercomve.github.io/GhostPen/#download),
+[releases](https://github.com/highercomve/GhostPen/releases)). The
+AppImage, the Windows installer and the macOS app update themselves
+(Settings → About & updates); deb and rpm installs say when a new version is out.
+
+| | Package | Whisper and Built-in models run on |
+| --- | --- | --- |
+| Linux | AppImage, .deb, .rpm | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
+| Linux, `-cuda` | AppImage, .deb, .rpm | NVIDIA GPUs through **CUDA** (RTX 20xx–50xx; needs the CUDA 13 runtime), else Vulkan |
+| Windows 10/11 | setup.exe (per user) | the CPU |
+| macOS 13+ | .dmg (Apple Silicon) | the GPU through **Metal** |
+
 The React frontend is GhostPen's own; the commands, events and settings keep
 the Tauri version's names and JSON shapes. On first run the Tauri app's
 settings are imported, and its downloaded whisper models are reused.

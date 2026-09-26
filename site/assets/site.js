@@ -24,7 +24,7 @@
     var arch = /(aarch64|arm64)/i.test(name) ? "ARM64" : /(x86_64|amd64|x64)/i.test(name) ? "x86-64" : "";
     // The CUDA builds ("-cuda" in the name) come after the Vulkan ones.
     var cuda = /-cuda\b/i.test(name);
-    var gpu = cuda ? " · NVIDIA CUDA" : "";
+    var gpu = cuda ? " · NVIDIA CUDA" : " · Vulkan";
     var extra = cuda ? 3 : 0;
     if (/\.AppImage$/i.test(name)) return { os: "linux", kind: "AppImage" + gpu, order: 0 + extra, arch: arch };
     if (/\.deb$/i.test(name)) return { os: "linux", kind: "Debian / Ubuntu (.deb)" + gpu, order: 1 + extra, arch: arch };

@@ -98,7 +98,7 @@
 						<li>A curated catalog: Qwen3.5 and Gemma, from 1.3 GB to 6 GB.</li>
 						<li>Downloads pause, resume, and are checked against Hugging Face's checksums.</li>
 						<li>Models you already have in LM Studio are found and reused.</li>
-						<li>As much of the model on the GPU as its free memory holds; the rest on the CPU.</li>
+						<li>On the GPU: Vulkan or CUDA on Linux, Metal on macOS. As much of the model as the free GPU memory holds; the rest on the CPU.</li>
 					</ul>
 				</div>
 				<img src="$site.asset('screenshots/settings-builtin-models.png').link()" alt="Settings: Built-in models" loading="lazy">
@@ -127,17 +127,17 @@
 			<div class="downloads">
 				<div class="dl-card" data-os-card="linux">
 					<h3>Linux</h3>
-					<p>AppImage runs anywhere; the .deb and .rpm install the GTK 4 and WebKitGTK 6.0 it needs.</p>
+					<p>Two builds. <b>Vulkan</b>: captions, dictation and the built-in models on any GPU (NVIDIA, AMD, Intel), or the CPU without one. <b>NVIDIA CUDA</b>: 10–20% faster on RTX 20xx–50xx cards with the CUDA 13 runtime installed, and Vulkan otherwise. The AppImage runs anywhere and updates itself; the .deb and .rpm install the GTK 4 and WebKitGTK 6.0 it needs.</p>
 					<div class="dl-links" data-os-links="linux"><span class="dl-empty">Loading…</span></div>
 				</div>
 				<div class="dl-card" data-os-card="windows">
 					<h3>Windows</h3>
-					<p>A per-user installer for Windows 10 and 11. WebView2 comes with Windows.</p>
+					<p>A per-user installer for Windows 10 and 11 that updates itself. WebView2 comes with Windows. Captions and the built-in models run on the CPU for now.</p>
 					<div class="dl-links" data-os-links="windows"><span class="dl-empty">Loading…</span></div>
 				</div>
 				<div class="dl-card" data-os-card="macos">
 					<h3>macOS</h3>
-					<p>A disk image for Apple Silicon. Captions and the built-in models use Metal.</p>
+					<p>A disk image for Apple Silicon that updates itself. Captions and the built-in models run on the GPU with Metal.</p>
 					<div class="dl-links" data-os-links="macos"><span class="dl-empty">Loading…</span></div>
 				</div>
 			</div>
