@@ -1,0 +1,156 @@
+<extend template="base.shtml">
+<head id="head">
+	<title>GhostPen · AI text editing anywhere on your desktop</title>
+</head>
+<body id="body">
+	<main class="home">
+		<section class="hero">
+			<div class="hero-glow" aria-hidden="true"></div>
+			<div class="hero-inner">
+				<img class="hero-mark" src="$site.asset('brand/icon-192.png').link()" alt="GhostPen" width="96" height="96">
+				<p class="eyebrow">Linux · Windows · macOS · free and open source</p>
+				<h1 class="hero-title">Better writing,<br><span class="accent">anywhere you type.</span></h1>
+				<p class="hero-lead">Select text in any app, press a hotkey, pick an action. GhostPen proofreads, rewrites or translates it and pastes the result back in place. It can run the AI model itself, on your own machine.</p>
+				<div class="download">
+					<div class="download-main">
+						<a class="btn btn-primary btn-lg" data-download-primary href="https://github.com/highercomve/GhostPen/releases/latest">
+							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 21h16"/></svg>
+							<span data-download-label>Download GhostPen</span>
+						</a>
+						<span class="download-note" data-download-note>Free for Linux, Windows and macOS · <a href="#download">All downloads</a></span>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<div class="hero-shot">
+			<img src="$site.asset('screenshots/playground.png').link()" alt="The GhostPen Playground with a proofread result" loading="eager">
+			<img src="$site.asset('screenshots/menu.png').link()" alt="The GhostPen menu over the selected text" loading="eager">
+		</div>
+
+		<section class="section">
+			<div class="section-head">
+				<h2>Three keys from better text</h2>
+				<p>No copying into a chat window and back. GhostPen works where you are writing.</p>
+			</div>
+			<div class="steps">
+				<article class="step">
+					<h3>Select the text</h3>
+					<p>In your mail, editor, browser, chat: any app where you can select text.</p>
+				</article>
+				<article class="step">
+					<h3>Press <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>A</kbd></h3>
+					<p>The menu opens next to your work with the selection loaded. Or click the tray icon.</p>
+				</article>
+				<article class="step">
+					<h3>Pick an action</h3>
+					<p>Proofread, make it professional, casual, concise, expand it or translate it. The result replaces your selection.</p>
+				</article>
+			</div>
+		</section>
+
+		<section class="section" id="features">
+			<div class="section-head">
+				<h2>Everything for the text you write</h2>
+				<p>One small app in your tray, ready in every program.</p>
+			</div>
+			<div class="feature-grid">
+				<article class="feature">
+					<div class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="m13 7 4 4"/></svg></div>
+					<h3>Rewrite in place</h3>
+					<p>Proofread, professional, casual, concise, expand and translate, at three intensities. Add your own actions, or type any instruction in the prompt bar.</p>
+				</article>
+				<article class="feature">
+					<div class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/><rect x="10" y="10" width="4" height="4"/></svg></div>
+					<h3>Built-in models</h3>
+					<p>GhostPen runs the model itself with its embedded llama.cpp, on the GPU (CUDA, Metal) or the CPU. No Ollama or server needed, nothing leaves your machine.</p>
+				</article>
+				<article class="feature">
+					<div class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0"/><path d="M8 12a4 4 0 0 1 8 0"/><circle cx="12" cy="12" r="1"/><path d="M12 13v8"/></svg></div>
+					<h3>Or any AI endpoint</h3>
+					<p>Ollama, LM Studio, OpenAI, OpenRouter, Groq or any OpenAI-compatible API. Keep several profiles and switch between them.</p>
+				</article>
+				<article class="feature">
+					<div class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 12h4M14 12h4M6 16h8"/></svg></div>
+					<h3>Live captions</h3>
+					<p>Subtitles for whatever your computer plays: meetings, videos, podcasts. Transcribed on your machine with whisper, optionally translated.</p>
+				</article>
+				<article class="feature">
+					<div class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></div>
+					<h3>Voice dictation</h3>
+					<p>Press <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>D</kbd> and speak. The transcript is polished by your AI profile and waits on the clipboard.</p>
+				</article>
+				<article class="feature">
+					<div class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-8 9"/></svg></div>
+					<h3>Text from images</h3>
+					<p>Copy a screenshot and GhostPen extracts its text with a vision model, ready to edit or translate.</p>
+				</article>
+			</div>
+		</section>
+
+		<section class="section">
+			<div class="split">
+				<div class="split-text">
+					<span class="tag">Built-in models</span>
+					<h3>Your own AI, run by GhostPen itself</h3>
+					<p>Download a model from the settings and GhostPen runs it with the llama.cpp compiled into it. No server to install, no account, nothing sent over the network.</p>
+					<ul>
+						<li>A curated catalog: Qwen3.5 and Gemma, from 1.3 GB to 6 GB.</li>
+						<li>Downloads pause, resume, and are checked against Hugging Face's checksums.</li>
+						<li>Models you already have in LM Studio are found and reused.</li>
+						<li>As much of the model on the GPU as its free memory holds; the rest on the CPU.</li>
+					</ul>
+				</div>
+				<img src="$site.asset('screenshots/settings-builtin-models.png').link()" alt="Settings: Built-in models" loading="lazy">
+			</div>
+		</section>
+
+		<section class="section">
+			<div class="section-head">
+				<h2>Small and native</h2>
+				<p>Built with <a href="https://highercomve.github.io/Oriel/">Oriel</a>, a desktop framework in Zig: a native window, the system webview, and the AI engines compiled in.</p>
+			</div>
+			<div class="stat-grid">
+				<div class="stat"><b>17 MB</b><span>the app, with whisper and llama.cpp inside</span></div>
+				<div class="stat"><b>2</b><span>dependencies (Oriel, zigimg), not hundreds of crates</span></div>
+				<div class="stat"><b>2 min</b><span>for a clean release build</span></div>
+				<div class="stat"><b>3</b><span>platforms: Linux, Windows, macOS</span></div>
+			</div>
+			<p class="download-note" style="margin-top:16px">Compared with the earlier Rust/Tauri GhostPen in <a href="https://github.com/highercomve/GhostPen#compared-with-the-rust-tauri-ghostpen">the README</a>.</p>
+		</section>
+
+		<section class="section" id="download">
+			<div class="section-head">
+				<h2>Download</h2>
+				<p data-release-info>The latest release, for every platform.</p>
+			</div>
+			<div class="downloads">
+				<div class="dl-card" data-os-card="linux">
+					<h3>Linux</h3>
+					<p>AppImage runs anywhere; the .deb and .rpm install the GTK 4 and WebKitGTK 6.0 it needs.</p>
+					<div class="dl-links" data-os-links="linux"><span class="dl-empty">Loading…</span></div>
+				</div>
+				<div class="dl-card" data-os-card="windows">
+					<h3>Windows</h3>
+					<p>A per-user installer for Windows 10 and 11. WebView2 comes with Windows.</p>
+					<div class="dl-links" data-os-links="windows"><span class="dl-empty">Loading…</span></div>
+				</div>
+				<div class="dl-card" data-os-card="macos">
+					<h3>macOS</h3>
+					<p>A disk image for Apple Silicon. Captions and the built-in models use Metal.</p>
+					<div class="dl-links" data-os-links="macos"><span class="dl-empty">Loading…</span></div>
+				</div>
+			</div>
+			<p class="download-note" style="margin-top:16px">All files and older versions: <a href="https://github.com/highercomve/GhostPen/releases">GitHub releases</a>. From source: <code>oriel build</code> (see the <a href="$site.page('guide').link()">guide</a>).</p>
+		</section>
+
+		<section class="cta">
+			<h2>Write better, everywhere</h2>
+			<p>Free and open source. Install it, press <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>A</kbd>, and fix your first sentence in a second.</p>
+			<div class="hero-actions">
+				<a class="btn btn-primary" href="#download">Download</a>
+				<a class="btn btn-ghost" href="$site.page('guide').link()">Read the guide</a>
+			</div>
+		</section>
+	</main>
+</body>

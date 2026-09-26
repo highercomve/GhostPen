@@ -1,0 +1,30 @@
+<extend template="base.shtml">
+<head id="head">
+	<title :text="$page.title.suffix(' · GhostPen')"></title>
+</head>
+<body id="body">
+	<div class="docs">
+		<aside class="sidebar">
+			<nav>
+				<h4>GhostPen</h4>
+				<a href="$site.page('').link()">Home</a>
+				<a href="$site.page('guide').link()">Guide</a>
+				<a href="$site.page('').link().suffix('#download')">Download</a>
+			</nav>
+		</aside>
+		<main class="doc">
+			<article class="prose">
+				<h1 :text="$page.title"></h1>
+				<p class="doc-lead" :if="$page.description.len().gt(0)" :text="$page.description"></p>
+				<div class="content" :html="$page.content()"></div>
+			</article>
+			<div class="doc-foot">
+				<a class="edit-link" href="https://github.com/highercomve/GhostPen/tree/main/site/content">Improve this page on GitHub</a>
+			</div>
+		</main>
+		<aside class="toc">
+			<h4>On this page</h4>
+			<div :html="$page.toc()"></div>
+		</aside>
+	</div>
+</body>

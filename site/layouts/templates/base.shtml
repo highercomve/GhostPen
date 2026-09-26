@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head id="head">
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="description" content="GhostPen: AI text editing anywhere on your desktop. Select text in any app, pick an action, get the result pasted back. Runs AI models itself, or any OpenAI-compatible endpoint.">
+		<meta property="og:title" content="GhostPen: AI text editing anywhere on your desktop">
+		<meta property="og:description" content="Proofread, rewrite and translate the text you select in any app. Live captions and dictation. Runs models on your own machine.">
+		<meta property="og:image" content="$site.asset('screenshots/menu.png').link()">
+		<meta name="theme-color" content="#111317">
+		<link rel="icon" type="image/png" href="$site.asset('brand/icon-64.png').link()">
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
+		<link type="text/css" rel="stylesheet" href="$site.asset('style.css').link().suffix('?v=20260926')">
+		<style>[hidden] { display: none !important; }</style>
+		<super>
+	</head>
+	<body id="body">
+		<header class="topbar">
+			<div class="topbar-inner">
+				<a class="brand" href="$site.page('').link()" aria-label="GhostPen home">
+					<img class="brand-mark" src="$site.asset('brand/icon-64.png').link()" alt="" width="28" height="28">
+					<span class="brand-name">GhostPen</span>
+				</a>
+				<button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false">
+					<span></span><span></span><span></span>
+				</button>
+				<nav class="topnav">
+					<a href="$site.page('').link().suffix('#features')">Features</a>
+					<a href="$site.page('').link().suffix('#download')">Download</a>
+					<a href="$site.page('guide').link()">Guide</a>
+					<a class="topnav-gh" href="https://github.com/highercomve/GhostPen">GitHub</a>
+					<span class="version-badge" data-latest-version hidden></span>
+				</nav>
+			</div>
+		</header>
+		<super>
+		<footer class="site-footer">
+			<div class="footer-inner">
+				<div class="footer-brand">
+					<img class="brand-mark" src="$site.asset('brand/icon-64.png').link()" alt="" width="22" height="22">
+					<span>GhostPen</span>
+					<p>AI text editing anywhere on your desktop.</p>
+				</div>
+				<div class="footer-cols">
+					<div>
+						<h4>GhostPen</h4>
+						<a href="$site.page('').link().suffix('#download')">Download</a>
+						<a href="$site.page('guide').link()">Guide</a>
+						<a href="https://github.com/highercomve/GhostPen/releases">Releases</a>
+						<a href="https://github.com/highercomve/GhostPen/issues">Issues</a>
+					</div>
+					<div>
+						<h4>Built with</h4>
+						<a href="https://highercomve.github.io/Oriel/">Oriel</a>
+						<a href="https://ziglang.org">Zig</a>
+						<a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>
+						<a href="https://github.com/ggml-org/whisper.cpp">whisper.cpp</a>
+					</div>
+				</div>
+			</div>
+			<p class="footer-legal">Built with <a href="https://highercomve.github.io/Oriel/">Oriel</a> and <a href="https://zine-ssg.io">Zine</a> · The earlier Rust/Tauri version lives on as <a href="https://github.com/highercomve/ghostpen-tauri">ghostpen-tauri</a></p>
+		</footer>
+		<script src="$site.asset('site.js').link().suffix('?v=20260926')" defer></script>
+	</body>
+</html>
