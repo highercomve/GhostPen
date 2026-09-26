@@ -21,6 +21,11 @@ const local_llm = @import("local_llm.zig");
 const llm_models = @import("llm_models.zig");
 
 const App = oriel.App;
+
+/// Logs go to stderr and to a file: `~/.local/share/<id>/app.log` (Linux),
+/// `%LOCALAPPDATA%\<id>\app.log` (Windows), `~/Library/Logs/<id>/app.log`
+/// (macOS), where an app started from the desktop leaves them.
+pub const std_options: std.Options = .{ .logFn = oriel.log.logFn };
 pub const Settings = settings_mod.Settings;
 const log = std.log.scoped(.ghostpen);
 const gpa = std.heap.smp_allocator;
@@ -778,7 +783,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         }
         if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
-            std.debug.print("ghostpen-oriel 0.1.0\n", .{});
+            std.debug.print("ghostpen-oriel 0.2.0\n", .{});
             return 0;
         }
     }

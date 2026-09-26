@@ -17,6 +17,7 @@ import {
   processAiAction,
   processAiCustom,
   dismissMenu,
+  PASTE_KEYS,
   cancelAi,
   openSettings,
   openPlayground,
@@ -509,7 +510,7 @@ export default function Menu() {
             {view.result.pasted ? "✓ Pasted" : "✓ Result copied"}
           </div>
           {!view.result.pasted && (
-            <div className="hint">On the clipboard — press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.</div>
+            <div className="hint">On the clipboard — press <kbd>{PASTE_KEYS}</kbd> to paste.</div>
           )}
           <pre className="output">{view.result.output}</pre>
           <div className="row">
