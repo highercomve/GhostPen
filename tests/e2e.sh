@@ -12,6 +12,8 @@ if [ -z "${ORIEL_HEADLESS_INNER:-}" ]; then exec "$oriel_repo/scripts/headless.s
 
 tmp=$(mktemp -d); trap 'kill $pid $mock 2>/dev/null; rm -rf "$tmp"' EXIT
 out="${OUT:-$tmp}"
+# Xvfb has no Vulkan presentation: GTK draws in software.
+export GSK_RENDERER=cairo
 export XDG_DATA_HOME=$tmp/data XDG_CONFIG_HOME=$tmp/config XDG_CACHE_HOME=$tmp/cache
 mkdir -p "$XDG_CONFIG_HOME/dev.ghostpen.Oriel"
 printf '{"settings":{"activeProfileId":"m","profiles":[{"id":"m","name":"Mock","baseUrl":"http://127.0.0.1:18765/v1","model":"mock","temperature":0.2}]}}' \

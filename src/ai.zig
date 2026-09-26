@@ -341,12 +341,16 @@ fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, []const u8) void) typ
         raw: std.ArrayList(u8) = .empty,
         done: bool = false,
         oom: bool = false,
-        /// Unbuffered: every write reaches `drain` at once, so a delta is
-        /// emitted as its line arrives rather than when 4 KiB have piled up.
+        /// One byte: a reader streaming into the writer needs some buffer
+        /// (an empty one fails an assertion), and a larger one would hold
+        /// the deltas back until it fills. With one byte, each byte reaches
+        /// `drain` as soon as the next one arrives; the last byte of an SSE
+        /// event is its blank separator line, so no delta waits.
+        buf: [1]u8 = undefined,
         writer: std.Io.Writer = undefined,
 
         fn init(self: *Self) void {
-            self.writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain, .flush = flush } };
+            self.writer = .{ .buffer = &self.buf, .vtable = &.{ .drain = drain, .flush = flush } };
         }
 
         fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -571,4 +575,25 @@ test "SSE sink" {
     try sink.finish();
     try std.testing.expectEqualStrings("Hello", sink.full.items);
     try std.testing.expectEqual(@as(usize, 2), c.n);
+}
+
+test "SSE sink: streamed from a reader, deltas as they arrive" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const Collect = struct {
+        n: usize = 0,
+        fn chunk(self: *@This(), _: []const u8) void {
+            self.n += 1;
+        }
+    };
+    var c: Collect = .{};
+    var sink: SseSink(*Collect, Collect.chunk) = .{ .arena = arena.allocator(), .ctx = &c };
+    sink.init();
+    // As the HTTP client does it (this asserted with an empty buffer).
+    var r: std.Io.Reader = .fixed("data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n");
+    _ = try r.streamRemaining(&sink.writer);
+    // The delta is out before any flush (its line ended; only the blank line waits).
+    try std.testing.expectEqual(@as(usize, 1), c.n);
+    try sink.finish();
+    try std.testing.expectEqualStrings("A", sink.full.items);
 }
