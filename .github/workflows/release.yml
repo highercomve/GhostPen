@@ -21,6 +21,8 @@ env:
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
   ORIEL_VERSION: v0.6.6
   NFPM_VERSION: 2.43.0
+  # Windows GPU builds: glslc and the Vulkan headers (LunarG SDK).
+  VULKAN_SDK_VERSION: 1.4.357.0
   ARCH_PACKAGES: >-
     git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols
     libxkbcommon libxtst libx11 libpulse alsa-lib nodejs npm curl
@@ -136,13 +138,35 @@ jobs:
           $env:Path = "$bin;$env:Path"
           oriel setup nsis --yes
           oriel setup webview2 --yes
+      # Whisper and the local model on the GPU through Vulkan (any vendor),
+      # compiled into ghostpen.exe; without a Vulkan driver it runs on the CPU.
+      # Only glslc and the headers are used, at build time.
+      - name: Vulkan SDK (cache)
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}
+      - name: Vulkan SDK
+        shell: pwsh
+        run: |
+          $root = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          if ("${{ steps.vulkan-cache.outputs.cache-hit }}" -ne "true") {
+            $exe = Join-Path $env:RUNNER_TEMP "vulkansdk.exe"
+            Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe" -OutFile $exe
+            $p = Start-Process $exe -ArgumentList "--root", $root, "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "Vulkan SDK install failed ($($p.ExitCode))" }
+          }
+          & "$root\Bin\glslc.exe" --version
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$root"
       - name: Package (setup.exe)
-        run: oriel package
-      # What the in-app updater installs on Windows: the exe itself.
+        run: oriel package -Dvulkan
+      # What the in-app updater installs on Windows: the exe itself (built
+      # the same way, or updates would replace the GPU build with a CPU one).
       - name: Updater payload
         shell: pwsh
         run: |
-          oriel build
+          oriel build -Dvulkan
           Copy-Item zig-out/bin/ghostpen.exe zig-out/package/ghostpen-x86_64-windows.exe
       - uses: actions/upload-artifact@v4
         with:

@@ -39,8 +39,9 @@ pub fn build(b: *std.Build) void {
         .cuda_static = b.option(bool, "cuda_static", "With -Dcuda: link cuBLAS statically (needs only the NVIDIA driver)") orelse false,
         // CI: a libggml-cuda.so cached from an earlier build with the same Oriel and options (skips nvcc).
         .ggml_cuda_prebuilt = b.option([]const u8, "cuda_prebuilt", "Absolute path of a libggml-cuda.so built earlier by the same Oriel version and options; implies -Dcuda"),
-        // ... or on any GPU through Vulkan: `oriel build -Dvulkan` (Linux; Vulkan headers, glslc).
-        .ggml_vulkan = b.option(bool, "vulkan", "Run whisper and the local model on any GPU through Vulkan (libggml-vulkan.so; needs Vulkan headers and glslc)") orelse false,
+        // ... or on any GPU through Vulkan: `oriel build -Dvulkan` (Linux: Vulkan headers, glslc;
+        // Windows: the Vulkan SDK, compiled into ghostpen.exe).
+        .ggml_vulkan = b.option(bool, "vulkan", "Run whisper and the local model on any GPU through Vulkan (Linux: libggml-vulkan.so, needs Vulkan headers and glslc; Windows: in the exe, needs the Vulkan SDK)") orelse false,
         // Wayland: the menu, captions and dictation overlays as layer surfaces
         // (always on top, anchored) where the compositor supports them.
         .layer_shell = target.result.os.tag == .linux and
