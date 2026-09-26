@@ -57,7 +57,10 @@ export default function LocalModels(props: {
         setProgress(p);
       }
     });
+    // Loaded / downloaded state changes while the window is hidden.
+    window.addEventListener("focus", refresh);
     return () => {
+      window.removeEventListener("focus", refresh);
       un.then((f) => f());
     };
   }, []);

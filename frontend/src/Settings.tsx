@@ -57,11 +57,18 @@ export default function Settings() {
 
   useEffect(() => {
     getSettings().then(setSettings);
-    getStatus().then(setStatus).catch(() => {});
-    captionsStatus().then(setCapStatus).catch(() => {});
-    captionsListDevices().then(setCapDevices).catch(() => {});
-    dictationListDevices().then(setDictDevices).catch(() => {});
-    llmModelsStatus().then(setLlm).catch(() => {});
+    // The window is only hidden on close: re-read the live state (not the
+    // settings being edited) each time it is shown again.
+    const refresh = () => {
+      getStatus().then(setStatus).catch(() => {});
+      captionsStatus().then(setCapStatus).catch(() => {});
+      captionsListDevices().then(setCapDevices).catch(() => {});
+      dictationListDevices().then(setDictDevices).catch(() => {});
+      llmModelsStatus().then(setLlm).catch(() => {});
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, []);
 
   if (!settings) return <div className="settings loading-page">Loading…</div>;
