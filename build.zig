@@ -46,6 +46,15 @@ pub fn build(b: *std.Build) void {
     // PNG decode/resize/encode for clipboard images (OCR, previews).
     const zigimg = b.dependency("zigimg", .{ .target = target, .optimize = optimize }).module("zigimg");
 
+    // ghostpen-cli: an action from the terminal (no GUI, no GTK).
+    const cli = b.addExecutable(.{
+        .name = "ghostpen-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = target,
+            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        }),
+    });
     _ = oriel.addApp(b, dep, .{
         .name = "ghostpen-oriel",
         .root_source_file = b.path("src/main.zig"),
@@ -57,7 +66,9 @@ pub fn build(b: *std.Build) void {
             .name = "GhostPen",
             // .publisher = "Your Name <you@example.com>", // default: from the app id
             .summary = "AI text editing anywhere on your desktop",
-            .version = "0.1.0",
+            .version = "0.2.0",
+            // The CLI ships in every package, next to the app (and in /usr/bin on Linux).
+            .contents = .{ .executables = &.{cli} },
         },
         .permissions = .{
             .microphone = "GhostPen transcribes your voice for dictation.",
@@ -66,15 +77,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // ghostpen-cli: an action from the terminal (no GUI, no GTK).
-    const cli = b.addExecutable(.{
-        .name = "ghostpen-cli",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli.zig"),
-            .target = target,
-            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
-        }),
-    });
     b.installArtifact(cli);
     const run_cli = b.addRunArtifact(cli);
     if (b.args) |a| run_cli.addArgs(a);

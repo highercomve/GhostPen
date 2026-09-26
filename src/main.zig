@@ -778,7 +778,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         }
         if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
-            std.debug.print("ghostpen-oriel 0.1.0\n", .{});
+            std.debug.print("ghostpen-oriel 0.2.0\n", .{});
             return 0;
         }
     }

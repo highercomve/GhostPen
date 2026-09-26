@@ -1,0 +1,125 @@
+# On a v* tag: test GhostPen, package it on each OS with the Oriel CLI (the
+# way any Oriel app ships), and attach the packages and SHA256SUMS to the
+# GitHub release. The site's download buttons read that release.
+#
+# Linux runs in an Arch Linux container: GTK 4 / WebKitGTK 6.0 are newer
+# than Ubuntu LTS ships. The Linux packages run whisper and the built-in
+# models on the CPU (CUDA builds need the toolkit: `oriel build -Dcuda`).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.16.0
+  # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
+  ORIEL_VERSION: v0.6.0
+  NFPM_VERSION: 2.43.0
+  ARCH_PACKAGES: >-
+    git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols
+    libxkbcommon libxtst libx11 libpulse alsa-lib nodejs npm curl
+    xorg-server-xvfb xorg-xauth xdotool xsel dbus ttf-dejavu python imagemagick
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: System packages
+        run: pacman -Syu --noconfirm --needed $ARCH_PACKAGES
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Oriel CLI and nfpm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/highercomve/Oriel/main/install.sh | ORIEL_VERSION=$ORIEL_VERSION ORIEL_INSTALL_DIR=/usr/local/bin sh
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" | tar xz -C /usr/local/bin nfpm
+          oriel --version && nfpm --version
+      - name: Unit tests
+        run: zig build test --summary all
+      - name: Package (deb, rpm, AppImage)
+        run: oriel package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: zig-out/package/*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Oriel CLI, NSIS, WebView2 loader
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:RUNNER_TEMP "oriel"
+          $env:ORIEL_INSTALL_DIR = $bin
+          irm https://raw.githubusercontent.com/highercomve/Oriel/main/install.ps1 | iex
+          Add-Content $env:GITHUB_PATH $bin
+          $env:Path = "$bin;$env:Path"
+          oriel setup nsis --yes
+          oriel setup webview2 --yes
+      - name: Package (setup.exe)
+        run: oriel package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: zig-out/package/*
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Oriel CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/highercomve/Oriel/main/install.sh | ORIEL_VERSION=$ORIEL_VERSION ORIEL_INSTALL_DIR=/usr/local/bin sh
+          oriel --version
+      - name: Unit tests
+        run: zig build test --summary all
+      # Ad-hoc signed. For Developer ID signing and notarization, set the
+      # secrets and pass -Dmacos-sign-identity / -Dmacos-notarize-profile.
+      - name: Package (.app, .dmg)
+        run: oriel package
+      - name: Zip the .app
+        run: cd zig-out/package && ditto -c -k --keepParent GhostPen.app GhostPen-macos.app.zip && rm -rf GhostPen.app GhostPen.entitlements
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: zig-out/package/*
+
+  release:
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
