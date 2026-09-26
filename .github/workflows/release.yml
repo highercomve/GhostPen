@@ -23,7 +23,7 @@ env:
   ARCH_PACKAGES: >-
     git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols
     libxkbcommon libxtst libx11 libpulse alsa-lib nodejs npm curl
-    xorg-server-xvfb xorg-xauth xdotool xsel dbus ttf-dejavu python imagemagick
+    xorg-server-xvfb xorg-xauth xdotool xsel dbus ttf-dejavu python imagemagick squashfs-tools
 
 jobs:
   linux:
