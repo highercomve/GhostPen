@@ -132,7 +132,7 @@
 				</div>
 				<div class="dl-card" data-os-card="windows">
 					<h3>Windows</h3>
-					<p>A per-user installer for Windows 10 and 11 that updates itself. WebView2 comes with Windows. Captions, dictation and the built-in models run on any GPU through Vulkan, or the CPU without one. Also: <code>winget install Highercomve.GhostPen</code>.</p>
+					<p>A per-user installer for Windows 10 and 11 that updates itself. WebView2 comes with Windows. Captions, dictation and the built-in models run on any GPU through Vulkan, or the CPU without one.</p>
 					<div class="dl-links" data-os-links="windows"><span class="dl-empty">Loading…</span></div>
 				</div>
 				<div class="dl-card" data-os-card="macos">

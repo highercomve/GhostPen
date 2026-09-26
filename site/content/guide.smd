@@ -20,7 +20,7 @@ or the [GitHub releases](https://github.com/highercomve/GhostPen/releases).
   **NVIDIA CUDA** downloads are 10–20% faster; without the runtime they
   use Vulkan too, and they update to CUDA builds.
 - **Windows**: run the installer; it installs for your user, no
-  administrator needed (or `winget install Highercomve.GhostPen`). Captions,
+  administrator needed. Captions,
   dictation and Built-in models run on any GPU through Vulkan (the CPU
   without a Vulkan driver). Windows may warn about an unknown publisher until
   the installer is code-signed: choose *More info → Run anyway*.
