@@ -6,8 +6,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .oriel = .{
-            .url = "git+https://github.com/highercomve/Oriel?ref=v0.6.4#4bf4b5cd6502e661d5b6c22f922bebb8df29c1c6",
-            .hash = "oriel-0.6.4-K1NO5dWAIwD67ttIFPKLObcItfL7BgePyCRywzCHRCXb",
+            .url = "git+https://github.com/highercomve/Oriel?ref=v0.6.5#121aa6304e5462dc95423834307719b16f147c58",
+            .hash = "oriel-0.6.5-K1NO5XCKIwBbRUvuOJqTC8sEh3QW5dpZHeTSx-QlMBth",
         },
         .zigimg = .{
             .url = "git+https://github.com/zigimg/zigimg#b99b9d48899e90ef330f143b096e31cc245ea70a",

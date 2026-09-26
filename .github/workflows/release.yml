@@ -19,7 +19,7 @@ permissions:
 env:
   ZIG_VERSION: 0.16.0
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
-  ORIEL_VERSION: v0.6.4
+  ORIEL_VERSION: v0.6.5
   NFPM_VERSION: 2.43.0
   ARCH_PACKAGES: >-
     git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols
@@ -138,10 +138,31 @@ jobs:
           oriel --version
       - name: Unit tests
         run: zig build test --summary all
-      # Ad-hoc signed. For Developer ID signing and notarization, set the
-      # secrets and pass -Dmacos-sign-identity / -Dmacos-notarize-profile.
+      # Signed with GhostPen's self-signed certificate (`oriel signing`): the
+      # same identity every release, so macOS keeps the Accessibility and
+      # microphone grants across updates (ad-hoc builds lose them). Gatekeeper
+      # still asks once; a Developer ID with notarization would remove that.
       - name: Package (.app, .dmg)
-        run: oriel package
+        env:
+          MACOS_CERT_P12: ${{ secrets.GHOSTPEN_MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.GHOSTPEN_MACOS_CERT_PASSWORD }}
+          # The certificate's SHA-1 (public; `oriel signing show`), a repository variable.
+          MACOS_SIGN_IDENTITY: ${{ vars.GHOSTPEN_MACOS_SIGN_IDENTITY }}
+        run: |
+          if [ -z "$MACOS_CERT_P12" ] || [ -z "$MACOS_SIGN_IDENTITY" ]; then
+            echo "::warning::GHOSTPEN_MACOS_CERT_P12 or GHOSTPEN_MACOS_SIGN_IDENTITY is not set: the app is signed ad-hoc (permissions reset on every update)."
+            oriel package
+            exit 0
+          fi
+          CERT="$RUNNER_TEMP/ghostpen-codesign.p12"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$CERT"
+          oriel signing import "$CERT" --password-env MACOS_CERT_PASSWORD
+          rm -f "$CERT"
+          oriel package -Dmacos-sign-identity=$MACOS_SIGN_IDENTITY
+          codesign -d -r- zig-out/package/GhostPen.app
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain oriel-signing.keychain-db 2>/dev/null || true
       # The .app zipped for people, and tarred for the in-app updater (format app.tar.gz).
       - name: Zip the .app
         run: |
