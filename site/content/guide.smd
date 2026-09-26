@@ -17,9 +17,13 @@ or the [GitHub releases](https://github.com/highercomve/GhostPen/releases).
 - **Windows**: run the installer; it installs for your user, no
   administrator needed. Windows may warn about an unknown publisher until
   the installer is code-signed: choose *More info → Run anyway*.
-- **macOS**: open the `.dmg` and drag GhostPen to Applications. On the
-  first start macOS asks for **Accessibility**, which GhostPen needs to copy
-  your selection and paste the result.
+- **macOS**: open the `.dmg` and drag GhostPen to Applications. The app
+  isn't notarized by Apple yet, so the first start is blocked ("Apple could
+  not verify GhostPen…"): choose **Done**, then **System Settings → Privacy
+  & Security → Open Anyway** and confirm. (Or, in Terminal:
+  `xattr -dr com.apple.quarantine /Applications/GhostPen.app`.) Then macOS
+  asks for **Accessibility**, which GhostPen needs to copy your selection
+  and paste the result.
 
 GhostPen starts in the tray (menu bar on macOS). Its menu has Dictation,
 Captions, Playground and Settings.
