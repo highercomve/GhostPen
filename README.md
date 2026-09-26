@@ -84,12 +84,29 @@ nothing sent over the network. In Settings → Built-in models:
 The model runs in a helper process (`ghostpen --llm-helper`, started
 and stopped by GhostPen), so a crash or running out of memory can't take
 the app down. The Linux releases run it on the GPU through Vulkan (any
-vendor; the CPU without a Vulkan driver); build with `-Dcuda` for CUDA on
-an NVIDIA GPU; macOS uses Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`
+vendor; the CPU without a Vulkan driver), and the `-cuda` releases through
+CUDA on NVIDIA GPUs when the CUDA 13 runtime is installed (Vulkan
+otherwise); build with `-Dcuda` for CUDA; macOS uses Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`
 lists them). Image text extraction still needs a vision endpoint.
 
 Built-in profiles are new to this port: the Tauri app, if it reads the same
 settings, sees them as endpoints with no URL.
+
+## GPU backends: CUDA, Vulkan, CPU
+
+Measured on an RTX 4070 with an AMD Ryzen 7 7800X3D 8-Core Processor, GhostPen 0.2.4 built with the
+same CPU target, warm runs:
+
+| | CUDA | Vulkan | CPU |
+|---|---|---|---|
+| Whisper small, 66 s of speech | 0.52 s | 0.60 s | 4.75 s |
+| Qwen3.5 2B: prompt (1,390 tokens) | 12,858 tok/s | 10,571 tok/s | 193 tok/s |
+| Qwen3.5 2B: generation | 216 tok/s | 195 tok/s | 36 tok/s |
+| Ornith 1.5 9B Q4_K_M: prompt | 3,631 tok/s | 3,068 tok/s | |
+| Ornith 1.5 9B Q4_K_M: generation | 74.9 tok/s | 69.6 tok/s | |
+
+Vulkan's first transcription after start also compiles its pipelines
+(1.5 s instead of 0.6 s).
 
 ## Compared with the Rust (Tauri) GhostPen
 

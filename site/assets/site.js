@@ -22,9 +22,13 @@
   // What an asset is, from its file name (the names `oriel package` gives).
   function describe(name) {
     var arch = /(aarch64|arm64)/i.test(name) ? "ARM64" : /(x86_64|amd64|x64)/i.test(name) ? "x86-64" : "";
-    if (/\.AppImage$/i.test(name)) return { os: "linux", kind: "AppImage", order: 0, arch: arch };
-    if (/\.deb$/i.test(name)) return { os: "linux", kind: "Debian / Ubuntu (.deb)", order: 1, arch: arch };
-    if (/\.rpm$/i.test(name)) return { os: "linux", kind: "Fedora / openSUSE (.rpm)", order: 2, arch: arch };
+    // The CUDA builds ("-cuda" in the name) come after the Vulkan ones.
+    var cuda = /-cuda\b/i.test(name);
+    var gpu = cuda ? " · NVIDIA CUDA" : "";
+    var extra = cuda ? 3 : 0;
+    if (/\.AppImage$/i.test(name)) return { os: "linux", kind: "AppImage" + gpu, order: 0 + extra, arch: arch };
+    if (/\.deb$/i.test(name)) return { os: "linux", kind: "Debian / Ubuntu (.deb)" + gpu, order: 1 + extra, arch: arch };
+    if (/\.rpm$/i.test(name)) return { os: "linux", kind: "Fedora / openSUSE (.rpm)" + gpu, order: 2 + extra, arch: arch };
     if (/setup\.exe$/i.test(name)) return { os: "windows", kind: "Installer (.exe)", order: 0, arch: arch || "x86-64" };
     if (/\.dmg$/i.test(name)) return { os: "macos", kind: "Disk image (.dmg)", order: 0, arch: arch || "Apple Silicon" };
     return null;

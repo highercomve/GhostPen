@@ -19,7 +19,7 @@ permissions:
 env:
   ZIG_VERSION: 0.16.0
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
-  ORIEL_VERSION: v0.6.3
+  ORIEL_VERSION: v0.6.4
   NFPM_VERSION: 2.43.0
   ARCH_PACKAGES: >-
     git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols
@@ -50,6 +50,42 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux
+          path: zig-out/package/*
+
+  # The same Linux packages with CUDA as well ("-cuda" in the file names):
+  # CUDA for NVIDIA GPUs from Turing (RTX 20xx) to Blackwell (RTX 50xx),
+  # using the system's CUDA 13 runtime (cuBLAS); without it they run on
+  # Vulkan like the regular packages. They update from their own entry in
+  # latest.json (x86_64-linux-cuda), so they stay CUDA builds.
+  linux-cuda:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 240
+    steps:
+      - name: System packages
+        run: pacman -Syu --noconfirm --needed $ARCH_PACKAGES cuda
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Oriel CLI and nfpm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/highercomve/Oriel/main/install.sh | ORIEL_VERSION=$ORIEL_VERSION ORIEL_INSTALL_DIR=/usr/local/bin sh
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" | tar xz -C /usr/local/bin nfpm
+      - name: Package (deb, rpm, AppImage with CUDA and Vulkan)
+        run: |
+          # The toolkit, and the host compiler nvcc supports (NVCC_CCBIN, from
+          # Arch's profile script, which a non-login shell doesn't read).
+          export CUDA_PATH=/opt/cuda PATH="/opt/cuda/bin:$PATH"
+          eval "$(grep '^export NVCC_CCBIN=' /etc/profile.d/cuda.sh)"
+          nvcc --version | tail -1; echo "NVCC_CCBIN=$NVCC_CCBIN"
+          oriel package -Dvulkan -Dcuda -Dcuda_arch=75,86,89,120a -Dupdate_target=x86_64-linux-cuda
+          cd zig-out/package
+          for f in *.AppImage *.deb *.rpm; do mv "$f" "${f%.*}-cuda.${f##*.}"; done
+          ls -la
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cuda
           path: zig-out/package/*
 
   windows:
@@ -118,7 +154,7 @@ jobs:
           path: zig-out/package/*
 
   release:
-    needs: [linux, windows, macos]
+    needs: [linux, linux-cuda, windows, macos]
     runs-on: ubuntu-latest
     # `zig build sign-update` configures the app's build: GTK/WebKit pkg-config data.
     container: archlinux:latest
@@ -158,6 +194,7 @@ jobs:
               --target "$2" --url "$BASE/$1" --key "$KEY_FILE" --format "$3" --out "dist/update-$2.json"
           }
           sign "ghostpen-$V-x86_64.AppImage" x86_64-linux raw
+          sign "ghostpen-$V-x86_64-cuda.AppImage" x86_64-linux-cuda raw
           sign ghostpen-x86_64-windows.exe x86_64-windows raw
           sign GhostPen-aarch64-macos.app.tar.gz aarch64-macos app.tar.gz
           zig build combine-manifests -- dist/update-*.json \

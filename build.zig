@@ -3,7 +3,7 @@ const oriel = @import("oriel");
 
 /// GhostPen's version: the packages, `ghostpen --version`, Settings → About
 /// and the updater all read it from here.
-const version = "0.2.4";
+const version = "0.2.5";
 
 /// Public half of the release signing key (the private half is the
 /// GHOSTPEN_UPDATE_KEY secret the release workflow signs latest.json with).
@@ -34,6 +34,9 @@ pub fn build(b: *std.Build) void {
         .audio_capture = true,
         // Whisper and the local model on an NVIDIA GPU: `oriel build -Dcuda` (Linux, CUDA toolkit).
         .ggml_cuda = b.option(bool, "cuda", "Run whisper and the local model on an NVIDIA GPU (libggml-cuda.so; needs the CUDA toolkit)") orelse false,
+        // Releases: the GPU generations to build for, and cuBLAS linked in (needs only the driver).
+        .cuda_arch = b.option([]const u8, "cuda_arch", "With -Dcuda: nvcc -arch, or compute capabilities like 75,86,89,120 (default: this machine's GPU)"),
+        .cuda_static = b.option(bool, "cuda_static", "With -Dcuda: link cuBLAS statically (needs only the NVIDIA driver)") orelse false,
         // ... or on any GPU through Vulkan: `oriel build -Dvulkan` (Linux; Vulkan headers, glslc).
         .ggml_vulkan = b.option(bool, "vulkan", "Run whisper and the local model on any GPU through Vulkan (libggml-vulkan.so; needs Vulkan headers and glslc)") orelse false,
         // Wayland: the menu, captions and dictation overlays as layer surfaces
@@ -61,6 +64,9 @@ pub fn build(b: *std.Build) void {
     // `@import("ghostpen_build").version`, for the app and the CLI.
     const build_info = b.addOptions();
     build_info.addOption([]const u8, "version", version);
+    // The release channel this build updates from (its entry in latest.json):
+    // "x86_64-linux-cuda" for the CUDA packages; default the OS and CPU.
+    build_info.addOption(?[]const u8, "update_target", b.option([]const u8, "update_target", "Update channel in latest.json (default: <arch>-<os>, e.g. x86_64-linux)"));
     const build_info_mod = build_info.createModule();
 
     // ghostpen-cli: an action from the terminal (no GUI, no GTK).

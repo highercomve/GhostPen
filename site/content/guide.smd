@@ -13,7 +13,12 @@ or the [GitHub releases](https://github.com/highercomve/GhostPen/releases).
 
 - **Linux**: the `.deb` (Debian, Ubuntu) and `.rpm` (Fedora, openSUSE)
   install GhostPen with what it needs (GTK 4, WebKitGTK 6.0). The AppImage
-  runs without installing, on a system that has those libraries.
+  runs without installing, on a system that has those libraries. They run
+  captions, dictation and Built-in models on the GPU through Vulkan (any
+  GPU vendor). With an NVIDIA GPU (RTX 20xx or newer) and the CUDA 13
+  runtime installed (Arch: `cuda`; others: NVIDIA's CUDA packages), the
+  **NVIDIA CUDA** downloads are 10–20% faster; without the runtime they
+  use Vulkan too, and they update to CUDA builds.
 - **Windows**: run the installer; it installs for your user, no
   administrator needed. Windows may warn about an unknown publisher until
   the installer is code-signed: choose *More info → Run anyway*.

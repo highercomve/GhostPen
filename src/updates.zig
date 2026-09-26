@@ -28,6 +28,9 @@ const gpa = std.heap.smp_allocator;
 
 pub const version: []const u8 = @import("ghostpen_build").version;
 pub const releases_url = "https://github.com/highercomve/GhostPen/releases/latest";
+/// This build's entry in latest.json: the CUDA packages update from
+/// "x86_64-linux-cuda", so they stay CUDA builds.
+const update_target: []const u8 = @import("ghostpen_build").update_target orelse updater.DEFAULT_TARGET;
 const default_manifest_url = "https://github.com/highercomve/GhostPen/releases/latest/download/latest.json";
 /// `GHOSTPEN_UPDATE_MANIFEST` points the updater elsewhere (testing a
 /// release before publishing it); signatures are still checked against the
@@ -87,6 +90,7 @@ fn config() updater.Config {
         .manifest_url = manifest_url,
         .current_version = version,
         .public_key_b64 = app.update_public_key orelse "",
+        .target = update_target,
     };
 }
 
