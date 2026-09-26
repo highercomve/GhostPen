@@ -899,3 +899,16 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   color: rgba(255, 255, 255, 0.45);
   background: #101216; /* anti-smear, see .dict-wave note */
 }
+
+/* Settings → Built-in models */
+.llm-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 14px; }
+.llm-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); }
+.llm-row.active { border-color: var(--accent); }
+.llm-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.llm-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.llm-badge { margin-left: 8px; padding: 1px 6px; border-radius: 6px; font-size: 11px; background: var(--accent-soft); color: var(--accent); }
+.llm-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.llm-progress { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.llm-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-elev); overflow: hidden; }
+.llm-bar > div { height: 100%; background: var(--accent); transition: width 0.2s; }
+.llm-message { color: var(--danger); }

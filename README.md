@@ -9,8 +9,9 @@ action (proofread, rewrite, translate, …); the result is pasted back in
 place. Also: a Playground with streaming answers, text extraction from
 clipboard images (OCR through a vision model), live captions of system audio,
 and voice dictation. Any OpenAI-compatible endpoint works (Ollama, LM
-Studio, OpenAI, OpenRouter, Groq, …); the default is a local Ollama with
-`gemma4:e4b`.
+Studio, OpenAI, OpenRouter, Groq, …; the default is a local Ollama with
+`gemma4:e4b`), or GhostPen runs a downloaded model itself: see
+[Built-in models](#built-in-models).
 
 The React frontend is GhostPen's own; the commands, events and settings keep
 the Tauri version's names and JSON shapes. On first run the Tauri app's
@@ -52,6 +53,34 @@ ghostpen-cli translate --lang French --stream "Good morning"
 ghostpen-cli profiles
 ```
 
+## Built-in models
+
+A profile set to **Built-in** runs the model inside GhostPen itself, with the
+llama.cpp compiled into it: no Ollama, LM Studio or other server, and
+nothing sent over the network. In Settings → Built-in models:
+
+- **Download** one of the catalog models (Qwen3.5 2B/4B/9B, Gemma 3 4B,
+  Gemma 4 E4B) from Hugging Face. Downloads can be paused and resumed, and
+  are checked against the SHA-256 Hugging Face publishes. They go to
+  `<data dir>/GhostPen/models` (`~/.local/share/GhostPen/models` on Linux).
+- GGUF files that **LM Studio** (`~/.lmstudio/models`) or **GhostReel**
+  (`~/.ghostreel/models`) already downloaded are found and reused, catalog
+  or not.
+- **Use** points the "Built-in (GhostPen)" profile at a model (creating the
+  profile if needed) and makes it active.
+- Runner settings: the context window, the GPU (as many layers as its free
+  memory holds; the rest runs on the CPU) and how long the model stays
+  loaded between actions (10 minutes by default).
+
+The model runs in a helper process (`ghostpen-oriel --llm-helper`, started
+and stopped by GhostPen), so a crash or running out of memory can't take
+the app down. Build with `-Dcuda` to run it on an NVIDIA GPU; macOS uses
+Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`
+lists them). Image text extraction still needs a vision endpoint.
+
+Built-in profiles are new to this port: the Tauri app, if it reads the same
+settings, sees them as endpoints with no URL.
+
 ## Permissions
 
 Declared with `oriel permission add` (see `build.zig`): accessibility
@@ -76,7 +105,9 @@ instead of the sound server (`$GHOSTPEN_TEST_AUDIO`).
 | File | |
 | --- | --- |
 | `src/main.zig` | Commands, events, the menu flow, windows, tray, hotkeys, launch flags |
-| `src/ai.zig` | OpenAI-compatible client: prompts, reasoning-leak retry, SSE streaming, vision, `/models` |
+| `src/ai.zig` | OpenAI-compatible client: prompts, reasoning-leak retry, SSE streaming, vision, `/models`; local profiles go to `local_llm.zig` |
+| `src/local_llm.zig`, `src/llm_helper.zig` | Built-in models: the runner's client (start, idle unload, cancel) and the runner (llama.cpp, JSON lines) |
+| `src/llm_models.zig`, `src/chat_format.zig` | Model catalog, resumable verified downloads, models found on disk; prompt formats (Gemma 4/3, ChatML, Qwen thinking) |
 | `src/settings.zig`, `src/store.zig` | Settings schema (Tauri-compatible) and the Oriel store |
 | `src/captions.zig`, `src/dictation.zig`, `src/models.zig` | Whisper captions and dictation, one shared model |
 | `src/image.zig` | PNG helpers for OCR and previews |

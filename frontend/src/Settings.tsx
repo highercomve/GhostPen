@@ -23,7 +23,12 @@ import {
   scoreMeter,
   CAPTION_LANGUAGES,
   TRANSLATE_LANGUAGES,
+  LocalLlmSettings,
+  isLocal,
+  llmModelsStatus,
+  LlmStatus,
 } from "./api";
+import LocalModels, { DEFAULT_LOCAL } from "./LocalModels";
 
 function newProfile(): Profile {
   return {
@@ -47,6 +52,7 @@ export default function Settings() {
   const [dictDevices, setDictDevices] = useState<string[]>([]);
   const [capMsg, setCapMsg] = useState<string>("");
   const [downloading, setDownloading] = useState(false);
+  const [llm, setLlm] = useState<LlmStatus | null>(null);
 
   useEffect(() => {
     getSettings().then(setSettings);
@@ -54,6 +60,7 @@ export default function Settings() {
     captionsStatus().then(setCapStatus).catch(() => {});
     captionsListDevices().then(setCapDevices).catch(() => {});
     dictationListDevices().then(setDictDevices).catch(() => {});
+    llmModelsStatus().then(setLlm).catch(() => {});
   }, []);
 
   if (!settings) return <div className="settings loading-page">Loading…</div>;
@@ -115,6 +122,37 @@ export default function Settings() {
       if (list.length > 0 && !list.includes(active.model)) {
         updateProfile(active.id, { model: list[0] });
       }
+    } catch (e) {
+      setModelMsg(String(e));
+    }
+  };
+
+  // ---- built-in models (GhostPen runs them) ----
+  const local = settings.localLlm ?? DEFAULT_LOCAL;
+  const updateLocal = (patch: Partial<LocalLlmSettings>) => update({ localLlm: { ...local, ...patch } });
+  // The active profile when it's a built-in one, else the first built-in one.
+  const localProfile = isLocal(active) ? active : settings.profiles.find((p) => isLocal(p));
+  /** Installed built-in models, for the profile's model picker. */
+  const localChoices = [
+    ...(llm?.status.models.filter((m) => m.path !== "").map((m) => ({ id: m.id, name: m.name })) ?? []),
+    ...(llm?.status.others.map((o) => ({ id: o.id, name: o.name })) ?? []),
+  ];
+
+  // "Use" in Built-in models: point the built-in profile at the model
+  // (creating the profile if needed) and make it active. Saved at once, on top
+  // of the saved settings: other unsaved edits in the form stay unsaved.
+  const useLocalModel = async (id: string) => {
+    const withModel = (profiles: Profile[], target: Profile | undefined) =>
+      target
+        ? profiles.map((p) => (p.id === target.id ? { ...p, model: id } : p))
+        : [...profiles, { id: "built-in", name: "Built-in (GhostPen)", provider: "local" as const, baseUrl: "", apiKey: "", model: id, temperature: 0.2 }];
+    const targetId = localProfile?.id ?? "built-in";
+    try {
+      const saved = await getSettings();
+      const savedTarget = saved.profiles.find((p) => p.id === targetId);
+      await saveSettings({ ...saved, profiles: withModel(saved.profiles, savedTarget), activeProfileId: targetId });
+      setSettings({ ...settings, profiles: withModel(settings.profiles, localProfile), activeProfileId: targetId });
+      getStatus().then(setStatus).catch(() => {});
     } catch (e) {
       setModelMsg(String(e));
     }
@@ -213,6 +251,39 @@ export default function Settings() {
         {active && (
           <div className="profile-form">
             <label>
+              Runs on
+              <select
+                value={isLocal(active) ? "local" : "openai"}
+                onChange={(e) =>
+                  updateProfile(active.id, e.target.value === "local"
+                    ? { provider: "local", model: localChoices[0]?.id ?? "" }
+                    : { provider: "openai", baseUrl: active.baseUrl || "http://localhost:11434/v1", model: "" })
+                }
+              >
+                <option value="openai">An AI endpoint (Ollama, LM Studio, OpenAI, …)</option>
+                <option value="local">Built-in: GhostPen runs the model itself (no server)</option>
+              </select>
+            </label>
+            {isLocal(active) ? (
+              <>
+                <label>
+                  Name
+                  <input value={active.name} onChange={(e) => updateProfile(active.id, { name: e.target.value })} />
+                </label>
+                <label>
+                  Model
+                  <select value={active.model} onChange={(e) => updateProfile(active.id, { model: e.target.value })}>
+                    {!localChoices.some((c) => c.id === active.model) && (
+                      <option value={active.model}>{active.model ? `${active.model} (not downloaded)` : "Choose a model…"}</option>
+                    )}
+                    {localChoices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <span className="muted small">Download models in <b>Built-in models</b> below.</span>
+                </label>
+              </>
+            ) : (
+            <>
+            <label>
               Preset
               <select defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
                 <option value="" disabled>Choose a preset…</option>
@@ -250,6 +321,8 @@ export default function Settings() {
               )}
               {modelMsg && <span className="muted small">{modelMsg}</span>}
             </label>
+            </>
+            )}
             <label>
               Temperature: {active.temperature.toFixed(2)}
               <input type="range" min={0} max={1} step={0.05} value={active.temperature}
@@ -261,6 +334,14 @@ export default function Settings() {
           </div>
         )}
       </section>
+
+      <LocalModels
+        local={local}
+        onLocalChange={updateLocal}
+        activeModel={isLocal(active) ? active.model : null}
+        onUse={(id) => useLocalModel(id)}
+        onChanged={() => llmModelsStatus().then(setLlm).catch(() => {})}
+      />
 
       {/* Behaviour */}
       <section className="card">

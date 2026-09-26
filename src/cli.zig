@@ -13,11 +13,17 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ai = @import("ai.zig");
 const settings = @import("settings.zig");
+const local_llm = @import("local_llm.zig");
+const llm_models = @import("llm_models.zig");
+
+/// Warnings and errors only (the model's load/unload notes are for the app's log).
+pub const std_options: std.Options = .{ .log_level = .warn };
 
 const usage =
     \\Usage: ghostpen-cli <action> [OPTIONS] [TEXT...]
     \\       ghostpen-cli prompt <instruction> [OPTIONS] [TEXT...]
     \\       ghostpen-cli profiles
+    \\       ghostpen-cli models
     \\
     \\Actions: proofread, professional, casual, concise, expand, translate,
     \\         or the id of a custom action from the settings.
@@ -30,6 +36,11 @@ const usage =
     \\  --stream              Print the answer as it streams in
     \\  -v, --verbose         Diagnostics on stderr
     \\  -h, --help            This help
+    \\
+    \\`models` lists the built-in models ("Built-in" profiles, run by GhostPen
+    \\itself with its embedded llama.cpp; download
+    \\them in the app's Settings). A local profile runs the model through
+    \\ghostpen-oriel, which must sit next to ghostpen-cli.
     \\
     \\TEXT is read from stdin when not given. Settings come from
     \\$GHOSTPEN_SETTINGS or the GhostPen app's settings.json.
@@ -113,6 +124,25 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     };
 
+    cli_io = io;
+    cli_env = init.environ_map;
+    cli_local = s.localLlm;
+    ai.local_resolver = &resolveLocal;
+    defer local_llm.unload(io);
+
+    if (std.mem.eql(u8, act, "models")) {
+        const own = llm_models.ownDir(arena, init.environ_map) orelse {
+            try err.interface.writeAll("error: no data directory (HOME is not set)\n");
+            return 1;
+        };
+        const st = try llm_models.status(io, arena, try llm_models.dirs(arena, own, init.environ_map));
+        for (st.models) |m| {
+            try out.interface.print("{s}\t{s}\t{d:.1} GB\t{s}\n", .{ m.id, m.name, @as(f64, @floatFromInt(m.size)) / 1e9, if (m.path.len > 0) m.path else if (m.partial > 0) "partial download" else "not downloaded" });
+        }
+        for (st.others) |o| try out.interface.print("{s}\t{s}\t{d:.1} GB\tfound on disk\n", .{ o.id, o.name, @as(f64, @floatFromInt(o.size)) / 1e9 });
+        return 0;
+    }
+
     if (std.mem.eql(u8, act, "profiles")) {
         for (s.profiles) |p| {
             try out.interface.print("{s} {s}\t{s}\t{s}\t{s}\n", .{ if (std.mem.eql(u8, p.id, s.activeProfileId)) "*" else " ", p.id, p.name, p.model, p.baseUrl });
@@ -187,10 +217,51 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+var cli_io: std.Io = undefined;
+var cli_env: *const std.process.Environ.Map = undefined;
+var cli_local: settings.LocalLlm = .{};
+
+/// `ai.local_resolver` for the CLI: the model in the app's folders, run by
+/// the ghostpen-oriel next to this executable.
+fn resolveLocal(arena: std.mem.Allocator, profile: settings.Profile, diag: *ai.Diag) ai.Error!local_llm.Config {
+    const own = llm_models.ownDir(arena, cli_env) orelse {
+        diag.message = "No data directory (HOME is not set).";
+        return error.AiFailed;
+    };
+    const d = llm_models.dirs(arena, own, cli_env) catch return error.OutOfMemory;
+    const model = if (profile.model.len > 0) profile.model else llm_models.default_id;
+    const path = llm_models.resolve(cli_io, arena, d, model) orelse {
+        diag.message = std.fmt.allocPrint(arena, "The model \"{s}\" isn't downloaded (see `ghostpen-cli models`; download it in GhostPen's Settings).", .{model}) catch return error.OutOfMemory;
+        return error.AiFailed;
+    };
+    const self = std.process.executablePathAlloc(cli_io, arena) catch {
+        diag.message = "Can't find this executable's directory.";
+        return error.AiFailed;
+    };
+    const exe = std.fs.path.join(arena, &.{ std.fs.path.dirname(self) orelse ".", if (builtin.os.tag == .windows) "ghostpen-oriel.exe" else "ghostpen-oriel" }) catch return error.OutOfMemory;
+    return .{ .exe = exe, .model = path, .ctx = cli_local.ctxTokens, .gpu = cli_local.gpu, .idle_minutes = 0 };
+}
+
 fn readStdin(io: std.Io, arena: std.mem.Allocator) ![]u8 {
     var buf: [4096]u8 = undefined;
     var r = std.Io.File.stdin().readerStreaming(io, &buf);
-    return r.interface.allocRemaining(arena, .limited(4 * 1024 * 1024));
+    return stripBom(try r.interface.allocRemaining(arena, .limited(4 * 1024 * 1024)));
+}
+
+/// Without a leading UTF-8 byte-order mark: Windows PowerShell pipes one to
+/// native programs, and it would reach the model as part of the text.
+fn stripBom(text: []u8) []u8 {
+    const bom = "\xEF\xBB\xBF";
+    return if (std.mem.startsWith(u8, text, bom)) text[bom.len..] else text;
+}
+
+test stripBom {
+    var with = "\xEF\xBB\xBFteh text".*;
+    try std.testing.expectEqualStrings("teh text", stripBom(&with));
+    var without = "teh text".*;
+    try std.testing.expectEqualStrings("teh text", stripBom(&without));
+    var empty = "".*;
+    try std.testing.expectEqualStrings("", stripBom(&empty));
 }
 
 fn report(w: *std.Io.Writer, e: ai.Error, diag: ai.Diag) u8 {
