@@ -85,13 +85,15 @@ jobs:
           ORIEL_DIR=$(ls -d zig-pkg/oriel-$(sed -n 's/.*\.hash = "oriel-\([^"]*\)".*/\1/p' build.zig.zon))
           GGML_KEY=$( { grep -A2 '\.llama = ' "$ORIEL_DIR/build.zig.zon"; cat "$ORIEL_DIR/build/ggml.zig"; } | sha256sum | cut -c1-16)
           echo "GGML_KEY=$GGML_KEY" >> "$GITHUB_ENV"
+          # Cache keys can't contain commas.
+          echo "CUDA_ARCHS_KEY=${CUDA_ARCHS//,/_}" >> "$GITHUB_ENV"
           echo "CUDA_VERSION=$(pacman -Si cuda | sed -n 's/^Version *: *//p')" >> "$GITHUB_ENV"
       - name: CUDA library cache
         id: cuda-cache
         uses: actions/cache@v4
         with:
           path: cuda-cache/libggml-cuda.so
-          key: ggml-cuda-${{ env.GGML_KEY }}-${{ env.CUDA_ARCHS }}-cuda-${{ env.CUDA_VERSION }}
+          key: ggml-cuda-${{ env.GGML_KEY }}-${{ env.CUDA_ARCHS_KEY }}-cuda-${{ env.CUDA_VERSION }}
       - name: Build libggml-cuda.so (cache miss)
         if: steps.cuda-cache.outputs.cache-hit != 'true'
         run: |
