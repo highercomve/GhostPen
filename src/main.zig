@@ -334,6 +334,7 @@ pub const Commands = struct {
         "process_text",            "process_text_stream", "fetch_models",          "captions_start",
         "captions_download_model", "dictation_start",     "captions_list_devices", "dictation_list_devices",
         "llm_models_status",       "llm_download_model",  "llm_delete_model",      "llm_unload",
+        "menu_dismissed",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -533,6 +534,33 @@ pub const Commands = struct {
             oriel.ipc.fail("Wait for the download to finish (or pause it) first.", .{})
         else
             oriel.ipc.fail("Could not delete the model ({s}).", .{@errorName(err)});
+    }
+
+    /// The menu closed without pasting (Escape, Close, a cancelled or failed
+    /// action): put back what the clipboard held before the trigger's copy,
+    /// unless the clipboard changed since (the user copied something else).
+    pub fn menu_dismissed(_: std.mem.Allocator) void {
+        state_mutex.lockUncancelable(io);
+        const snap = snapshot;
+        snapshot = .empty;
+        const copied: ?[]u8 = switch (current_input) {
+            .text => |t| gpa.dupe(u8, t) catch null,
+            else => null,
+        };
+        state_mutex.unlock(io);
+        defer if (copied) |c| gpa.free(c);
+        if (snap == .empty) return;
+        const still_selection = blk: {
+            const now = oriel.clipboard.readText(gpa) catch break :blk false;
+            defer gpa.free(now);
+            // An image selection has no text to compare: the clipboard then holds no text.
+            break :blk if (copied) |c| std.mem.eql(u8, now, c) else std.mem.trim(u8, now, " \t\r\n").len == 0;
+        };
+        if (!still_selection) {
+            snap.deinit();
+            return;
+        }
+        restoreSnapshot(snap, 0);
     }
 
     /// Stop the running AI request, when it runs on the built-in model (it

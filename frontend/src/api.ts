@@ -132,6 +132,11 @@ export const processTextStream = (action: string, targetLang: string | null, lev
 export const openPlayground = () => invoke<void>("open_playground");
 /** Hide the window this page runs in (Oriel: the window API, no command). */
 export const hideWindow = () => orielWindow.current().hide();
+/** Close the menu without pasting: the clipboard gets back what it held before the trigger. */
+export const dismissMenu = () => {
+  invoke<void>("menu_dismissed").catch(() => {});
+  return hideWindow();
+};
 export const openSettings = () => invoke<void>("open_settings");
 
 // ---- captions (ADR-008) --------------------------------------------------------------

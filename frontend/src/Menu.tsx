@@ -16,7 +16,7 @@ import {
   copyText,
   processAiAction,
   processAiCustom,
-  hideWindow,
+  dismissMenu,
   cancelAi,
   openSettings,
   openPlayground,
@@ -245,9 +245,9 @@ export default function Menu() {
         // Stop the built-in model's answer instead of pasting it later.
         cancelAi().catch(() => {});
         setView({ kind: "menu" });
-        hideWindow();
+        dismissMenu();
       } else {
-        hideWindow();
+        dismissMenu();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -516,7 +516,7 @@ export default function Menu() {
             <button className="action small" onClick={() => setView({ kind: "menu" })}>
               Back
             </button>
-            <button className="action small" onClick={() => hideWindow()}>
+            <button className="action small" onClick={() => dismissMenu()}>
               Close
             </button>
           </div>
