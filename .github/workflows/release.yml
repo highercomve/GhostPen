@@ -63,7 +63,8 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: System packages
-        run: pacman -Syu --noconfirm --needed $ARCH_PACKAGES cuda
+        # nvcc compiles host code with GCC (optional for the cuda package).
+        run: pacman -Syu --noconfirm --needed $ARCH_PACKAGES cuda gcc
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
