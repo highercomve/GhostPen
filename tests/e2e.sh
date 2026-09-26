@@ -19,7 +19,7 @@ mkdir -p "$XDG_CONFIG_HOME/dev.ghostpen.Oriel"
 printf '{"settings":{"activeProfileId":"m","profiles":[{"id":"m","name":"Mock","baseUrl":"http://127.0.0.1:18765/v1","model":"mock","temperature":0.2}]}}' \
   > "$XDG_CONFIG_HOME/dev.ghostpen.Oriel/settings.json"
 python3 "$here/tests/mock_openai.py" 18765 & mock=$!
-app="$here/zig-out/bin/ghostpen-oriel"
+app="$here/zig-out/bin/ghostpen"
 "$app" > "$tmp/app.log" 2>&1 & pid=$!
 sleep 4
 

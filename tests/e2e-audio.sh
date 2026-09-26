@@ -19,7 +19,7 @@ ln -s "$model" "$XDG_DATA_HOME/GhostPen/models/ggml-tiny.bin"
 printf '{"settings":{"activeProfileId":"m","profiles":[{"id":"m","name":"Mock","baseUrl":"http://127.0.0.1:18765/v1","model":"mock","temperature":0.2}],"captions":{"model":"tiny","chunkSeconds":3},"dictation":{"proofread":true}}}' \
   > "$XDG_CONFIG_HOME/dev.ghostpen.Oriel/settings.json"
 python3 "$here/tests/mock_openai.py" 18765 & mock=$!
-app="$here/zig-out/bin/ghostpen-oriel"
+app="$here/zig-out/bin/ghostpen"
 GHOSTPEN_TEST_AUDIO="$here/tests/speech.wav" "$app" > "$tmp/app.log" 2>&1 & pid=$!
 sleep 4
 fail=0

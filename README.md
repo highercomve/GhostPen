@@ -30,7 +30,7 @@ settings are imported, and its downloaded whisper models are reused.
 ```sh
 oriel doctor --fix      # toolchain: Zig, Node.js, ...
 oriel dev               # run with hot reload
-oriel build             # zig-out/bin/ghostpen-oriel (+ ghostpen-cli)
+oriel build             # zig-out/bin/ghostpen (+ ghostpen-cli)
 oriel build -Dcuda      # whisper on an NVIDIA GPU (CUDA toolkit)
 oriel package           # deb, rpm, AppImage / setup.exe / .app + .dmg
 ```
@@ -45,12 +45,12 @@ oriel package           # deb, rpm, AppImage / setup.exe / .app + .dmg
 | Tray icon | Menu, Dictation, Captions, Playground, Settings, Quit |
 
 The same actions from a terminal or a desktop keybinding, handed to the
-running instance: `ghostpen-oriel --trigger | --voice-input | --captions |
+running instance: `ghostpen --trigger | --voice-input | --captions |
 --settings | --playground`. On Wayland without the GlobalShortcuts portal,
 bind these in your compositor, e.g. Hyprland:
 
 ```
-bind = CTRL SHIFT, A, exec, ghostpen-oriel --trigger
+bind = CTRL SHIFT, A, exec, ghostpen --trigger
 ```
 
 `ghostpen-cli` runs an action from the terminal with the same settings:
@@ -80,7 +80,7 @@ nothing sent over the network. In Settings → Built-in models:
   memory holds; the rest runs on the CPU) and how long the model stays
   loaded between actions (10 minutes by default).
 
-The model runs in a helper process (`ghostpen-oriel --llm-helper`, started
+The model runs in a helper process (`ghostpen --llm-helper`, started
 and stopped by GhostPen), so a crash or running out of memory can't take
 the app down. Build with `-Dcuda` to run it on an NVIDIA GPU; macOS uses
 Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`

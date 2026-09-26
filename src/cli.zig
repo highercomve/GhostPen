@@ -40,7 +40,7 @@ const usage =
     \\`models` lists the built-in models ("Built-in" profiles, run by GhostPen
     \\itself with its embedded llama.cpp; download
     \\them in the app's Settings). A local profile runs the model through
-    \\ghostpen-oriel, which must sit next to ghostpen-cli.
+    \\ghostpen, which must sit next to ghostpen-cli.
     \\
     \\TEXT is read from stdin when not given. Settings come from
     \\$GHOSTPEN_SETTINGS or the GhostPen app's settings.json.
@@ -222,7 +222,7 @@ var cli_env: *const std.process.Environ.Map = undefined;
 var cli_local: settings.LocalLlm = .{};
 
 /// `ai.local_resolver` for the CLI: the model in the app's folders, run by
-/// the ghostpen-oriel next to this executable.
+/// the ghostpen next to this executable.
 fn resolveLocal(arena: std.mem.Allocator, profile: settings.Profile, diag: *ai.Diag) ai.Error!local_llm.Config {
     const own = llm_models.ownDir(arena, cli_env) orelse {
         diag.message = "No data directory (HOME is not set).";
@@ -238,7 +238,7 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings.Profile, diag: *ai.D
         diag.message = "Can't find this executable's directory.";
         return error.AiFailed;
     };
-    const exe = std.fs.path.join(arena, &.{ std.fs.path.dirname(self) orelse ".", if (builtin.os.tag == .windows) "ghostpen-oriel.exe" else "ghostpen-oriel" }) catch return error.OutOfMemory;
+    const exe = std.fs.path.join(arena, &.{ std.fs.path.dirname(self) orelse ".", if (builtin.os.tag == .windows) "ghostpen.exe" else "ghostpen" }) catch return error.OutOfMemory;
     return .{ .exe = exe, .model = path, .ctx = cli_local.ctxTokens, .gpu = cli_local.gpu, .idle_minutes = 0 };
 }
 

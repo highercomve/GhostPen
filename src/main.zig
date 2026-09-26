@@ -730,12 +730,12 @@ fn setup() !void {
         .on_menu = onTrayMenu,
         .on_activate = triggerMenuFlow,
     }) catch |err| blk: {
-        log.warn("no tray icon ({s}); use the hotkeys or `ghostpen-oriel --trigger`", .{@errorName(err)});
+        log.warn("no tray icon ({s}); use the hotkeys or `ghostpen --trigger`", .{@errorName(err)});
         break :blk null;
     };
 
     const failed = registerHotkeys(arena.allocator(), s);
-    if (failed.len > 0) log.warn("hotkeys not registered: {s} (bind `ghostpen-oriel --trigger` in your desktop instead)", .{failed});
+    if (failed.len > 0) log.warn("hotkeys not registered: {s} (bind `ghostpen --trigger` in your desktop instead)", .{failed});
 
     // macOS gates synthetic keystrokes behind Accessibility: ask once (the
     // prompt lists GhostPen; elsewhere this is already granted).
@@ -774,16 +774,16 @@ pub fn main(init: std.process.Init) !u8 {
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             std.debug.print(
-                \\Usage: ghostpen-oriel [--trigger | --voice-input | --captions | --settings | --playground | --tray]
+                \\Usage: ghostpen [--trigger | --voice-input | --captions | --settings | --playground | --tray]
                 \\
                 \\A running GhostPen receives these flags from later launches, so a
-                \\desktop keybinding can run e.g. `ghostpen-oriel --trigger`.
+                \\desktop keybinding can run e.g. `ghostpen --trigger`.
                 \\
             , .{});
             return 0;
         }
         if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
-            std.debug.print("ghostpen-oriel 0.2.0\n", .{});
+            std.debug.print("ghostpen 0.2.1\n", .{});
             return 0;
         }
     }

@@ -112,15 +112,15 @@ them the first time. Where there is no portal, bind the command line
 flags in your compositor instead; a running GhostPen receives them:
 
 ```
-ghostpen-oriel --trigger      # the menu
-ghostpen-oriel --voice-input  # dictation
-ghostpen-oriel --captions     # captions
+ghostpen --trigger      # the menu
+ghostpen --voice-input  # dictation
+ghostpen --captions     # captions
 ```
 
 Hyprland, for example:
 
 ```
-bind = CTRL SHIFT, A, exec, ghostpen-oriel --trigger
+bind = CTRL SHIFT, A, exec, ghostpen --trigger
 ```
 
 # Command line
@@ -152,7 +152,7 @@ GhostPen is built with [Oriel](https://highercomve.github.io/Oriel/):
 git clone https://github.com/highercomve/GhostPen
 cd GhostPen
 oriel doctor --fix   # Zig, Node.js, …
-oriel build          # zig-out/bin/ghostpen-oriel and ghostpen-cli
+oriel build          # zig-out/bin/ghostpen and ghostpen-cli
 oriel build -Dcuda   # with an NVIDIA GPU (needs the CUDA toolkit)
 oriel package        # deb, rpm, AppImage / setup.exe / .app and .dmg
 ```

@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     _ = oriel.addApp(b, dep, .{
-        .name = "ghostpen-oriel",
+        .name = "ghostpen",
         .root_source_file = b.path("src/main.zig"),
         .icon = b.path("icon.png"), // High-resolution PNG (1024x1024 recommended)
         .imports = &.{.{ .name = "zigimg", .module = zigimg }},
@@ -66,9 +66,13 @@ pub fn build(b: *std.Build) void {
             .name = "GhostPen",
             // .publisher = "Your Name <you@example.com>", // default: from the app id
             .summary = "AI text editing anywhere on your desktop",
-            .version = "0.2.0",
+            .version = "0.2.1",
             // The CLI ships in every package, next to the app (and in /usr/bin on Linux).
             .contents = .{ .executables = &.{cli} },
+            // The Rust/Tauri GhostPen's packages were named ghost-pen (and
+            // installed /usr/bin/ghostpen): installing this one upgrades them.
+            .replaces = &.{"ghost-pen"},
+            .conflicts = &.{"ghost-pen"},
         },
         .permissions = .{
             .microphone = "GhostPen transcribes your voice for dictation.",

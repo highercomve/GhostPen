@@ -18,7 +18,7 @@ permissions:
 env:
   ZIG_VERSION: 0.16.0
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
-  ORIEL_VERSION: v0.6.0
+  ORIEL_VERSION: v0.6.1
   NFPM_VERSION: 2.43.0
   ARCH_PACKAGES: >-
     git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols

@@ -1,5 +1,5 @@
 //! The local LLM runner: GhostPen's own executable started as
-//! `ghostpen-oriel --llm-helper --model <file.gguf> [--ctx N] [--cpu]` by
+//! `ghostpen --llm-helper --model <file.gguf> [--ctx N] [--cpu]` by
 //! `local_llm.zig`. A separate process so a crash or an out-of-memory in
 //! llama.cpp can't take the app down, Stop can always kill it, and the
 //! model's memory is returned when it exits.
