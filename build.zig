@@ -88,9 +88,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigimg", .module = zigimg },
         },
     }),
-        // Recent glibc/GCC crt1.o needs LLD (Zig's own linker can't read its .sframe).
+        // Recent glibc/GCC crt1.o needs LLD (Zig's own linker can't read its
+        // .sframe); LLD can't link Mach-O, so macOS keeps Zig's linker.
         .use_llvm = true,
-        .use_lld = true,
+        .use_lld = target.result.ofmt != .macho,
     });
     b.step("test", "Run the unit tests").dependOn(&b.addRunArtifact(tests).step);
 }
