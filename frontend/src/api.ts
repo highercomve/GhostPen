@@ -301,3 +301,6 @@ export const llmUnload = () => invoke<void>("llm_unload");
 
 export const formatBytes = (n: number) =>
   n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`;
+
+/** The paste shortcut as the user types it: ⌘V on macOS, Ctrl+V elsewhere. */
+export const PASTE_KEYS = /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent) ? "⌘V" : "Ctrl+V";

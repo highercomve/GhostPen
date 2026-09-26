@@ -11,6 +11,7 @@ import {
   dictationSetProofread,
   openSettings,
   CAPTION_LANGUAGES,
+  PASTE_KEYS,
 } from "./api";
 
 // Waveform: a continuous flowing wave (Apple-dictation style), not 36 independent bars each
@@ -259,7 +260,7 @@ export default function Dictation() {
         : phase === "proofreading"
           ? "Polishing with AI…"
           : phase === "done"
-            ? "Copied — press Ctrl+V · Space to dictate again · Esc to close"
+            ? `Copied — press ${PASTE_KEYS} · Space to dictate again · Esc to close`
             : phase === "error"
               ? "Space to try again · Esc to close"
               : "";
