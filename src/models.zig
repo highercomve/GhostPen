@@ -95,6 +95,67 @@ pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, id: []const u8, samples: [
     return ctx.transcribe(gpa, samples, .{ .language = lang, .translate = translate, .threads = threads });
 }
 
+pub const Segment = struct {
+    /// Seconds from the start of the audio.
+    start: f64,
+    end: f64,
+    text: []const u8,
+};
+
+pub const Transcript = struct {
+    segments: []const Segment,
+    /// The detected (or requested) language code, e.g. "en".
+    language: []const u8,
+
+    /// The segments' text, trimmed and joined with spaces.
+    pub fn text(self: Transcript, arena: std.mem.Allocator) ![]const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        for (self.segments) |seg| {
+            const t = std.mem.trim(u8, seg.text, " \t\r\n");
+            if (t.len == 0) continue;
+            if (out.items.len > 0) try out.append(arena, ' ');
+            try out.appendSlice(arena, t);
+        }
+        return out.items;
+    }
+};
+
+/// Transcribe with segment timestamps (the STT server's verbose_json, srt
+/// and vtt). Same model and lock as `transcribe`. Results point into `arena`.
+pub fn transcribeSegments(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id: []const u8, samples: []const f32, language: []const u8) !Transcript {
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    const ctx = try ensureLocked(gpa, id);
+    const c = whisper.c;
+    const n_samples = std.math.cast(c_int, samples.len) orelse return error.AudioTooLong;
+    const lang = try arena.dupeZ(u8, if (language.len == 0) "auto" else language);
+    var p = c.whisper_full_default_params(c.WHISPER_SAMPLING_GREEDY);
+    p.print_progress = false;
+    p.print_realtime = false;
+    p.print_timestamps = false;
+    p.print_special = false;
+    p.no_context = true;
+    p.language = lang.ptr;
+    p.n_threads = @intCast(@min(std.Thread.getCpuCount() catch 4, 8));
+    if (c.whisper_full(ctx.handle, p, samples.ptr, n_samples) != 0) return error.TranscribeFailed;
+
+    const n: usize = @intCast(@max(0, c.whisper_full_n_segments(ctx.handle)));
+    const segments = try arena.alloc(Segment, n);
+    for (segments, 0..) |*seg, i| {
+        const idx: c_int = @intCast(i);
+        const t: ?[*:0]const u8 = c.whisper_full_get_segment_text(ctx.handle, idx);
+        seg.* = .{
+            // whisper counts in 10 ms steps
+            .start = @as(f64, @floatFromInt(c.whisper_full_get_segment_t0(ctx.handle, idx))) / 100.0,
+            .end = @as(f64, @floatFromInt(c.whisper_full_get_segment_t1(ctx.handle, idx))) / 100.0,
+            .text = try cleanTranscript(arena, if (t) |x| std.mem.span(x) else ""),
+        };
+    }
+    const lang_id = c.whisper_full_lang_id(ctx.handle);
+    const detected: []const u8 = if (lang_id >= 0) (if (c.whisper_lang_str(lang_id)) |l| std.mem.span(l) else "") else "";
+    return .{ .segments = segments, .language = try arena.dupe(u8, if (detected.len > 0) detected else language) };
+}
+
 /// One download at a time (two would write the same `.part` file).
 var downloading: std.atomic.Value(bool) = .init(false);
 

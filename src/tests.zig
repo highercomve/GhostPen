@@ -7,4 +7,5 @@ test {
     _ = @import("chat_format.zig");
     _ = @import("local_llm.zig");
     _ = @import("llm_models.zig");
+    _ = @import("stt_server.zig");
 }

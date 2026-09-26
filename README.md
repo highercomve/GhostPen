@@ -134,6 +134,18 @@ Packages: the Rust `.deb` is 31.8 MB (app and CLI). The Oriel `.deb` is
 `ghostpen-cli`, and ships the binary unstripped (72 MB); that's an Oriel
 packaging gap being fixed, so package sizes aren't compared yet.
 
+## Transcription server for other tools
+
+`GHOSTPEN_STT_SERVER=1 ghostpen` also serves the whisper model as an
+OpenAI-compatible API, so local tools (an agent that receives voice notes,
+a video indexer) transcribe through GhostPen's model instead of loading
+another: `POST /v1/audio/transcriptions` (multipart `file`, any format
+`ffmpeg` reads; `language`; `response_format` json, text, verbose_json with
+timestamped segments, srt or vtt), `GET /v1/models`, `GET /health`. It
+binds `GHOSTPEN_STT_BIND` (default `0.0.0.0:8771`), serves Settings → Live
+Captions' model or `GHOSTPEN_STT_MODEL`, and shares it with captions and
+dictation (one copy in memory). Needs `ffmpeg`.
+
 ## Permissions
 
 Declared with `oriel permission add` (see `build.zig`): accessibility

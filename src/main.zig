@@ -750,6 +750,8 @@ fn setup() !void {
 
     captions.init();
     dictation.init();
+    // GHOSTPEN_STT_SERVER=1: whisper for other local tools (stt_server.zig).
+    @import("stt_server.zig").maybeStart(io, environ_map);
     handleArgs(launch_args);
 }
 
