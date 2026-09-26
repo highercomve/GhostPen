@@ -226,7 +226,26 @@ fn ensure(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Con
         diag.* = std.fmt.allocPrint(arena, "The model file is missing: {s}. Download it in Settings → Built-in models.", .{cfg.model}) catch "The model file is missing.";
         return error.LocalFailed;
     };
+    return start(io, gpa, arena, cfg, key, diag) catch |err| {
+        // The GPU ran out of memory mid-load (another app took it: llama.cpp
+        // aborts then): once more on the CPU. The key stays the requested one.
+        switch (err) {
+            error.GpuFailed => {},
+            error.LocalFailed => return error.LocalFailed,
+            error.OutOfMemory => return error.OutOfMemory,
+        }
+        log.warn("GPU load failed ({s}); loading on the CPU", .{diag.*});
+        var cpu = cfg;
+        cpu.gpu = false;
+        return start(io, gpa, arena, cpu, key, diag) catch |e| switch (e) {
+            error.GpuFailed => error.LocalFailed,
+            else => |x| x,
+        };
+    };
+}
 
+/// Start the helper for `cfg` and wait until its model is loaded.
+fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, key: []const u8, diag: *[]const u8) (Error || error{GpuFailed})!*Runner {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ cfg.exe, "--llm-helper", "--model", cfg.model, "--ctx", try std.fmt.allocPrint(arena, "{d}", .{cfg.ctx}) });
     if (!cfg.gpu) try argv.append(arena, "--cpu");
@@ -300,6 +319,9 @@ fn ensure(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Con
                 "The built-in model took more than 10 minutes to load and was stopped."
             else
                 std.fmt.allocPrint(arena, "The built-in model could not be loaded{s}{s}", .{ if (why.len > 0) ": " else ".", why }) catch "The built-in model could not be loaded.";
+            const gpu_error = std.mem.indexOf(u8, why, "CUDA error") != null or std.mem.indexOf(u8, why, "out of memory") != null or
+                std.mem.indexOf(u8, why, "cudaMalloc") != null or std.mem.indexOf(u8, why, "Metal") != null;
+            if (cfg.gpu and gpu_error and !deadline.timed_out.load(.acquire)) return error.GpuFailed;
             return error.LocalFailed;
         };
         const parsed = std.json.parseFromSliceLeaky(Ready, arena, line, .{ .ignore_unknown_fields = true }) catch continue;
