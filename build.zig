@@ -93,9 +93,21 @@ pub fn build(b: *std.Build) void {
         .package = .{
             .id = "dev.ghostpen.Oriel",
             .name = "GhostPen",
-            // .publisher = "Your Name <you@example.com>", // default: from the app id
+            .publisher = "Sergio Marin",
             .summary = "AI text editing anywhere on your desktop",
+            .description = "Select text in any app, press a hotkey and pick an action (proofread, rewrite, translate, ...): the result is pasted back in place. Also a Playground, live captions and voice dictation. Works with any OpenAI-compatible endpoint, or runs AI models itself (llama.cpp, whisper.cpp) on the GPU.",
+            .license = "MIT",
+            .homepage = "https://highercomve.github.io/GhostPen/",
             .version = version,
+            // Windows: `oriel package -Dwinget-url=<release download URL>` writes
+            // the WinGet manifests (zig-out/package/winget) the release submits.
+            .winget = .{
+                .id = "Highercomve.GhostPen",
+                .moniker = "ghostpen",
+                .tags = &.{ "ai", "llm", "writing", "proofreading", "dictation", "captions", "whisper", "productivity" },
+                .license_url = "https://github.com/highercomve/GhostPen/blob/main/LICENSE",
+                .release_notes_url = "https://github.com/highercomve/GhostPen/releases",
+            },
             // The CLI ships in every package, next to the app (and in /usr/bin on Linux).
             .contents = .{ .executables = &.{cli} },
             // The Rust/Tauri GhostPen's packages were named ghost-pen (and

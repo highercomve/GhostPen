@@ -60,8 +60,8 @@
 					</div>
 				</div>
 			</div>
-			<p class="footer-legal">Built with <a href="https://highercomve.github.io/Oriel/">Oriel</a> and <a href="https://zine-ssg.io">Zine</a> · The earlier Rust/Tauri version lives on as <a href="https://github.com/highercomve/ghostpen-tauri">ghostpen-tauri</a></p>
+			<p class="footer-legal">MIT license · Built with <a href="https://highercomve.github.io/Oriel/">Oriel</a> and <a href="https://zine-ssg.io">Zine</a> · The earlier Rust/Tauri version lives on as <a href="https://github.com/highercomve/ghostpen-tauri">ghostpen-tauri</a></p>
 		</footer>
-		<script src="$site.asset('site.js').link().suffix('?v=20260926')" defer></script>
+		<script src="$site.asset('site.js').link().suffix('?v=20260927')" defer></script>
 	</body>
 </html>

@@ -221,3 +221,7 @@ instead of the sound server (`$GHOSTPEN_TEST_AUDIO`).
 | `src/image.zig` | PNG helpers for OCR and previews |
 | `src/cli.zig` | `ghostpen-cli` |
 | `frontend/` | GhostPen's React UI (`src/api.ts` over Oriel's `invoke`/`listen`) |
+
+## License
+
+MIT: see [LICENSE](LICENSE).
