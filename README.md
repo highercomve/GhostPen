@@ -32,6 +32,7 @@ oriel doctor --fix      # toolchain: Zig, Node.js, ...
 oriel dev               # run with hot reload
 oriel build             # zig-out/bin/ghostpen (+ ghostpen-cli)
 oriel build -Dcuda      # whisper on an NVIDIA GPU (CUDA toolkit)
+oriel build -Dvulkan    # ... or on any GPU through Vulkan (Linux releases are built this way)
 oriel package           # deb, rpm, AppImage / setup.exe / .app + .dmg
 ```
 
@@ -82,8 +83,9 @@ nothing sent over the network. In Settings → Built-in models:
 
 The model runs in a helper process (`ghostpen --llm-helper`, started
 and stopped by GhostPen), so a crash or running out of memory can't take
-the app down. Build with `-Dcuda` to run it on an NVIDIA GPU; macOS uses
-Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`
+the app down. The Linux releases run it on the GPU through Vulkan (any
+vendor; the CPU without a Vulkan driver); build with `-Dcuda` for CUDA on
+an NVIDIA GPU; macOS uses Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`
 lists them). Image text extraction still needs a vision endpoint.
 
 Built-in profiles are new to this port: the Tauri app, if it reads the same

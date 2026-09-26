@@ -4,7 +4,8 @@
 #
 # Linux runs in an Arch Linux container: GTK 4 / WebKitGTK 6.0 are newer
 # than Ubuntu LTS ships. The Linux packages run whisper and the built-in
-# models on the CPU (CUDA builds need the toolkit: `oriel build -Dcuda`).
+# models on the GPU through Vulkan (any vendor; the CPU when there is no
+# Vulkan driver). CUDA builds need the toolkit: `oriel build -Dcuda`.
 name: Release
 
 on:
@@ -18,12 +19,13 @@ permissions:
 env:
   ZIG_VERSION: 0.16.0
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
-  ORIEL_VERSION: v0.6.2
+  ORIEL_VERSION: v0.6.3
   NFPM_VERSION: 2.43.0
   ARCH_PACKAGES: >-
     git pkgconf gtk4 webkitgtk-6.0 gtk4-layer-shell wayland wayland-protocols
     libxkbcommon libxtst libx11 libpulse alsa-lib nodejs npm curl
     xorg-server-xvfb xorg-xauth xdotool xsel dbus ttf-dejavu python imagemagick squashfs-tools
+    vulkan-headers spirv-headers vulkan-icd-loader shaderc
 
 jobs:
   linux:
@@ -44,7 +46,7 @@ jobs:
       - name: Unit tests
         run: zig build test --summary all
       - name: Package (deb, rpm, AppImage)
-        run: oriel package
+        run: oriel package -Dvulkan
       - uses: actions/upload-artifact@v4
         with:
           name: linux

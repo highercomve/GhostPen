@@ -58,8 +58,8 @@ Downloads can be paused and resumed, and are checked against the SHA-256
 that Hugging Face publishes. GGUF models already downloaded by LM Studio
 are found and offered too.
 
-The model runs on the GPU when there is one (CUDA on NVIDIA, Metal on
-macOS): as many of its layers as the free GPU memory holds, the rest on
+The model runs on the GPU when there is one (on Linux through Vulkan, on
+any GPU vendor; Metal on macOS; CUDA in a `-Dcuda` build): as many of its layers as the free GPU memory holds, the rest on
 the CPU. **Runner** settings: the context window (8k tokens by default),
 the GPU on or off, and how long the model stays loaded after its last use
 (10 minutes; it loads again in a few seconds).
@@ -158,5 +158,6 @@ cd GhostPen
 oriel doctor --fix   # Zig, Node.js, …
 oriel build          # zig-out/bin/ghostpen and ghostpen-cli
 oriel build -Dcuda   # with an NVIDIA GPU (needs the CUDA toolkit)
+oriel build -Dvulkan # with any GPU through Vulkan (Vulkan headers, glslc)
 oriel package        # deb, rpm, AppImage / setup.exe / .app and .dmg
 ```

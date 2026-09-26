@@ -3,7 +3,7 @@ const oriel = @import("oriel");
 
 /// GhostPen's version: the packages, `ghostpen --version`, Settings → About
 /// and the updater all read it from here.
-const version = "0.2.3";
+const version = "0.2.4";
 
 /// Public half of the release signing key (the private half is the
 /// GHOSTPEN_UPDATE_KEY secret the release workflow signs latest.json with).
@@ -34,6 +34,8 @@ pub fn build(b: *std.Build) void {
         .audio_capture = true,
         // Whisper and the local model on an NVIDIA GPU: `oriel build -Dcuda` (Linux, CUDA toolkit).
         .ggml_cuda = b.option(bool, "cuda", "Run whisper and the local model on an NVIDIA GPU (libggml-cuda.so; needs the CUDA toolkit)") orelse false,
+        // ... or on any GPU through Vulkan: `oriel build -Dvulkan` (Linux; Vulkan headers, glslc).
+        .ggml_vulkan = b.option(bool, "vulkan", "Run whisper and the local model on any GPU through Vulkan (libggml-vulkan.so; needs Vulkan headers and glslc)") orelse false,
         // Wayland: the menu, captions and dictation overlays as layer surfaces
         // (always on top, anchored) where the compositor supports them.
         .layer_shell = target.result.os.tag == .linux and
