@@ -72,6 +72,12 @@ jobs:
           oriel setup webview2 --yes
       - name: Package (setup.exe)
         run: oriel package
+      # What the in-app updater installs on Windows: the exe itself.
+      - name: Updater payload
+        shell: pwsh
+        run: |
+          oriel build
+          Copy-Item zig-out/bin/ghostpen.exe zig-out/package/ghostpen-x86_64-windows.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -97,8 +103,13 @@ jobs:
       # secrets and pass -Dmacos-sign-identity / -Dmacos-notarize-profile.
       - name: Package (.app, .dmg)
         run: oriel package
+      # The .app zipped for people, and tarred for the in-app updater (format app.tar.gz).
       - name: Zip the .app
-        run: cd zig-out/package && ditto -c -k --keepParent GhostPen.app GhostPen-macos.app.zip && rm -rf GhostPen.app GhostPen.entitlements
+        run: |
+          cd zig-out/package
+          ditto -c -k --keepParent GhostPen.app GhostPen-macos.app.zip
+          tar -czf GhostPen-aarch64-macos.app.tar.gz GhostPen.app
+          rm -rf GhostPen.app GhostPen.entitlements
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -107,13 +118,50 @@ jobs:
   release:
     needs: [linux, windows, macos]
     runs-on: ubuntu-latest
+    # `zig build sign-update` configures the app's build: GTK/WebKit pkg-config data.
+    container: archlinux:latest
     permissions:
       contents: write
     steps:
+      - name: System packages
+        run: pacman -Syu --noconfirm --needed $ARCH_PACKAGES
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # One signed latest.json for the in-app updater (Settings → About &
+      # updates): an entry per platform, each signed with the release key.
+      - name: Sign the update manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          UPDATE_KEY: ${{ secrets.GHOSTPEN_UPDATE_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$UPDATE_KEY" ]; then
+            echo "::warning::GHOSTPEN_UPDATE_KEY is not set: no latest.json (in-app updates won't see this release)."
+            exit 0
+          fi
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s' "$UPDATE_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          V="${TAG#v}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG"
+          sign() { # <asset> <target> <format>
+            zig build sign-update -- "dist/$1" --app-id dev.ghostpen.Oriel --version "$V" \
+              --target "$2" --url "$BASE/$1" --key "$KEY_FILE" --format "$3" --out "dist/update-$2.json"
+          }
+          sign "ghostpen-$V-x86_64.AppImage" x86_64-linux raw
+          sign ghostpen-x86_64-windows.exe x86_64-windows raw
+          sign GhostPen-aarch64-macos.app.tar.gz aarch64-macos app.tar.gz
+          zig build combine-manifests -- dist/update-*.json \
+            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out dist/latest.json
+          rm -f dist/update-*.json
+          cat dist/latest.json
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - name: Publish the release

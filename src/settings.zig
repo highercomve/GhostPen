@@ -74,6 +74,9 @@ pub const Settings = struct {
     captions: Captions = .{},
     dictation: Dictation = .{},
     localLlm: LocalLlm = .{},
+    /// Check for updates in the background, and install them where
+    /// GhostPen can (Settings → About & updates).
+    autoUpdate: bool = true,
 
     /// The active profile, or the first one, or the built-in default.
     pub fn activeProfile(self: Settings) Profile {

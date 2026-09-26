@@ -56,6 +56,8 @@ export interface Settings {
   captions: CaptionsSettings;
   dictation: DictationSettings;
   localLlm: LocalLlmSettings;
+  /** Check for updates in the background and install them where possible. */
+  autoUpdate: boolean;
 }
 
 /** The built-in runner ("Built-in" profiles). */
@@ -304,3 +306,35 @@ export const formatBytes = (n: number) =>
 
 /** The paste shortcut as the user types it: ⌘V on macOS, Ctrl+V elsewhere. */
 export const PASTE_KEYS = /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent) ? "⌘V" : "Ctrl+V";
+
+// ---- about & updates ------------------------------------------------------------------
+
+export interface AppInfo {
+  version: string;
+  /** windows | appimage | macos_app | package | source */
+  install_kind: string;
+  /** GhostPen can replace itself (else: package manager or a new download). */
+  can_install: boolean;
+  releases_url: string;
+  /** An update is installed and applies on restart. */
+  installed_version: string | null;
+}
+
+export interface UpdateCheck {
+  available: boolean;
+  version: string | null;
+  can_install: boolean;
+  installed: boolean;
+  releases_url: string;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
+export const appInfo = () => invoke<AppInfo>("app_info");
+export const updateCheck = () => invoke<UpdateCheck>("update_check");
+/** Download and install; progress arrives as `ghostpen://update-progress`. */
+export const updateInstall = () => invoke<void>("update_install");
+export const updateRestart = () => invoke<void>("update_restart");

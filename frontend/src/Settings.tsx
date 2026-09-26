@@ -29,6 +29,7 @@ import {
   LlmStatus,
 } from "./api";
 import LocalModels, { DEFAULT_LOCAL } from "./LocalModels";
+import AboutUpdates from "./AboutUpdates";
 
 function newProfile(): Profile {
   return {
@@ -621,6 +622,8 @@ export default function Settings() {
           Proofread with the AI profile before copying <span className="muted">(off = raw transcript)</span>
         </label>
       </section>
+
+      <AboutUpdates autoUpdate={settings.autoUpdate ?? true} onAutoUpdate={(on) => update({ autoUpdate: on })} />
 
       <div className="footer">
         {saveError && <span className="save-error">⚠ {saveError}</span>}

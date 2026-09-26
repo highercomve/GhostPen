@@ -19,6 +19,7 @@ const captions = @import("captions.zig");
 const dictation = @import("dictation.zig");
 const local_llm = @import("local_llm.zig");
 const llm_models = @import("llm_models.zig");
+const updates = @import("updates.zig");
 
 const App = oriel.App;
 
@@ -148,6 +149,8 @@ pub const Events = struct {
     @"ghostpen://dictation-show": struct {},
     /// Local model downloads (to the Settings window).
     @"ghostpen://llm-download": llm_models.Progress,
+    /// Update download progress (Settings).
+    @"ghostpen://update-progress": updates.Progress,
 };
 
 // ---- built-in models (GhostPen runs them) -------------------------------------------------------
@@ -339,7 +342,7 @@ pub const Commands = struct {
         "process_text",            "process_text_stream", "fetch_models",          "captions_start",
         "captions_download_model", "dictation_start",     "captions_list_devices", "dictation_list_devices",
         "llm_models_status",       "llm_download_model",  "llm_delete_model",      "llm_unload",
-        "menu_dismissed",
+        "menu_dismissed",          "update_check",        "update_install",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -579,6 +582,12 @@ pub const Commands = struct {
         local_llm.unload(io);
     }
 
+    // Updates live in updates.zig.
+    pub const app_info = updates.Commands.app_info;
+    pub const update_check = updates.Commands.update_check;
+    pub const update_install = updates.Commands.update_install;
+    pub const update_restart = updates.Commands.update_restart;
+
     pub fn open_playground(_: std.mem.Allocator) void {
         showWindow("playground", false);
     }
@@ -752,6 +761,7 @@ fn setup() !void {
     dictation.init();
     // GHOSTPEN_STT_SERVER=1: whisper for other local tools (stt_server.zig).
     @import("stt_server.zig").maybeStart(io, environ_map);
+    updates.init(environ_map);
     handleArgs(launch_args);
 }
 
@@ -785,7 +795,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         }
         if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
-            std.debug.print("ghostpen 0.2.2\n", .{});
+            std.debug.print("ghostpen {s}\n", .{@import("ghostpen_build").version});
             return 0;
         }
     }

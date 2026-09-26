@@ -913,3 +913,12 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .llm-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-elev); overflow: hidden; }
 .llm-bar > div { height: 100%; background: var(--accent); transition: width 0.2s; }
 .llm-message { color: var(--danger); }
+
+/* Settings → About & updates */
+.about-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.about-row > div { display: flex; flex-direction: column; gap: 2px; }
+.about-kind { max-width: 46ch; }
+.update-box {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  margin: 12px 0; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-soft);
+}

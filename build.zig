@@ -1,6 +1,14 @@
 const std = @import("std");
 const oriel = @import("oriel");
 
+/// GhostPen's version: the packages, `ghostpen --version`, Settings → About
+/// and the updater all read it from here.
+const version = "0.2.3";
+
+/// Public half of the release signing key (the private half is the
+/// GHOSTPEN_UPDATE_KEY secret the release workflow signs latest.json with).
+const update_public_key = "1DqVHiw6bT4PjHafhfXcXS9jyw+XOPNwTllXlfHLtFQ=";
+
 pub fn build(b: *std.Build) void {
     // macOS: runs on macOS 13+ and any Mac CPU (Oriel's default), for the
     // CLI and zigimg too, not only the app.
@@ -32,7 +40,8 @@ pub fn build(b: *std.Build) void {
             (b.option(bool, "layer_shell", "Wayland overlays via gtk4-layer-shell (default on)") orelse true),
         .menu = false,
         .dialog = false,
-        .updater = false,
+        // Updates (Settings → About & updates; src/updates.zig).
+        .updater = true,
         .sql = false,
         .fs_watch = false,
         .media_server = false,
@@ -47,6 +56,10 @@ pub fn build(b: *std.Build) void {
     // zig build package  installers: deb/rpm/AppImage (Linux), setup.exe (Windows), .app/.dmg (macOS)
     // PNG decode/resize/encode for clipboard images (OCR, previews).
     const zigimg = b.dependency("zigimg", .{ .target = target, .optimize = optimize }).module("zigimg");
+    // `@import("ghostpen_build").version`, for the app and the CLI.
+    const build_info = b.addOptions();
+    build_info.addOption([]const u8, "version", version);
+    const build_info_mod = build_info.createModule();
 
     // ghostpen-cli: an action from the terminal (no GUI, no GTK).
     const cli = b.addExecutable(.{
@@ -61,14 +74,18 @@ pub fn build(b: *std.Build) void {
         .name = "ghostpen",
         .root_source_file = b.path("src/main.zig"),
         .icon = b.path("icon.png"), // High-resolution PNG (1024x1024 recommended)
-        .imports = &.{.{ .name = "zigimg", .module = zigimg }},
+        .imports = &.{
+            .{ .name = "zigimg", .module = zigimg },
+            .{ .name = "ghostpen_build", .module = build_info_mod },
+        },
+        .update_public_key = update_public_key,
         .frontend = .{ .dir = "frontend" },
         .package = .{
             .id = "dev.ghostpen.Oriel",
             .name = "GhostPen",
             // .publisher = "Your Name <you@example.com>", // default: from the app id
             .summary = "AI text editing anywhere on your desktop",
-            .version = "0.2.2",
+            .version = version,
             // The CLI ships in every package, next to the app (and in /usr/bin on Linux).
             .contents = .{ .executables = &.{cli} },
             // The Rust/Tauri GhostPen's packages were named ghost-pen (and

@@ -146,6 +146,18 @@ binds `GHOSTPEN_STT_BIND` (default `0.0.0.0:8771`), serves Settings → Live
 Captions' model or `GHOSTPEN_STT_MODEL`, and shares it with captions and
 dictation (one copy in memory). Needs `ffmpeg`.
 
+## Updates
+
+Settings → About & updates shows the version, checks for a new release and,
+with "Update automatically" on (the default), checks a minute after start
+and every 12 hours. The Windows installer, the AppImage and the macOS app
+update themselves (the new version starts on the next launch, or with
+"Restart now"); deb/rpm installs and source builds only say a new version
+exists. Each release publishes a `latest.json` signed with Ed25519 (the
+`GHOSTPEN_UPDATE_KEY` secret); GhostPen installs only what matches the public
+key in `build.zig`. `GHOSTPEN_UPDATE_MANIFEST=<https url>` checks another
+manifest, e.g. to try a release before publishing it.
+
 ## Permissions
 
 Declared with `oriel permission add` (see `build.zig`): accessibility
