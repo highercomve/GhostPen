@@ -17,6 +17,12 @@ The React frontend is GhostPen's own; the commands, events and settings keep
 the Tauri version's names and JSON shapes. On first run the Tauri app's
 settings are imported, and its downloaded whisper models are reused.
 
+![The menu, on the Built-in model](docs/screenshots/menu.png)
+
+| Playground | Settings → Built-in models |
+| --- | --- |
+| ![Playground](docs/screenshots/playground.png) | ![Built-in models](docs/screenshots/settings-builtin-models.png) |
+
 ## Build and run
 
 ```sh
@@ -80,6 +86,51 @@ lists them). Image text extraction still needs a vision endpoint.
 
 Built-in profiles are new to this port: the Tauri app, if it reads the same
 settings, sees them as endpoints with no URL.
+
+## Compared with the Rust (Tauri) GhostPen
+
+The same app on both stacks: GhostPen's React frontend, the same commands,
+settings and prompts. Measured on one Linux machine (Ryzen 7 7800X3D, 16
+threads; Arch Linux, Hyprland), Zig 0.16.0 and Rust 1.98.1, both built for
+release with whisper on the GPU (CUDA).
+
+![The menu in both versions, on Wayland](docs/screenshots/menu-rust-vs-oriel.png)
+
+On this Wayland desktop the Rust version runs in manual mode (no synthetic
+Ctrl+C, so the menu asks you to copy first; in this test it didn't pick up a
+manual copy either, and its Playground stopped responding). The Oriel
+version copies the selection and pastes the result itself.
+
+| | Rust / Tauri 2 | Zig / Oriel |
+| --- | --- | --- |
+| Code (app + frontend, generated files excluded) | 6,553 lines (3,737 Rust, 1,926 TS, 890 CSS) | 6,982 lines (3,910 Zig, 2,269 TS, 803 CSS), with Built-in models |
+| Dependencies | 627 crates (Cargo.lock) | 2 packages (Oriel, zigimg); Oriel itself has 9 |
+| Clean release build ¹ | 229 s (app only; the CLI is a separate build) | 122 s (app, CLI and .deb) |
+| Rebuild, nothing changed ² | 26 s | 0.7 s |
+| Rebuild after a one-line edit | 25 s | 57 s ³ |
+| Build cache | 2.3 GB `target/` + 1.5 GB `~/.cargo/registry` | 0.9 GB (`.zig-cache` 809 MB + global 93 MB) + 281 MB sources (`zig-pkg/`) |
+| App binary, stripped | 51.7 MB (whisper and its CUDA kernels inside) | 16.8 MB (whisper **and** llama.cpp) + 40.1 MB `libggml-cuda.so` |
+| CLI binary, stripped | 8.2 MB | 1.6 MB |
+| Idle memory (PSS, app + WebKit processes) ⁴ | 684 MB (app 270 MB) | 780 MB (app 308 MB) |
+| Toolkit (Linux) | GTK 3, WebKitGTK 4.1 | GTK 4, WebKitGTK 6.0 |
+| Synthetic copy/paste on Wayland | no (manual mode) | yes (virtual keyboard) |
+| Runs AI models itself | no (an endpoint: Ollama, LM Studio, …) | yes: [Built-in models](#built-in-models), or an endpoint |
+
+¹ Empty build caches, dependency sources already downloaded (the Cargo
+registry; Zig's `zig-pkg/`). Both include the frontend build and whisper.cpp
+with its CUDA kernels; the Oriel build also compiles llama.cpp.
+² Rust: `touch` on `main.rs`/`lib.rs` recompiles the crate; Zig caches by
+content, so an untouched file costs nothing.
+³ Zig compiles the whole app as one unit (and the build also refreshes the
+frontend's TypeScript bindings through a debug build), so an edit costs the
+full app compile; Rust recompiles only the app crate.
+⁴ 20 s after start, idle, on a private X display; both have the CUDA
+runtime loaded for whisper.
+
+Packages: the Rust `.deb` is 31.8 MB (app and CLI). The Oriel `.deb` is
+19.9 MB, but it doesn't yet include `libggml-cuda.so` (GPU acceleration) or
+`ghostpen-cli`, and ships the binary unstripped (72 MB); that's an Oriel
+packaging gap being fixed, so package sizes aren't compared yet.
 
 ## Permissions
 
