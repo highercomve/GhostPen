@@ -24,7 +24,7 @@ AppImage, the Windows installer and the macOS app update themselves
 | --- | --- | --- |
 | Linux | AppImage, .deb, .rpm | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
 | Linux, `-cuda` | AppImage, .deb, .rpm | NVIDIA GPUs through **CUDA** (RTX 20xx–50xx; needs the CUDA 13 runtime), else Vulkan |
-| Windows 10/11 | setup.exe (per user) | the CPU |
+| Windows 10/11 | setup.exe (per user) | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
 | macOS 13+ | .dmg (Apple Silicon) | the GPU through **Metal** |
 
 The React frontend is GhostPen's own; the commands, events and settings keep
@@ -44,7 +44,7 @@ oriel doctor --fix      # toolchain: Zig, Node.js, ...
 oriel dev               # run with hot reload
 oriel build             # zig-out/bin/ghostpen (+ ghostpen-cli)
 oriel build -Dcuda      # whisper on an NVIDIA GPU (CUDA toolkit)
-oriel build -Dvulkan    # ... or on any GPU through Vulkan (Linux releases are built this way)
+oriel build -Dvulkan    # ... or on any GPU through Vulkan (Linux and Windows releases; Windows needs the Vulkan SDK)
 oriel package           # deb, rpm, AppImage / setup.exe / .app + .dmg
 ```
 
@@ -95,7 +95,7 @@ nothing sent over the network. In Settings → Built-in models:
 
 The model runs in a helper process (`ghostpen --llm-helper`, started
 and stopped by GhostPen), so a crash or running out of memory can't take
-the app down. The Linux releases run it on the GPU through Vulkan (any
+the app down. The Linux and Windows releases run it on the GPU through Vulkan (any
 vendor; the CPU without a Vulkan driver), and the `-cuda` releases through
 CUDA on NVIDIA GPUs when the CUDA 13 runtime is installed (Vulkan
 otherwise); build with `-Dcuda` for CUDA; macOS uses Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`
