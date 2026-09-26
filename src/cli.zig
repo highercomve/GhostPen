@@ -245,7 +245,23 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings.Profile, diag: *ai.D
 fn readStdin(io: std.Io, arena: std.mem.Allocator) ![]u8 {
     var buf: [4096]u8 = undefined;
     var r = std.Io.File.stdin().readerStreaming(io, &buf);
-    return r.interface.allocRemaining(arena, .limited(4 * 1024 * 1024));
+    return stripBom(try r.interface.allocRemaining(arena, .limited(4 * 1024 * 1024)));
+}
+
+/// Without a leading UTF-8 byte-order mark: Windows PowerShell pipes one to
+/// native programs, and it would reach the model as part of the text.
+fn stripBom(text: []u8) []u8 {
+    const bom = "\xEF\xBB\xBF";
+    return if (std.mem.startsWith(u8, text, bom)) text[bom.len..] else text;
+}
+
+test stripBom {
+    var with = "\xEF\xBB\xBFteh text".*;
+    try std.testing.expectEqualStrings("teh text", stripBom(&with));
+    var without = "teh text".*;
+    try std.testing.expectEqualStrings("teh text", stripBom(&without));
+    var empty = "".*;
+    try std.testing.expectEqualStrings("", stripBom(&empty));
 }
 
 fn report(w: *std.Io.Writer, e: ai.Error, diag: ai.Diag) u8 {
