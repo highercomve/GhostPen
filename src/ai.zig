@@ -341,12 +341,12 @@ fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, []const u8) void) typ
         raw: std.ArrayList(u8) = .empty,
         done: bool = false,
         oom: bool = false,
-        buf: [4096]u8 = undefined,
-        /// Set up by `init` (it points into `buf`).
+        /// Unbuffered: every write reaches `drain` at once, so a delta is
+        /// emitted as its line arrives rather than when 4 KiB have piled up.
         writer: std.Io.Writer = undefined,
 
         fn init(self: *Self) void {
-            self.writer = .{ .buffer = &self.buf, .vtable = &.{ .drain = drain, .flush = flush } };
+            self.writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain, .flush = flush } };
         }
 
         fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
