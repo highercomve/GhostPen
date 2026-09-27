@@ -268,7 +268,6 @@ fn stop() void {
 pub fn open() void {
     const w = App.getWindow("captions") orelse return;
     w.setClickThrough(false);
-    w.place(.{ .anchor = .bottom, .margin = 64 });
     w.show();
     w.focus();
     App.emit("ghostpen://captions-show", .{});
@@ -362,7 +361,6 @@ pub const Commands = struct {
         App.runOnMain({}, struct {
             fn show(_: void) void {
                 const w = App.getWindow("captions") orelse return;
-                w.place(.{ .anchor = .bottom, .margin = 64 });
                 w.show();
             }
         }.show);

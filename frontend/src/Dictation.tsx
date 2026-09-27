@@ -267,7 +267,7 @@ export default function Dictation() {
 
   return (
     <div className="dictation">
-      <div className={`dict-pill ${phase}`}>
+      <div className={`dict-pill ${phase}`} data-oriel-drag-region>
         <div className="dict-top">
           {/* tabIndex -1 + focus suppression on every button: a focused button would be
               re-activated by a stray Space/Enter, silently starting a recording. Recording

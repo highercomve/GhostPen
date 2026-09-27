@@ -345,7 +345,6 @@ fn end(finalize: bool) void {
 
 fn showOverlay() void {
     const w = App.getWindow("dictation") orelse return;
-    w.place(.{ .anchor = .bottom, .margin = 64 });
     w.show();
     w.focus();
     App.emit("ghostpen://dictation-show", .{});

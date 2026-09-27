@@ -19,11 +19,11 @@ interface Line {
   translated: boolean;
 }
 
-// Show only the CURRENT caption. Keeping the previous one stacked a dimmed line above the
-// current (hard to read), and a content-sized bar that grew/shrinks per caption ghosts on
-// wlroots' transparent webview (it doesn't clear old frames). One line + the fixed-height
-// bar below = stable geometry → every caption repaints the same rectangle, no stacking.
-const MAX_LINES = 1;
+// Recent captions flow together as one paragraph, newest at the bottom, so a sentence
+// split across chunks reads on. The bar keeps a fixed height (wlroots' transparent webview
+// doesn't clear old frames, so a bar that resizes ghosts): it shows as many lines as fit
+// and clips the oldest at the top. Enough captions to fill it at the smallest font size.
+const KEEP_CAPTIONS = 8;
 
 export default function Captions() {
   const [lines, setLines] = useState<Line[]>([]);
@@ -62,7 +62,7 @@ export default function Captions() {
       setError(null);
       setLines((prev) => {
         const next = [...prev, { id: nextId.current++, text, translated }];
-        return next.slice(-MAX_LINES);
+        return next.slice(-KEEP_CAPTIONS);
       });
     });
     const un2 = listen<string>("ghostpen://caption-error", (e) => {
@@ -137,7 +137,8 @@ export default function Captions() {
   const running = status?.running ?? false;
 
   return (
-    <div className={`captions ${ghost ? "ghost" : ""}`}>
+    // Pressed anywhere but a button, the overlay moves (Oriel drag region).
+    <div className={`captions ${ghost ? "ghost" : ""}`} data-oriel-drag-region>
       {!ghost && (
         <div className="cap-bar">
           <span className="cap-brand">GhostPen Captions</span>
@@ -188,7 +189,12 @@ export default function Captions() {
         {/* Idle, error, and caption text all share the ONE fixed-size bar (.cap-lines):
             swapping between differently-sized boxes ghosts on wlroots (see styles.css). */}
         {(!ghost || error || lines.length > 0) && (
-          <div className="cap-lines">
+          // Remounted per caption: the whole bar is repainted, so the text that just scrolled
+          // up can't leave its old pixels behind (the same wlroots no-clear ghosting).
+          <div
+            key={error ? "error" : lines.length ? `c${lines[lines.length - 1].id}` : "idle"}
+            className={`cap-lines ${error || lines.length === 0 ? "centered" : ""}`}
+          >
             {error ? (
               <div className="cap-error">⚠ {error}</div>
             ) : lines.length === 0 ? (
@@ -202,15 +208,14 @@ export default function Captions() {
                       : "Press Start to caption your system audio."}
               </div>
             ) : (
-              lines.map((l, i) => (
-                <div
-                  key={l.id}
-                  className={`cap-line ${i === lines.length - 1 ? "current" : "past"}`}
-                >
-                  {l.text}
-                  {l.translated && <span className="cap-tag">translated</span>}
-                </div>
-              ))
+              <div className="cap-roll">
+                {lines.map((l, i) => (
+                  <span key={l.id} className={`cap-line ${i === lines.length - 1 ? "current" : "past"}`}>
+                    {l.text}
+                    {l.translated && <span className="cap-tag">translated</span>}{" "}
+                  </span>
+                ))}
+              </div>
             )}
           </div>
         )}
