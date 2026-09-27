@@ -631,6 +631,11 @@ export default function Settings() {
             onChange={(e) => updateDictation({ proofread: e.target.checked })} />
           Proofread with the AI profile before copying <span className="muted">(off = raw transcript)</span>
         </label>
+        <label className="checkbox">
+          <input type="checkbox" checked={dictation.paste ?? true}
+            onChange={(e) => updateDictation({ paste: e.target.checked })} />
+          Paste at the cursor when finished <span className="muted">(off = copy only, to review first)</span>
+        </label>
       </section>
 
       <AboutUpdates autoUpdate={settings.autoUpdate ?? true} onAutoUpdate={(on) => update({ autoUpdate: on })} />

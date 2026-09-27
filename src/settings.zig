@@ -59,6 +59,8 @@ pub const Dictation = struct {
     language: []const u8 = "auto",
     proofread: bool = true,
     device: []const u8 = "",
+    /// Paste the text at the cursor when finished (off: copy only, to review first).
+    paste: bool = true,
 };
 
 pub const Settings = struct {

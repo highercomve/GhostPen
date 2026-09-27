@@ -244,6 +244,41 @@ pub fn proofread(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     return ai.complete(io, gpa, arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } }, &diag);
 }
 
+/// Dictation's delivery: `output` on the clipboard, `label`'s window hidden
+/// (focus goes back to the app underneath), pasted there, and the previous
+/// clipboard back after the restore delay. False when synthetic input isn't
+/// available: the text then stays on the clipboard.
+pub fn pasteFromWindow(label: []const u8, output: []const u8, s: Settings) !bool {
+    const prev = readClipboard();
+    oriel.clipboard.writeText(output) catch |err| {
+        prev.deinit();
+        return err;
+    };
+    if (!useSynthetic(s)) {
+        prev.deinit();
+        return false;
+    }
+    const Hide = struct {
+        fn run(l: []const u8) void {
+            if (App.getWindow(l)) |w| w.hide();
+        }
+    };
+    App.runOnMain(label, Hide.run);
+    io.sleep(.fromMilliseconds(150), .awake) catch {};
+    oriel.input.paste() catch |err| {
+        log.warn("dictation: paste failed ({s}); the text is on the clipboard", .{@errorName(err)});
+        prev.deinit();
+        return false;
+    };
+    log.info("dictation: {d} chars pasted; the previous clipboard comes back in {d} ms", .{ output.len, s.restoreDelayMs });
+    const t = std.Thread.spawn(.{}, restoreSnapshot, .{ prev, s.restoreDelayMs }) catch {
+        prev.deinit();
+        return true;
+    };
+    t.detach();
+    return true;
+}
+
 /// The result stays in the menu (with Copy): nothing pasted, the clipboard
 /// untouched, e.g. for text selected in something read-only.
 fn showResult(output: []const u8) ProcessResult {

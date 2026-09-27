@@ -169,6 +169,8 @@ export interface DictationSettings {
   language: string;
   proofread: boolean;
   device: string;
+  /** Paste at the cursor when finished (off: copy only). */
+  paste?: boolean;
 }
 
 export interface DictationStatus {
