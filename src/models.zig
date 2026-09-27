@@ -6,6 +6,7 @@
 const std = @import("std");
 const oriel = @import("oriel");
 const whisper = oriel.whisper;
+const llm_models = @import("llm_models.zig");
 
 const log = std.log.scoped(.models);
 
@@ -38,6 +39,43 @@ fn initLocked(io: std.Io) void {
     log.info("whisper backend: {s}", .{gpu orelse "CPU"});
 }
 
+pub const Entry = struct {
+    id: []const u8,
+    size: u64,
+    sha256: []const u8,
+    /// Relative 1-5 scores for the UI.
+    speed: u8,
+    accuracy: u8,
+    note: []const u8,
+};
+
+/// `ggml-<id>.bin` in ggerganov/whisper.cpp, fastest first. Sizes and
+/// hashes from Hugging Face's API (2026-09).
+pub const catalog = [_]Entry{
+    .{ .id = "tiny", .size = 77691713, .sha256 = "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21", .speed = 5, .accuracy = 1, .note = "fastest, lowest accuracy" },
+    .{ .id = "tiny.en", .size = 77704715, .sha256 = "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f", .speed = 5, .accuracy = 1, .note = "fastest, English only" },
+    .{ .id = "base", .size = 147951465, .sha256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe", .speed = 5, .accuracy = 2, .note = "fast, basic accuracy" },
+    .{ .id = "base.en", .size = 147964211, .sha256 = "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002", .speed = 5, .accuracy = 2, .note = "fast, English only" },
+    .{ .id = "small", .size = 487601967, .sha256 = "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b", .speed = 4, .accuracy = 3, .note = "balanced; the live-caption sweet spot on a GPU" },
+    .{ .id = "small.en", .size = 487614201, .sha256 = "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d", .speed = 4, .accuracy = 3, .note = "balanced, English only" },
+    .{ .id = "medium", .size = 1533763059, .sha256 = "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208", .speed = 2, .accuracy = 4, .note = "accurate, heavy" },
+    .{ .id = "medium.en", .size = 1533774781, .sha256 = "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356", .speed = 2, .accuracy = 4, .note = "accurate, English only" },
+    .{ .id = "large-v3-turbo-q5_0", .size = 574041195, .sha256 = "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2", .speed = 3, .accuracy = 5, .note = "large-model accuracy at small's size; recommended for dictation" },
+    .{ .id = "large-v3-turbo-q8_0", .size = 874188075, .sha256 = "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1", .speed = 3, .accuracy = 5, .note = "large turbo, 8-bit" },
+    .{ .id = "large-v3-turbo", .size = 1624555275, .sha256 = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69", .speed = 3, .accuracy = 5, .note = "large turbo, full precision" },
+    .{ .id = "large-v3-q5_0", .size = 1081140203, .sha256 = "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1", .speed = 1, .accuracy = 5, .note = "large v3, 5-bit; slowest" },
+    .{ .id = "large-v3", .size = 3095033483, .sha256 = "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2", .speed = 1, .accuracy = 5, .note = "large v3, full precision; slowest, heaviest" },
+};
+
+pub fn find(id: []const u8) ?Entry {
+    for (catalog) |e| if (std.mem.eql(u8, e.id, id)) return e;
+    return null;
+}
+
+/// Other apps' model folders (GhostReel's), searched for `ggml-<id>.bin`
+/// and never written. Set once at startup.
+pub var search_dirs: []const []const u8 = &.{};
+
 /// `[A-Za-z0-9._-]` only (the id becomes a file name and a URL path).
 pub fn validId(id: []const u8) bool {
     if (id.len == 0 or id.len > 64) return false;
@@ -62,10 +100,24 @@ pub fn path(gpa: std.mem.Allocator, id: []const u8) ![]u8 {
     return std.fs.path.join(gpa, &.{ d, name });
 }
 
+/// The model's file: ours, else one in another app's folder. Caller frees.
+pub fn resolve(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !?[]u8 {
+    const own = try path(gpa, id);
+    if (std.Io.Dir.cwd().access(io, own, .{})) |_| return own else |_| {}
+    gpa.free(own);
+    var name_buf: [80]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "ggml-{s}.bin", .{id}) catch return null;
+    for (search_dirs) |root| {
+        const p = try std.fs.path.join(gpa, &.{ root, name });
+        if (std.Io.Dir.cwd().access(io, p, .{})) |_| return p else |_| {}
+        gpa.free(p);
+    }
+    return null;
+}
+
 pub fn isDownloaded(io: std.Io, gpa: std.mem.Allocator, id: []const u8) bool {
-    const p = path(gpa, id) catch return false;
-    defer gpa.free(p);
-    std.Io.Dir.cwd().access(io, p, .{}) catch return false;
+    const p = (resolve(io, gpa, id) catch return false) orelse return false;
+    gpa.free(p);
     return true;
 }
 
@@ -73,7 +125,7 @@ pub fn isDownloaded(io: std.Io, gpa: std.mem.Allocator, id: []const u8) bool {
 fn ensureLocked(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !whisper.Context {
     initLocked(io);
     if (loaded) |ctx| if (loaded_name) |n| if (std.mem.eql(u8, n, id)) return ctx;
-    const p = try path(gpa, id);
+    const p = (try resolve(io, gpa, id)) orelse return error.ModelNotFound;
     defer gpa.free(p);
     const pz = try gpa.dupeZ(u8, p);
     defer gpa.free(pz);
@@ -168,57 +220,127 @@ pub fn transcribeSegments(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.All
     return .{ .segments = segments, .language = try arena.dupe(u8, if (detected.len > 0) detected else language) };
 }
 
-/// One download at a time (two would write the same `.part` file).
-var downloading: std.atomic.Value(bool) = .init(false);
+pub const ModelState = struct {
+    id: []const u8,
+    size: u64,
+    speed: u8,
+    accuracy: u8,
+    note: []const u8,
+    /// Where it is ("" = not downloaded).
+    path: []const u8 = "",
+    /// Found in another app's folder (reused; not removable here).
+    external: bool = false,
+    /// Bytes of an interrupted download (resumable).
+    partial: u64 = 0,
+};
 
-/// Download `ggml-<id>.bin` from Hugging Face into the models directory
-/// (to `.part`, renamed when complete). `message` explains a failure.
-pub fn download(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id: []const u8, message: *[]const u8) !void {
-    if (!validId(id)) {
-        message.* = "Invalid model name.";
-        return error.DownloadFailed;
+/// A `ggml-<id>.bin` on disk that isn't in the catalog.
+pub const LocalFile = struct { id: []const u8, path: []const u8, size: u64, external: bool };
+
+pub const Status = struct {
+    models: []const ModelState,
+    others: []const LocalFile,
+};
+
+pub fn status(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator) !Status {
+    const own = try dir(arena);
+    var list: std.ArrayList(ModelState) = .empty;
+    for (catalog) |e| {
+        var st: ModelState = .{ .id = e.id, .size = e.size, .speed = e.speed, .accuracy = e.accuracy, .note = e.note };
+        if (try resolve(io, gpa, e.id)) |p| {
+            defer gpa.free(p);
+            st.path = try arena.dupe(u8, p);
+            st.external = !std.mem.startsWith(u8, p, own);
+        } else {
+            const part = try std.fmt.allocPrint(arena, "{s}{c}ggml-{s}.bin.part", .{ own, std.fs.path.sep, e.id });
+            if (std.Io.Dir.cwd().statFile(io, part, .{})) |f| st.partial = f.size else |_| {}
+        }
+        try list.append(arena, st);
     }
-    if (downloading.swap(true, .acq_rel)) {
-        message.* = "A model download is already running.";
-        return error.DownloadFailed;
+    var others: std.ArrayList(LocalFile) = .empty;
+    try scan(io, arena, own, false, &others);
+    for (search_dirs) |root| try scan(io, arena, root, true, &others);
+    return .{ .models = list.items, .others = others.items };
+}
+
+/// Whisper models in `root` that aren't catalog ones (voice-activity models
+/// and other small helpers are left out).
+fn scan(io: std.Io, arena: std.mem.Allocator, root: []const u8, external: bool, out: *std.ArrayList(LocalFile)) !void {
+    var d = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return;
+    defer d.close(io);
+    var it = d.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.mem.startsWith(u8, entry.name, "ggml-") or !std.mem.endsWith(u8, entry.name, ".bin")) continue;
+        const id = entry.name["ggml-".len .. entry.name.len - ".bin".len];
+        if (!validId(id) or find(id) != null) continue;
+        // Ours wins over another app's copy.
+        var seen = false;
+        for (out.items) |o| seen = seen or std.mem.eql(u8, o.id, id);
+        if (seen) continue;
+        const st = d.statFile(io, entry.name, .{}) catch continue;
+        if (st.size < 20 * 1024 * 1024) continue;
+        try out.append(arena, .{
+            .id = try arena.dupe(u8, id),
+            .path = try std.fs.path.join(arena, &.{ root, entry.name }),
+            .size = st.size,
+            .external = external,
+        });
     }
-    defer downloading.store(false, .release);
+}
 
-    const final = try path(gpa, id);
-    defer gpa.free(final);
-    const d = try dir(gpa);
-    defer gpa.free(d);
-    try std.Io.Dir.cwd().createDirPath(io, d);
-    const part = try std.fmt.allocPrint(gpa, "{s}.part", .{final});
-    defer gpa.free(part);
-    const url = try std.fmt.allocPrint(arena, "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{s}.bin", .{id});
+pub const Progress = llm_models.Progress;
 
-    fetchTo(io, gpa, arena, url, part, id, message) catch |err| {
-        // Closed by fetchTo already (Windows can't delete an open file).
-        std.Io.Dir.cwd().deleteFile(io, part) catch {};
-        return err;
-    };
-    try std.Io.Dir.cwd().rename(part, std.Io.Dir.cwd(), final, io);
+/// Download catalog model `id` into our folder: resumable, checked against
+/// its SHA-256, one download at a time (shared with the built-in models,
+/// whose Pause also stops this one). `on_progress(ctx, p)` as it goes.
+pub fn download(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    id: []const u8,
+    ctx: anytype,
+    comptime on_progress: fn (@TypeOf(ctx), Progress) void,
+    status_out: *std.http.Status,
+) !void {
+    const e = find(id) orelse return error.UnknownModel;
+    const own = try dir(arena);
+    const name = try std.fmt.allocPrint(arena, "ggml-{s}.bin", .{e.id});
+    const url = try std.fmt.allocPrint(arena, "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{s}", .{name});
+    _ = try llm_models.downloadFile(io, gpa, arena, own, e.id, name, url, e.size, e.sha256, ctx, on_progress, status_out);
     log.info("downloaded whisper model {s}", .{id});
 }
 
-/// GET `url` into the file `dest`; the file is closed on return.
-fn fetchTo(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, url: []const u8, dest: []const u8, id: []const u8, message: *[]const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(io, dest, .{});
-    defer file.close(io);
-    var buf: [64 * 1024]u8 = undefined;
-    var fw = file.writer(io, &buf);
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
-    defer client.deinit();
-    const res = client.fetch(.{ .location = .{ .url = url }, .response_writer = &fw.interface }) catch |err| {
-        message.* = try std.fmt.allocPrint(arena, "Download failed ({s}).", .{@errorName(err)});
-        return error.DownloadFailed;
-    };
-    if (res.status != .ok) {
-        message.* = try std.fmt.allocPrint(arena, "Download failed: HTTP {d} for model \"{s}\".", .{ @intFromEnum(res.status), id });
-        return error.DownloadFailed;
+pub fn cancelDownload() void {
+    llm_models.cancelDownload();
+}
+
+pub fn isDownloading() bool {
+    return llm_models.isDownloading();
+}
+
+/// Delete model `id` (and a partial download) from our folder; unloaded
+/// first when it's the resident one. Another app's copy is never touched.
+pub fn remove(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !void {
+    if (isDownloading()) return error.Busy;
+    const p = try path(gpa, id);
+    defer gpa.free(p);
+    {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        const resident = if (loaded_name) |n| std.mem.eql(u8, n, id) else false;
+        if (resident) {
+            if (loaded) |ctx| ctx.deinit();
+            gpa.free(loaded_name.?);
+            loaded = null;
+            loaded_name = null;
+        }
     }
-    try fw.interface.flush();
+    std.Io.Dir.cwd().deleteFile(io, p) catch |err| if (err != error.FileNotFound) return err;
+    const part = try std.fmt.allocPrint(gpa, "{s}.part", .{p});
+    defer gpa.free(part);
+    std.Io.Dir.cwd().deleteFile(io, part) catch {};
+    log.info("deleted whisper model {s}", .{id});
 }
 
 /// Test hook: when set (from $GHOSTPEN_TEST_AUDIO, a 16 kHz mono PCM16 WAV),
@@ -323,4 +445,12 @@ test validId {
 test level {
     try std.testing.expectEqual(@as(f32, 0), level(&.{}));
     try std.testing.expect(level(&([_]f32{0.5} ** 16)) > 0.9);
+}
+
+test "whisper catalog" {
+    for (catalog) |e| {
+        try std.testing.expectEqual(@as(usize, 64), e.sha256.len);
+        try std.testing.expect(validId(e.id));
+        try std.testing.expect(e.size > 50 * 1024 * 1024);
+    }
 }

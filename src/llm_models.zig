@@ -318,6 +318,29 @@ pub fn download(
     return model_path;
 }
 
+/// One file that isn't a catalog model (a whisper model) into `own/name`:
+/// the same one-download-at-a-time rule, Pause, resume and checksum.
+pub fn downloadFile(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    own: []const u8,
+    id: []const u8,
+    name: []const u8,
+    target_url: []const u8,
+    size: u64,
+    sha256: []const u8,
+    ctx: anytype,
+    comptime on_progress: fn (@TypeOf(ctx), Progress) void,
+    status_out: *std.http.Status,
+) ![]const u8 {
+    if (downloading.swap(true, .acq_rel)) return error.Busy;
+    defer downloading.store(false, .release);
+    cancel_flag.store(false, .release);
+    try std.Io.Dir.cwd().createDirPath(io, own);
+    return fetchFile(io, gpa, arena, .{ .own = own, .others = &.{} }, id, name, target_url, size, sha256, "", ctx, on_progress, status_out);
+}
+
 /// One file into `d.own/name`: resumed, verified, renamed; its path.
 fn fetchFile(
     io: std.Io,

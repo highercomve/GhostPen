@@ -430,7 +430,8 @@ pub const Commands = struct {
         "process_text",            "process_text_stream", "fetch_models",          "captions_start",
         "captions_download_model", "dictation_start",     "captions_list_devices", "dictation_list_devices",
         "llm_models_status",       "llm_download_model",  "llm_delete_model",      "llm_unload",
-        "menu_dismissed",          "update_check",        "update_install",
+        "menu_dismissed",          "update_check",        "update_install",        "whisper_models_status",
+        "whisper_download_model",  "whisper_delete_model",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -697,6 +698,10 @@ pub const Commands = struct {
     pub const captions_set_click_through = captions.Commands.captions_set_click_through;
     pub const captions_set_translate = captions.Commands.captions_set_translate;
     pub const captions_download_model = captions.Commands.captions_download_model;
+    pub const whisper_models_status = captions.Commands.whisper_models_status;
+    pub const whisper_download_model = captions.Commands.whisper_download_model;
+    pub const whisper_cancel_download = captions.Commands.whisper_cancel_download;
+    pub const whisper_delete_model = captions.Commands.whisper_delete_model;
     pub const dictation_list_devices = dictation.Commands.dictation_list_devices;
     pub const dictation_status = dictation.Commands.dictation_status;
     pub const dictation_start = dictation.Commands.dictation_start;
@@ -875,6 +880,10 @@ pub fn main(init: std.process.Init) !u8 {
     environ_map = init.environ_map;
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
     ai.local_resolver = &resolveLocal;
+    // Whisper models other apps (GhostReel) downloaded are reused.
+    if (llmDirs(init.arena.allocator())) |d| {
+        @import("models.zig").search_dirs = d.others;
+    } else |_| {}
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             std.debug.print(

@@ -204,31 +204,36 @@ export const dictationSetLanguage = (language: string) =>
 export const dictationSetProofread = (enabled: boolean) =>
   invoke<void>("dictation_set_proofread", { enabled });
 
-// Whisper models offered in the UI (ggml-{id}.bin on Hugging Face). Ordered fastest →
-// most accurate. `.en` variants are English-only but a bit faster/more accurate for English.
-// `speed`/`accuracy` are relative 1–5 (5 = best) for the little meter in the UI.
-export interface WhisperModelInfo {
+// ---- speech (whisper) models: Settings → Speech models ---------------------------------
+
+export interface WhisperModelState {
   id: string;
-  size: string;
+  size: number;
   speed: number;
   accuracy: number;
   note: string;
+  /** Where it is ("" = not downloaded). */
+  path: string;
+  /** Found in another app's folder (reused; not removable here). */
+  external: boolean;
+  /** Bytes of an interrupted download (resumable). */
+  partial: number;
 }
-export const WHISPER_MODELS: WhisperModelInfo[] = [
-  { id: "tiny",      size: "~75 MB",  speed: 5, accuracy: 1, note: "fastest, lowest accuracy" },
-  { id: "tiny.en",   size: "~75 MB",  speed: 5, accuracy: 2, note: "fastest, English-only" },
-  { id: "base",      size: "~142 MB", speed: 4, accuracy: 2, note: "fast, basic accuracy" },
-  { id: "base.en",   size: "~142 MB", speed: 4, accuracy: 3, note: "fast, English-only" },
-  { id: "small",     size: "~466 MB", speed: 3, accuracy: 4, note: "balanced — sweet spot on a GPU" },
-  { id: "small.en",  size: "~466 MB", speed: 3, accuracy: 4, note: "balanced, English-only" },
-  { id: "medium",    size: "~1.5 GB", speed: 2, accuracy: 5, note: "accurate, multilingual" },
-  { id: "medium.en", size: "~1.5 GB", speed: 2, accuracy: 5, note: "accurate, English-only" },
-  { id: "large-v3-turbo-q5_0", size: "~574 MB", speed: 3, accuracy: 5, note: "large turbo, 5-bit — best size for accuracy" },
-  { id: "large-v3-turbo-q8_0", size: "~874 MB", speed: 3, accuracy: 5, note: "large turbo, 8-bit" },
-  { id: "large-v3-turbo",      size: "~1.6 GB", speed: 3, accuracy: 5, note: "large turbo, full precision" },
-  { id: "large-v3-q5_0",       size: "~1.1 GB", speed: 1, accuracy: 5, note: "large v3, 5-bit — slowest" },
-  { id: "large-v3",            size: "~3.1 GB", speed: 1, accuracy: 5, note: "large v3, full precision — slowest, heaviest" },
-];
+export interface WhisperLocalFile {
+  id: string;
+  path: string;
+  size: number;
+  external: boolean;
+}
+export interface WhisperStatus {
+  status: { models: WhisperModelState[]; others: WhisperLocalFile[] };
+  downloading: boolean;
+}
+export const whisperModelsStatus = () => invoke<WhisperStatus>("whisper_models_status");
+/** Resolves when done; progress arrives as `ghostpen://whisper-download` (an LlmProgress). */
+export const whisperDownloadModel = (id: string) => invoke<void>("whisper_download_model", { id });
+export const whisperCancelDownload = () => invoke<void>("whisper_cancel_download");
+export const whisperDeleteModel = (id: string) => invoke<void>("whisper_delete_model", { id });
 
 /** Compact bar meter like "▰▰▰▱▱" for a 1–5 score. */
 export const scoreMeter = (n: number) => "▰".repeat(n) + "▱".repeat(5 - n);
