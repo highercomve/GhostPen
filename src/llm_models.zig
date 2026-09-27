@@ -74,6 +74,9 @@ pub fn projector(io: std.Io, arena: std.mem.Allocator, d: Dirs, model_path: []co
     const named = std.fs.path.join(arena, &.{ dir_path, projectorName(arena, std.fs.path.basename(model_path)) catch return null }) catch return null;
     if (std.Io.Dir.cwd().access(io, named, .{})) |_| return named else |_| {}
     if (std.mem.eql(u8, std.mem.trimEnd(u8, dir_path, "/\\"), std.mem.trimEnd(u8, d.own, "/\\"))) return null;
+    // A model in another app's folder: its projector downloaded into ours.
+    const ours = std.fs.path.join(arena, &.{ d.own, projectorName(arena, std.fs.path.basename(model_path)) catch return null }) catch return null;
+    if (std.Io.Dir.cwd().access(io, ours, .{})) |_| return ours else |_| {}
     var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return null;
     defer dir.close(io);
     var found: ?[]const u8 = null;

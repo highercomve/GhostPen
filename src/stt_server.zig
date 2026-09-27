@@ -121,6 +121,10 @@ fn handleConnection(io: std.Io, stream: std.Io.net.Stream) void {
     }
 }
 
+/// Transcriptions running or waiting for the model.
+var active: std.atomic.Value(u32) = .init(0);
+const max_active = 2;
+
 const Reply = struct { status: std.http.Status = .ok, body: []const u8, content_type: []const u8 = "application/json" };
 
 fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request) !void {
@@ -129,11 +133,24 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
         .{ .body = "ok", .content_type = "text/plain; charset=utf-8" }
     else if (std.mem.eql(u8, path, "/v1/models") and request.head.method == .GET)
         .{ .body = try modelsBody(arena) }
-    else if (std.mem.eql(u8, path, "/v1/audio/transcriptions") and request.head.method == .POST)
-        transcriptionReply(io, arena, request) catch |err| switch (err) {
+    else if (std.mem.eql(u8, path, "/v1/audio/transcriptions") and request.head.method == .POST) blk: {
+        // Each request can hold hundreds of MB (the upload and its PCM) while
+        // it waits for the one whisper model: a few at a time.
+        if (active.fetchAdd(1, .acq_rel) >= max_active) {
+            _ = active.fetchSub(1, .acq_rel);
+            try request.respond("busy: too many transcriptions at once, retry later", .{
+                .status = .service_unavailable,
+                .keep_alive = false,
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }},
+            });
+            return error.Busy; // the unread body: close the connection
+        }
+        defer _ = active.fetchSub(1, .acq_rel);
+        break :blk transcriptionReply(io, arena, request) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => .{ .status = .internal_server_error, .body = @errorName(err), .content_type = "text/plain; charset=utf-8" },
-        }
+        };
+    }
     else
         .{ .status = .not_found, .body = "not found", .content_type = "text/plain; charset=utf-8" };
     try request.respond(reply.body, .{
@@ -292,17 +309,24 @@ fn decodeToPcm16k(io: std.Io, arena: std.mem.Allocator, bytes: []const u8) ![]co
     };
     var buf: [64 * 1024]u8 = undefined;
     var r = child.stdout.?.readerStreaming(io, &buf);
-    const raw = r.interface.allocRemaining(arena, .limited(1 << 31)) catch |err| {
-        feeder.join();
+    // f32 samples straight into a 4-aligned buffer (no second copy). At most
+    // 2 GiB (~9 h of audio).
+    var pcm: std.array_list.Aligned(u8, .@"4") = .empty;
+    r.interface.appendRemainingAligned(arena, .@"4", &pcm, .limited(1 << 31)) catch |err| {
+        // Kill first: ffmpeg blocked on a full stdout would keep the feeder
+        // blocked on its stdin, and the join would never return.
         child.kill(io);
+        feeder.join();
         return err;
     };
     feeder.join();
     const term = try child.wait(io);
     if (term != .exited or term.exited != 0) return error.FfmpegFailed;
-    const n = raw.len / 4;
-    const samples = try arena.alloc(f32, n);
-    for (samples, 0..) |*s, i| s.* = @bitCast(std.mem.readInt(u32, raw[i * 4 ..][0..4], .little));
+    const n = pcm.items.len / 4;
+    const samples: []f32 = @as([*]f32, @ptrCast(pcm.items.ptr))[0..n];
+    if (@import("builtin").cpu.arch.endian() != .little) {
+        for (samples) |*s| s.* = @bitCast(@byteSwap(@as(u32, @bitCast(s.*))));
+    }
     return samples;
 }
 
