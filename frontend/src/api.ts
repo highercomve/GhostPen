@@ -51,6 +51,8 @@ export interface Settings {
   profiles: Profile[];
   forceSynthetic: boolean;
   restoreDelayMs: number;
+  /** After a menu action: paste over the selection, or show it in the menu. */
+  afterAction?: "paste" | "show";
   customActions: CustomAction[];
   ocr: OcrSettings;
   captions: CaptionsSettings;
@@ -104,6 +106,8 @@ export interface ProcessResult {
   output: string;
   pasted: boolean;
   manual: boolean;
+  /** Shown in the menu instead of pasted (Shift+action, or Settings). */
+  shown?: boolean;
 }
 
 // ---- command wrappers ----------------------------------------------------------------
@@ -120,11 +124,11 @@ export const copyText = (text: string) => invoke<void>("copy_text", { text });
 export type Level = "subtle" | "balanced" | "strong";
 export const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 
-export const processAiAction = (action: string, targetLang: string | null, level: Level) =>
-  invoke<ProcessResult>("process_ai_action", { action, targetLang, level });
+export const processAiAction = (action: string, targetLang: string | null, level: Level, show = false) =>
+  invoke<ProcessResult>("process_ai_action", { action, targetLang, level, show });
 /** Freeform instruction (menu prompt bar) applied to the selection, pasted back like an action. */
-export const processAiCustom = (instruction: string) =>
-  invoke<ProcessResult>("process_ai_custom", { instruction });
+export const processAiCustom = (instruction: string, show = false) =>
+  invoke<ProcessResult>("process_ai_custom", { instruction, show });
 /** Playground: transform text directly, no clipboard involved. */
 export const processText = (action: string, targetLang: string | null, level: Level, text: string) =>
   invoke<string>("process_text", { action, targetLang, level, text });
@@ -165,6 +169,8 @@ export interface DictationSettings {
   language: string;
   proofread: boolean;
   device: string;
+  /** Paste at the cursor when finished (off: copy only). */
+  paste?: boolean;
 }
 
 export interface DictationStatus {
@@ -198,26 +204,36 @@ export const dictationSetLanguage = (language: string) =>
 export const dictationSetProofread = (enabled: boolean) =>
   invoke<void>("dictation_set_proofread", { enabled });
 
-// Whisper models offered in the UI (ggml-{id}.bin on Hugging Face). Ordered fastest →
-// most accurate. `.en` variants are English-only but a bit faster/more accurate for English.
-// `speed`/`accuracy` are relative 1–5 (5 = best) for the little meter in the UI.
-export interface WhisperModelInfo {
+// ---- speech (whisper) models: Settings → Speech models ---------------------------------
+
+export interface WhisperModelState {
   id: string;
-  size: string;
+  size: number;
   speed: number;
   accuracy: number;
   note: string;
+  /** Where it is ("" = not downloaded). */
+  path: string;
+  /** Found in another app's folder (reused; not removable here). */
+  external: boolean;
+  /** Bytes of an interrupted download (resumable). */
+  partial: number;
 }
-export const WHISPER_MODELS: WhisperModelInfo[] = [
-  { id: "tiny",      size: "~75 MB",  speed: 5, accuracy: 1, note: "fastest, lowest accuracy" },
-  { id: "tiny.en",   size: "~75 MB",  speed: 5, accuracy: 2, note: "fastest, English-only" },
-  { id: "base",      size: "~142 MB", speed: 4, accuracy: 2, note: "fast, basic accuracy" },
-  { id: "base.en",   size: "~142 MB", speed: 4, accuracy: 3, note: "fast, English-only" },
-  { id: "small",     size: "~466 MB", speed: 3, accuracy: 4, note: "balanced — sweet spot on a GPU" },
-  { id: "small.en",  size: "~466 MB", speed: 3, accuracy: 4, note: "balanced, English-only" },
-  { id: "medium",    size: "~1.5 GB", speed: 2, accuracy: 5, note: "most accurate, heaviest" },
-  { id: "medium.en", size: "~1.5 GB", speed: 2, accuracy: 5, note: "most accurate, English-only" },
-];
+export interface WhisperLocalFile {
+  id: string;
+  path: string;
+  size: number;
+  external: boolean;
+}
+export interface WhisperStatus {
+  status: { models: WhisperModelState[]; others: WhisperLocalFile[] };
+  downloading: boolean;
+}
+export const whisperModelsStatus = () => invoke<WhisperStatus>("whisper_models_status");
+/** Resolves when done; progress arrives as `ghostpen://whisper-download` (an LlmProgress). */
+export const whisperDownloadModel = (id: string) => invoke<void>("whisper_download_model", { id });
+export const whisperCancelDownload = () => invoke<void>("whisper_cancel_download");
+export const whisperDeleteModel = (id: string) => invoke<void>("whisper_delete_model", { id });
 
 /** Compact bar meter like "▰▰▰▱▱" for a 1–5 score. */
 export const scoreMeter = (n: number) => "▰".repeat(n) + "▱".repeat(5 - n);

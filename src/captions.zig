@@ -6,6 +6,7 @@ const std = @import("std");
 const oriel = @import("oriel");
 const main = @import("main.zig");
 const models = @import("models.zig");
+const stt_server = @import("stt_server.zig");
 
 const App = oriel.App;
 const audio = oriel.audio_capture;
@@ -374,7 +375,64 @@ pub const Commands = struct {
     pub fn captions_download_model(arena: std.mem.Allocator, args: struct { model: ?[]const u8 = null }) !void {
         const s = try main.shared.get(main.io, arena);
         const id = if (args.model) |m| (if (std.mem.trim(u8, m, " ").len > 0) m else s.captions.model) else s.captions.model;
-        var message: []const u8 = "";
-        models.download(main.io, gpa, arena, id, &message) catch |err| return oriel.ipc.fail("{s}", .{if (message.len > 0) message else @errorName(err)});
+        return whisper_download_model(arena, .{ .id = id });
+    }
+
+    // ---- speech models (Settings → Speech models) ----
+
+    pub const WhisperStatus = struct {
+        status: models.Status,
+        downloading: bool,
+    };
+
+    pub fn whisper_models_status(arena: std.mem.Allocator) !WhisperStatus {
+        return .{
+            .status = try models.status(main.io, gpa, arena),
+            .downloading = models.isDownloading(),
+        };
+    }
+
+    /// Progress goes to the Settings window as `ghostpen://whisper-download`.
+    pub fn whisper_download_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        const Emit = struct {
+            fn progress(_: void, p: models.Progress) void {
+                App.emitTo("settings", "ghostpen://whisper-download", p) catch {};
+            }
+        };
+        var status: std.http.Status = .ok;
+        models.download(main.io, gpa, arena, args.id, {}, Emit.progress, &status) catch |err| {
+            if (err == error.Busy) return oriel.ipc.fail("Another model is downloading.", .{});
+            const message: []const u8 = switch (err) {
+                error.Cancelled => "",
+                error.UnknownModel => "Unknown model.",
+                error.ChecksumMismatch => "The download was damaged (checksum mismatch) and was deleted: try again.",
+                error.RangeIgnored => "The server can't resume this download: try again to start over.",
+                error.Incomplete => "The download stopped early: try again to resume it.",
+                error.Stalled => "The download stalled (no data for a minute): check the connection, then resume it.",
+                error.HttpError => try std.fmt.allocPrint(arena, "Download failed: HTTP {d} {s}.", .{ @intFromEnum(status), status.phrase() orelse "" }),
+                else => try std.fmt.allocPrint(arena, "Download failed ({s}).", .{@errorName(err)}),
+            };
+            Emit.progress({}, .{ .id = args.id, .state = if (err == error.Cancelled) "cancelled" else "error", .message = message });
+            if (err == error.Cancelled) return;
+            return oriel.ipc.fail("{s}", .{message});
+        };
+        Emit.progress({}, .{ .id = args.id, .state = "done" });
+    }
+
+    pub fn whisper_cancel_download(_: std.mem.Allocator) void {
+        models.cancelDownload();
+    }
+
+    pub fn whisper_delete_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        const s = try main.shared.get(main.io, arena);
+        if (std.mem.eql(u8, s.captions.model, args.id))
+            return oriel.ipc.fail("Captions and dictation use this model: pick another one first.", .{});
+        if (stt_server.modelOverride()) |m| if (std.mem.eql(u8, m, args.id))
+            return oriel.ipc.fail("The transcription server uses this model (GHOSTPEN_STT_MODEL).", .{});
+        if (!models.validId(args.id)) return oriel.ipc.fail("Invalid model name.", .{});
+        models.remove(main.io, gpa, args.id) catch |err| return if (err == error.Busy)
+            oriel.ipc.fail("Wait for the download to finish (or pause it) first.", .{})
+        else
+            oriel.ipc.fail("Could not delete the model ({s}).", .{@errorName(err)});
     }
 };

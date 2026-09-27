@@ -1,6 +1,7 @@
 //! Voice dictation: microphone → whisper (re-transcribed as you speak) →
 //! optional AI proofread → clipboard, shown in the dictation pill. The text
-//! is copied, never auto-pasted (the user reviews it first). Port of
+//! is pasted at the cursor when finished (Settings → Dictation; off: only
+//! copied, to review first). Port of
 //! GhostPen's dictation.rs.
 //!
 //! Ownership: a Session is reference-counted. `current` (the listening
@@ -226,10 +227,21 @@ const Session = struct {
         // Shares the menu's busy guard so clipboard writes can't interleave.
         if (main.busy.swap(true, .acq_rel)) return update("Another action is still running.", "error");
         defer main.busy.store(false, .release);
+        const settings = main.shared.get(main.io, arena.allocator()) catch main.Settings{};
+        if (settings.dictation.paste) {
+            const pasted = main.pasteFromWindow("dictation", final, settings) catch |err| {
+                var buf: [128]u8 = undefined;
+                return update(std.fmt.bufPrint(&buf, "Clipboard error: {s}", .{@errorName(err)}) catch "Clipboard error", "error");
+            };
+            // Not pasted (no synthetic input): it's on the clipboard, shown as done.
+            if (!pasted) log.info("dictation: {d} chars copied (no synthetic input to paste)", .{final.len});
+            return update(final, "done");
+        }
         oriel.clipboard.writeText(final) catch |err| {
             var buf: [128]u8 = undefined;
             return update(std.fmt.bufPrint(&buf, "Clipboard error: {s}", .{@errorName(err)}) catch "Clipboard error", "error");
         };
+        log.info("dictation: {d} chars copied", .{final.len});
         update(final, "done");
     }
 };

@@ -1,10 +1,10 @@
 //! OpenAI-compatible `/chat/completions` client: one code path for Ollama,
 //! LM Studio, OpenAI, OpenRouter, Groq and any compatible endpoint.
 //!
-//! Ported from GhostPen's ai.rs: the same prompts (verbatim), the same
-//! two-pass "thinking off, retry with thinking on if the model leaked its
-//! reasoning" strategy, SSE streaming, vision input for OCR, `GET /models`,
-//! and bounded requests with readable errors.
+//! Ported from GhostPen's ai.rs: the same prompts (verbatim), SSE streaming,
+//! vision input for OCR, `GET /models`, and bounded requests with readable
+//! errors. Thinking (the reasoning phase) is always off: every action is a
+//! direct rewrite, and a reasoning pass only costs time.
 
 const std = @import("std");
 const settings = @import("settings.zig");
@@ -268,25 +268,26 @@ fn completion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req:
     return postCompletion(io, gpa, arena, req, thinking, diag);
 }
 
-/// Thinking off first (fast); retried with thinking on only when the answer
-/// came back empty or is visibly the model's reasoning.
+/// One completion, thinking off (never retried with thinking on).
 pub fn complete(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, diag: *Diag) Error![]const u8 {
+    const out = try completion(io, gpa, arena, req, false, diag);
+    return checked(out, req, diag);
+}
+
+/// An empty answer is an error; one that reads like the model's reasoning
+/// is logged (and returned: the reasoning phase stays off).
+fn checked(out: []const u8, req: Request, diag: *Diag) Error![]const u8 {
+    if (out.len == 0) return fail(diag, "Model returned empty output");
     const input: ?[]const u8 = switch (req.user) {
         .text => |t| t,
         .image_with_text => null,
     };
-    const first = try completion(io, gpa, arena, req, false, diag);
-    if (first.len > 0 and !looksLikeReasoning(first, input)) return first;
-    std.log.warn("model leaked reasoning instead of the answer; retrying with thinking enabled", .{});
-    const retry = try completion(io, gpa, arena, req, true, diag);
-    if (retry.len > 0) return retry;
-    if (first.len == 0) return fail(diag, "Model returned empty output");
-    return first;
+    if (looksLikeReasoning(out, input)) std.log.warn("the answer reads like the model's reasoning (thinking is off); try another model", .{});
+    return out;
 }
 
 /// Streaming completion (SSE): `on_chunk(ctx, delta)` for each content delta.
-/// Returns the final text (which may differ from the chunks: a leaked-
-/// reasoning answer is replaced by a non-streamed retry).
+/// Returns the final text (reasoning blocks stripped).
 pub fn completeStream(
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -297,17 +298,8 @@ pub fn completeStream(
     diag: *Diag,
 ) Error![]const u8 {
     if (req.profile.isLocal()) {
-        const input = switch (req.user) {
-            .text => |t| t,
-            .image_with_text => |iw| iw.text,
-        };
         const out = try localCompletion(io, gpa, arena, req, false, ctx, on_chunk, diag);
-        if (out.len > 0 and !looksLikeReasoning(out, input)) return out;
-        std.log.warn("model leaked reasoning into the stream; retrying with thinking enabled", .{});
-        const retry = try completion(io, gpa, arena, req, true, diag);
-        if (retry.len > 0) return retry;
-        if (out.len == 0) return fail(diag, "Model returned empty output");
-        return out;
+        return checked(out, req, diag);
     }
     const body = try buildBody(arena, req, false, true);
     var sink: SseSink(@TypeOf(ctx), on_chunk) = .{ .arena = arena, .ctx = ctx };
@@ -317,17 +309,8 @@ pub fn completeStream(
     if (sink.oom) return error.OutOfMemory;
     if (status.class() != .success) return apiError(arena, diag, status, sink.raw.items);
 
-    const input = switch (req.user) {
-        .text => |t| t,
-        .image_with_text => |iw| iw.text,
-    };
     const out = try stripReasoning(arena, sink.full.items);
-    if (out.len > 0 and !looksLikeReasoning(out, input)) return out;
-    std.log.warn("model leaked reasoning into the stream; retrying with thinking enabled", .{});
-    const retry = try completion(io, gpa, arena, req, true, diag);
-    if (retry.len > 0) return retry;
-    if (out.len == 0) return fail(diag, "Model returned empty output");
-    return out;
+    return checked(out, req, diag);
 }
 
 /// A writer that parses `data:` lines of an SSE body as they arrive.

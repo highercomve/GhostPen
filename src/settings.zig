@@ -59,6 +59,8 @@ pub const Dictation = struct {
     language: []const u8 = "auto",
     proofread: bool = true,
     device: []const u8 = "",
+    /// Paste the text at the cursor when finished (off: copy only, to review first).
+    paste: bool = true,
 };
 
 pub const Settings = struct {
@@ -69,6 +71,9 @@ pub const Settings = struct {
     profiles: []const Profile = &.{default_profile},
     forceSynthetic: bool = false,
     restoreDelayMs: u64 = 300,
+/// After a menu action: "paste" (over the selection) or "show" (in the
+/// menu, with Copy: for text selected in something read-only).
+afterAction: []const u8 = "paste",
     customActions: []const CustomAction = &.{},
     ocr: Ocr = .{},
     captions: Captions = .{},
@@ -79,6 +84,10 @@ pub const Settings = struct {
     autoUpdate: bool = true,
 
     /// The active profile, or the first one, or the built-in default.
+    pub fn showResults(self: Settings) bool {
+        return std.mem.eql(u8, self.afterAction, "show");
+    }
+
     pub fn activeProfile(self: Settings) Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.id, self.activeProfileId)) return p;
         return if (self.profiles.len > 0) self.profiles[0] else default_profile;

@@ -345,7 +345,10 @@ fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Conf
             else
                 std.fmt.allocPrint(arena, "The built-in model could not be loaded{s}{s}", .{ if (why.len > 0) ": " else ".", why }) catch "The built-in model could not be loaded.";
             const gpu_error = std.mem.indexOf(u8, why, "CUDA error") != null or std.mem.indexOf(u8, why, "out of memory") != null or
-                std.mem.indexOf(u8, why, "cudaMalloc") != null or std.mem.indexOf(u8, why, "Metal") != null;
+                std.mem.indexOf(u8, why, "cudaMalloc") != null or std.mem.indexOf(u8, why, "Metal") != null or
+                // An allocation that failed (GPU memory taken by another app).
+                std.mem.indexOf(u8, why, "GGML_ASSERT(buffer)") != null or std.mem.indexOf(u8, why, "failed to allocate") != null or
+                std.mem.indexOf(u8, why, "ErrorOutOfDeviceMemory") != null;
             if (cfg.gpu and gpu_error and !deadline.timed_out.load(.acquire)) return error.GpuFailed;
             return error.LocalFailed;
         };

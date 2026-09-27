@@ -134,7 +134,13 @@ const SelectionInfo = struct {
     }
 };
 
-const ProcessResult = struct { output: []const u8, pasted: bool, manual: bool };
+const ProcessResult = struct {
+    output: []const u8,
+    pasted: bool,
+    manual: bool,
+    /// Shown in the menu instead of pasted (Shift+action, or Settings).
+    shown: bool = false,
+};
 
 pub const Events = struct {
     @"ghostpen://show": struct {},
@@ -149,6 +155,8 @@ pub const Events = struct {
     @"ghostpen://dictation-show": struct {},
     /// Local model downloads (to the Settings window).
     @"ghostpen://llm-download": llm_models.Progress,
+    /// Speech (whisper) model downloads (Settings).
+    @"ghostpen://whisper-download": llm_models.Progress,
     /// Update download progress (Settings).
     @"ghostpen://update-progress": updates.Progress,
 };
@@ -208,10 +216,18 @@ fn resolveAction(arena: std.mem.Allocator, s: Settings, action: []const u8, lang
 
 fn complete(arena: std.mem.Allocator, req: ai.Request) ![]const u8 {
     var diag: ai.Diag = .{};
-    return ai.complete(io, gpa, arena, req, &diag) catch |err| switch (err) {
-        error.AiFailed => oriel.ipc.fail("{s}", .{diag.message}),
-        else => err,
+    const start = std.Io.Clock.awake.now(io);
+    const out = ai.complete(io, gpa, arena, req, &diag) catch |err| {
+        log.warn("AI request ({s} {s}) failed: {s}", .{ req.profile.name, req.profile.model, if (err == error.AiFailed) diag.message else @errorName(err) });
+        return switch (err) {
+            error.AiFailed => oriel.ipc.fail("{s}", .{diag.message}),
+            else => err,
+        };
     };
+    const ms = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    log.info("AI request ({s} {s}): {d} chars in {d} ms", .{ req.profile.name, req.profile.model, out.len, ms });
+    if (std.mem.trim(u8, out, " \t\r\n").len == 0) log.warn("AI request returned only whitespace", .{});
+    return out;
 }
 
 /// AI translation for captions (runs on the captions worker).
@@ -230,12 +246,60 @@ pub fn proofread(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     return ai.complete(io, gpa, arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } }, &diag);
 }
 
+/// Dictation's delivery: `output` on the clipboard, `label`'s window hidden
+/// (focus goes back to the app underneath), pasted there, and the previous
+/// clipboard back after the restore delay. False when synthetic input isn't
+/// available: the text then stays on the clipboard.
+pub fn pasteFromWindow(label: []const u8, output: []const u8, s: Settings) !bool {
+    const prev = readClipboard();
+    oriel.clipboard.writeText(output) catch |err| {
+        prev.deinit();
+        return err;
+    };
+    if (!useSynthetic(s)) {
+        prev.deinit();
+        return false;
+    }
+    const Hide = struct {
+        fn run(l: []const u8) void {
+            if (App.getWindow(l)) |w| w.hide();
+        }
+    };
+    App.runOnMain(label, Hide.run);
+    io.sleep(.fromMilliseconds(150), .awake) catch {};
+    oriel.input.paste() catch |err| {
+        log.warn("dictation: paste failed ({s}); the text is on the clipboard", .{@errorName(err)});
+        prev.deinit();
+        return false;
+    };
+    log.info("dictation: {d} chars pasted; the previous clipboard comes back in {d} ms", .{ output.len, s.restoreDelayMs });
+    const t = std.Thread.spawn(.{}, restoreSnapshot, .{ prev, s.restoreDelayMs }) catch {
+        prev.deinit();
+        return true;
+    };
+    t.detach();
+    return true;
+}
+
+/// The result stays in the menu (with Copy): nothing pasted, the clipboard
+/// untouched, e.g. for text selected in something read-only.
+fn showResult(output: []const u8) ProcessResult {
+    log.info("deliver: {d} chars shown in the menu", .{output.len});
+    return .{ .output = output, .pasted = false, .manual = false, .shown = true };
+}
+
 /// Put the result on the clipboard, paste it into the app underneath (hide
 /// the menu first so it gets the keystroke), then restore what the
 /// clipboard held before.
 fn deliver(output: []const u8, s: Settings) !ProcessResult {
-    oriel.clipboard.writeText(output) catch |err| return oriel.ipc.fail("Could not write the clipboard ({s}).", .{@errorName(err)});
-    if (!useSynthetic(s)) return .{ .output = output, .pasted = false, .manual = true };
+    oriel.clipboard.writeText(output) catch |err| {
+        log.warn("deliver: writing the clipboard failed: {s}", .{@errorName(err)});
+        return oriel.ipc.fail("Could not write the clipboard ({s}).", .{@errorName(err)});
+    };
+    if (!useSynthetic(s)) {
+        log.info("deliver: {d} chars on the clipboard (manual mode: paste with Ctrl+V)", .{output.len});
+        return .{ .output = output, .pasted = false, .manual = true };
+    }
 
     App.runOnMain({}, struct {
         fn hide(_: void) void {
@@ -247,6 +311,7 @@ fn deliver(output: []const u8, s: Settings) !ProcessResult {
         log.warn("paste failed ({s}); the result is on the clipboard", .{@errorName(err)});
         return .{ .output = output, .pasted = false, .manual = true };
     };
+    log.info("deliver: {d} chars on the clipboard, Ctrl+V sent; the previous clipboard comes back in {d} ms", .{ output.len, s.restoreDelayMs });
 
     // Restore after the target app has read the clipboard. The snapshot is
     // taken now: a new trigger during the delay must not replace it.
@@ -265,6 +330,7 @@ fn deliver(output: []const u8, s: Settings) !ProcessResult {
 fn restoreSnapshot(snap: Content, delay_ms: u64) void {
     defer snap.deinit();
     io.sleep(.fromMilliseconds(@intCast(@min(delay_ms, 60_000))), .awake) catch {};
+    log.info("deliver: previous clipboard restored ({s})", .{@tagName(snap)});
     switch (snap) {
         .empty => {},
         .text => |t| oriel.clipboard.writeText(t) catch |err| log.warn("restore clipboard: {s}", .{@errorName(err)}),
@@ -366,7 +432,8 @@ pub const Commands = struct {
         "process_text",            "process_text_stream", "fetch_models",          "captions_start",
         "captions_download_model", "dictation_start",     "captions_list_devices", "dictation_list_devices",
         "llm_models_status",       "llm_download_model",  "llm_delete_model",      "llm_unload",
-        "menu_dismissed",          "update_check",        "update_install",
+        "menu_dismissed",          "update_check",        "update_install",        "whisper_models_status",
+        "whisper_download_model",  "whisper_delete_model",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -463,23 +530,27 @@ pub const Commands = struct {
         oriel.clipboard.writeText(args.text) catch |err| return oriel.ipc.fail("Could not write the clipboard ({s}).", .{@errorName(err)});
     }
 
-    pub fn process_ai_action(arena: std.mem.Allocator, args: struct { action: []const u8, targetLang: ?[]const u8 = null, level: ?[]const u8 = null }) !ProcessResult {
+    /// `show`: keep the result in the menu (Shift+action) instead of pasting
+    /// it over the selection; also when Settings say "show".
+    pub fn process_ai_action(arena: std.mem.Allocator, args: struct { action: []const u8, targetLang: ?[]const u8 = null, level: ?[]const u8 = null, show: bool = false }) !ProcessResult {
         try acquireBusy();
         defer busy.store(false, .release);
         const s = try shared.get(io, arena);
         const text = try selectionText(arena);
         const r = try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
         const output = try complete(arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = text } });
+        if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }
 
-    pub fn process_ai_custom(arena: std.mem.Allocator, args: struct { instruction: []const u8 }) !ProcessResult {
+    pub fn process_ai_custom(arena: std.mem.Allocator, args: struct { instruction: []const u8, show: bool = false }) !ProcessResult {
         try acquireBusy();
         defer busy.store(false, .release);
         const s = try shared.get(io, arena);
         const text = try selectionText(arena);
         const system = try ai.instructionPrompt(arena, args.instruction);
         const output = try complete(arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } });
+        if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }
 
@@ -629,6 +700,10 @@ pub const Commands = struct {
     pub const captions_set_click_through = captions.Commands.captions_set_click_through;
     pub const captions_set_translate = captions.Commands.captions_set_translate;
     pub const captions_download_model = captions.Commands.captions_download_model;
+    pub const whisper_models_status = captions.Commands.whisper_models_status;
+    pub const whisper_download_model = captions.Commands.whisper_download_model;
+    pub const whisper_cancel_download = captions.Commands.whisper_cancel_download;
+    pub const whisper_delete_model = captions.Commands.whisper_delete_model;
     pub const dictation_list_devices = dictation.Commands.dictation_list_devices;
     pub const dictation_status = dictation.Commands.dictation_status;
     pub const dictation_start = dictation.Commands.dictation_start;
@@ -807,6 +882,10 @@ pub fn main(init: std.process.Init) !u8 {
     environ_map = init.environ_map;
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
     ai.local_resolver = &resolveLocal;
+    // Whisper models other apps (GhostReel) downloaded are reused.
+    if (llmDirs(init.arena.allocator())) |d| {
+        @import("models.zig").search_dirs = d.others;
+    } else |_| {}
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             std.debug.print(

@@ -14,13 +14,10 @@ import {
   getStatus,
   hideWindow,
   captionsStatus,
-  captionsDownloadModel,
   captionsListDevices,
   dictationListDevices,
   openCaptions,
   PRESETS,
-  WHISPER_MODELS,
-  scoreMeter,
   CAPTION_LANGUAGES,
   TRANSLATE_LANGUAGES,
   LocalLlmSettings,
@@ -28,6 +25,7 @@ import {
   llmModelsStatus,
   LlmStatus,
 } from "./api";
+import WhisperModels from "./WhisperModels";
 import LocalModels, { DEFAULT_LOCAL } from "./LocalModels";
 import AboutUpdates from "./AboutUpdates";
 
@@ -52,8 +50,6 @@ export default function Settings() {
   const [capStatus, setCapStatus] = useState<CaptionsStatus | null>(null);
   const [capDevices, setCapDevices] = useState<string[]>([]);
   const [dictDevices, setDictDevices] = useState<string[]>([]);
-  const [capMsg, setCapMsg] = useState<string>("");
-  const [downloading, setDownloading] = useState(false);
   const [llm, setLlm] = useState<LlmStatus | null>(null);
 
   useEffect(() => {
@@ -203,20 +199,12 @@ export default function Settings() {
     update({ ocr: { ...ocr, ...patch } });
   };
 
-  // Download the configured whisper model, then save + refresh status so the UI reflects it.
-  const downloadModel = async () => {
-    setDownloading(true);
-    setCapMsg(`Downloading ${captions.model}… (this can take a while)`);
-    try {
-      await saveSettings(settings); // persist so the backend reads the chosen model id
-      await captionsDownloadModel(captions.model);
-      setCapMsg(`Model “${captions.model}” ready ✓`);
-      captionsStatus().then(setCapStatus).catch(() => {});
-    } catch (e) {
-      setCapMsg(String(e));
-    } finally {
-      setDownloading(false);
-    }
+  // Captions and dictation share this model: saved right away, like a built-in model's Use.
+  const useWhisperModel = async (id: string) => {
+    const saved = await getSettings();
+    await saveSettings({ ...saved, captions: { ...saved.captions, model: id } });
+    setSettings({ ...settings, captions: { ...captions, model: id } });
+    captionsStatus().then(setCapStatus).catch(() => {});
   };
 
   // The backend can reject after saving (e.g. a hotkey that didn't register): show why.
@@ -235,6 +223,7 @@ export default function Settings() {
   return (
     <div className="settings">
       <h1>GhostPen Settings</h1>
+      <div className="settings-cards">
 
       {/* Diagnostics */}
       {status && (
@@ -398,6 +387,15 @@ export default function Settings() {
           Force synthetic copy/paste on Wayland (needs libei; off = manual-copy mode)
         </label>
         <label>
+          After an action
+          <select value={settings.afterAction ?? "paste"}
+            onChange={(e) => update({ afterAction: e.target.value as "paste" | "show" })}>
+            <option value="paste">Paste the result over the selection</option>
+            <option value="show">Show the result in the menu (with Copy)</option>
+          </select>
+        </label>
+        <p className="muted small">Hold <kbd>Shift</kbd> when you pick an action to get the other one, e.g. to translate text you can't edit (a web page, a chat).</p>
+        <label>
           Clipboard restore delay (ms)
           <input type="number" min={0} max={2000} value={settings.restoreDelayMs}
             onChange={(e) => update({ restoreDelayMs: parseInt(e.target.value || "0", 10) })} />
@@ -480,6 +478,8 @@ export default function Settings() {
         </label>
       </section>
 
+      <WhisperModels activeModel={captions.model} onUse={useWhisperModel} />
+
       {/* Live captions (system audio) */}
       <section className="card">
         <h2>Live Captions <span className="muted small">system audio → subtitles</span></h2>
@@ -495,38 +495,11 @@ export default function Settings() {
           active AI profile.
         </p>
 
-        <label>
-          Whisper model <span className="muted">(top = faster · bottom = more accurate)</span>
-          <div className="row">
-            <select value={captions.model} onChange={(e) => updateCaptions({ model: e.target.value })}>
-              {WHISPER_MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {`${m.id} · ${m.note} · ${m.size}`}
-                </option>
-              ))}
-            </select>
-            <button className="btn" type="button" onClick={downloadModel} disabled={downloading}>
-              {capStatus?.model_ready && capStatus.model === captions.model ? "Re-download" : "Download model"}
-            </button>
-          </div>
-          {(() => {
-            const m = WHISPER_MODELS.find((x) => x.id === captions.model);
-            return m ? (
-              <span className="muted small">
-                Speed {scoreMeter(m.speed)} · Accuracy {scoreMeter(m.accuracy)} · {m.size} download
-              </span>
-            ) : null;
-          })()}
-          <span className="muted small">
-            On your GPU, <code>small</code> is the live-caption sweet spot; <code>medium</code> for max accuracy.
-          </span>
-          {capStatus && (
-            <span className="muted small">
-              {capStatus.model_ready ? `“${capStatus.model}” downloaded ✓` : `“${captions.model}” not downloaded`}
-            </span>
-          )}
-          {capMsg && <span className="muted small">{capMsg}</span>}
-        </label>
+        <p className="muted small">
+          Model: <code>{captions.model}</code>
+          {capStatus && !capStatus.model_ready && " (not downloaded)"}, chosen in Speech models above.
+        </p>
+
 
         <label>
           Source language
@@ -592,7 +565,7 @@ export default function Settings() {
         <p className="muted small">
           Speak (<code>ghostpen --voice-input</code>, e.g. Ctrl+Shift+D), stop, and the transcript
           is proofread by your active AI profile and copied to the clipboard. Uses the same
-          Whisper model as Live Captions above — downloaded once for both.
+          speech model as Live Captions (Speech models above).
         </p>
 
         <label>
@@ -621,9 +594,15 @@ export default function Settings() {
             onChange={(e) => updateDictation({ proofread: e.target.checked })} />
           Proofread with the AI profile before copying <span className="muted">(off = raw transcript)</span>
         </label>
+        <label className="checkbox">
+          <input type="checkbox" checked={dictation.paste ?? true}
+            onChange={(e) => updateDictation({ paste: e.target.checked })} />
+          Paste at the cursor when finished <span className="muted">(off = copy only, to review first)</span>
+        </label>
       </section>
 
       <AboutUpdates autoUpdate={settings.autoUpdate ?? true} onAutoUpdate={(on) => update({ autoUpdate: on })} />
+      </div>
 
       <div className="footer">
         {saveError && <span className="save-error">⚠ {saveError}</span>}
