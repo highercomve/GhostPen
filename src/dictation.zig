@@ -12,6 +12,7 @@ const std = @import("std");
 const oriel = @import("oriel");
 const main = @import("main.zig");
 const models = @import("models.zig");
+const captions = @import("captions.zig");
 
 const App = oriel.App;
 const audio = oriel.audio_capture;
@@ -371,12 +372,8 @@ fn startFromToggle() void {
 const Status = struct { model_ready: bool, model: []const u8, proofread: bool, language: []const u8 };
 
 pub const Commands = struct {
-    pub fn dictation_list_devices(arena: std.mem.Allocator) ![]const []const u8 {
-        const sources = audio.listSources(gpa) catch |err| return oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)});
-        defer audio.freeSources(gpa, sources);
-        var names: std.ArrayList([]const u8) = .empty;
-        for (sources) |src| if (!src.monitor) try names.append(arena, try arena.dupe(u8, src.name));
-        return names.items;
+    pub fn dictation_list_devices(arena: std.mem.Allocator) ![]const captions.Device {
+        return captions.listDevices(arena, false);
     }
 
     pub fn dictation_status(arena: std.mem.Allocator) !Status {

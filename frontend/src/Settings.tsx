@@ -8,6 +8,7 @@ import {
   OcrSettings,
   Status,
   CaptionsStatus,
+  AudioDevice,
   getSettings,
   saveSettings,
   fetchModels,
@@ -40,6 +41,22 @@ function newProfile(): Profile {
   };
 }
 
+/** A device picker's entries by readable name (Windows ids mean nothing),
+ *  plus the saved choice when it isn't connected now. */
+function DeviceOptions({ devices, selected }: { devices: AudioDevice[]; selected: string }) {
+  const missing = selected !== "" && !devices.some((d) => d.name === selected);
+  return (
+    <>
+      {devices.map((d) => (
+        <option key={d.name} value={d.name}>
+          {d.monitor ? `🔊 ${d.label}` : `🎙 ${d.label}`}
+        </option>
+      ))}
+      {missing && <option value={selected}>{selected} (not connected)</option>}
+    </>
+  );
+}
+
 export default function Settings() {
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
@@ -48,8 +65,8 @@ export default function Settings() {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [capStatus, setCapStatus] = useState<CaptionsStatus | null>(null);
-  const [capDevices, setCapDevices] = useState<string[]>([]);
-  const [dictDevices, setDictDevices] = useState<string[]>([]);
+  const [capDevices, setCapDevices] = useState<AudioDevice[]>([]);
+  const [dictDevices, setDictDevices] = useState<AudioDevice[]>([]);
   const [llm, setLlm] = useState<LlmStatus | null>(null);
 
   useEffect(() => {
@@ -539,14 +556,10 @@ export default function Settings() {
           Capture device <span className="muted">(what to transcribe — “Auto” follows your current system output)</span>
           <select value={captions.device} onChange={(e) => updateCaptions({ device: e.target.value })}>
             <option value="">Auto — current system output (recommended)</option>
-            {capDevices.map((d) => (
-              <option key={d} value={d}>
-                {d.includes(".monitor") ? `🔊 ${d} — system audio` : `🎙 ${d}`}
-              </option>
-            ))}
+            <DeviceOptions devices={capDevices} selected={captions.device} />
           </select>
           <span className="muted small">
-            Pick a <code>.monitor</code> source to caption what you hear; a mic/input to caption your voice.
+            Pick a 🔊 system-audio source to caption what you hear; a 🎙 microphone to caption your voice.
           </span>
         </label>
 
@@ -572,9 +585,7 @@ export default function Settings() {
           Microphone <span className="muted">(“Auto” follows your default input device)</span>
           <select value={dictation.device} onChange={(e) => updateDictation({ device: e.target.value })}>
             <option value="">Auto — default microphone (recommended)</option>
-            {dictDevices.map((d) => (
-              <option key={d} value={d}>🎙 {d}</option>
-            ))}
+            <DeviceOptions devices={dictDevices} selected={dictation.device} />
           </select>
           <span className="muted small">
             Captions listen to your <em>output</em> (what you hear); dictation always listens to a
