@@ -528,7 +528,7 @@ export default function Settings() {
             ) : null;
           })()}
           <span className="muted small">
-            On your GPU, <code>small</code> is the live-caption sweet spot; <code>medium</code> for max accuracy.
+            On your GPU, <code>small</code> is the live-caption sweet spot; <code>large-v3-turbo-q5_0</code> for large-model accuracy at a fraction of the size.
           </span>
           {capStatus && (
             <span className="muted small">

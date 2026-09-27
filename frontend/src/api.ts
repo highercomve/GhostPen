@@ -221,8 +221,13 @@ export const WHISPER_MODELS: WhisperModelInfo[] = [
   { id: "base.en",   size: "~142 MB", speed: 4, accuracy: 3, note: "fast, English-only" },
   { id: "small",     size: "~466 MB", speed: 3, accuracy: 4, note: "balanced — sweet spot on a GPU" },
   { id: "small.en",  size: "~466 MB", speed: 3, accuracy: 4, note: "balanced, English-only" },
-  { id: "medium",    size: "~1.5 GB", speed: 2, accuracy: 5, note: "most accurate, heaviest" },
-  { id: "medium.en", size: "~1.5 GB", speed: 2, accuracy: 5, note: "most accurate, English-only" },
+  { id: "medium",    size: "~1.5 GB", speed: 2, accuracy: 5, note: "accurate, multilingual" },
+  { id: "medium.en", size: "~1.5 GB", speed: 2, accuracy: 5, note: "accurate, English-only" },
+  { id: "large-v3-turbo-q5_0", size: "~574 MB", speed: 3, accuracy: 5, note: "large turbo, 5-bit — best size for accuracy" },
+  { id: "large-v3-turbo-q8_0", size: "~874 MB", speed: 3, accuracy: 5, note: "large turbo, 8-bit" },
+  { id: "large-v3-turbo",      size: "~1.6 GB", speed: 3, accuracy: 5, note: "large turbo, full precision" },
+  { id: "large-v3-q5_0",       size: "~1.1 GB", speed: 1, accuracy: 5, note: "large v3, 5-bit — slowest" },
+  { id: "large-v3",            size: "~3.1 GB", speed: 1, accuracy: 5, note: "large v3, full precision — slowest, heaviest" },
 ];
 
 /** Compact bar meter like "▰▰▰▱▱" for a 1–5 score. */
