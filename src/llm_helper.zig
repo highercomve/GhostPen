@@ -229,7 +229,9 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
             else => break,
         } orelse break;
         if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
-        const parsed = std.json.parseFromSlice(Request, gpa, line, .{ .ignore_unknown_fields = true }) catch {
+        // Copies of the strings: `line` points into the stdin buffer, which
+        // this thread keeps refilling while the worker uses the request.
+        const parsed = std.json.parseFromSlice(Request, gpa, line, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             sendError(0, "Malformed request.");
             continue;
         };
@@ -457,6 +459,8 @@ const Engine = struct {
         const bytes = try arena.alloc(u8, size);
         decoder.decode(bytes, req.image) catch return fail(req.id, "The image isn't valid base64.", .{});
         const wrapped = c.mtmd_helper_bitmap_init_from_buf(mctx, bytes.ptr, bytes.len, false, c.mtmd_helper_init_opt_default());
+        // Video (MTMD_VIDEO) isn't built: only still images, no video context.
+        std.debug.assert(wrapped.video_ctx == null);
         const bitmap = wrapped.bitmap orelse return fail(req.id, "The built-in model couldn't decode the image.", .{});
         defer c.mtmd_bitmap_free(bitmap);
 

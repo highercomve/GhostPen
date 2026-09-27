@@ -141,13 +141,13 @@ pub const Commands = struct {
 
     pub fn update_check(arena: std.mem.Allocator) !CheckResult {
         const kind = installKind();
-        const found = check() catch |err| return oriel.ipc.fail("Couldn't check for updates ({s}).", .{errorText(err)});
+        const found = check(arena) catch |err| return oriel.ipc.fail("Couldn't check for updates ({s}).", .{errorText(err)});
         mutex.lockUncancelable(main.io);
         defer mutex.unlock(main.io);
         const already = if (installed_version) |v| (if (found) |f| std.mem.eql(u8, v, f) else false) else false;
         return .{
             .available = found != null,
-            .version = if (found) |f| try arena.dupe(u8, f) else null,
+            .version = found,
             .can_install = kind.canInstall(),
             .installed = already,
         };
@@ -157,7 +157,8 @@ pub const Commands = struct {
     /// as `ghostpen://update-progress`.
     pub fn update_install(_: std.mem.Allocator) !void {
         if (!installKind().canInstall()) return oriel.ipc.fail("This copy of GhostPen is updated through its package manager (or a new download).", .{});
-        install() catch |err| return oriel.ipc.fail("The update failed: {s}", .{errorText(err)});
+        const v = install() catch |err| return oriel.ipc.fail("The update failed: {s}", .{errorText(err)});
+        gpa.free(v);
     }
 
     /// Start the installed version (after `update_install`).
@@ -170,22 +171,29 @@ pub const Commands = struct {
 
 // ---- check / install --------------------------------------------------------------------
 
-/// Check the release manifest; the version found (owned by `pending`), or
-/// null when this is the newest.
-fn check() !?[]const u8 {
+/// Check the release manifest; the version found (copied into `out`, under
+/// the lock: another check or an install may free `pending` right after),
+/// or null when this is the newest.
+fn check(out: std.mem.Allocator) !?[]u8 {
     var found = try updater.checkForUpdate(main.io, gpa, config());
     mutex.lockUncancelable(main.io);
     defer mutex.unlock(main.io);
     if (pending) |*p| p.deinit();
     pending = null;
     if (found) |*f| {
+        const v = out.dupe(u8, f.version) catch |err| {
+            f.deinit();
+            return err;
+        };
         pending = f.*;
-        return f.version;
+        return v;
     }
     return null;
 }
 
-fn install() !void {
+/// Download and install the checked update; the version installed (gpa,
+/// caller frees). A failed download puts it back, so Update can be retried.
+fn install() ![]u8 {
     if (busy.swap(true, .acq_rel)) return error.UpdateInProgress;
     defer busy.store(false, .release);
     mutex.lockUncancelable(main.io);
@@ -196,21 +204,33 @@ fn install() !void {
     pending = null; // ours now: a check meanwhile won't free it
     mutex.unlock(main.io);
     var u = update;
-    defer u.deinit();
+    var given_back = false;
+    defer if (!given_back) u.deinit();
 
     const Progress_ = struct {
         fn cb(_: ?*anyopaque, downloaded: u64, total: ?u64) void {
             oriel.App.emit("ghostpen://update-progress", Progress{ .downloaded = downloaded, .total = total });
         }
     };
-    const dest = try updater.download(main.io, gpa, u, null, .{ .callback = Progress_.cb });
+    const dest = updater.download(main.io, gpa, u, null, .{ .callback = Progress_.cb }) catch |err| {
+        mutex.lockUncancelable(main.io);
+        defer mutex.unlock(main.io);
+        if (pending == null) {
+            pending = u;
+            given_back = true;
+        }
+        return err;
+    };
     gpa.free(dest);
+    const new_version = try gpa.dupe(u8, u.version);
+    errdefer gpa.free(new_version);
 
     mutex.lockUncancelable(main.io);
     defer mutex.unlock(main.io);
     if (installed_version) |v| gpa.free(v);
-    installed_version = gpa.dupe(u8, u.version) catch null;
-    log.info("installed GhostPen {s}; it applies on the next start", .{u.version});
+    installed_version = gpa.dupe(u8, new_version) catch null;
+    log.info("installed GhostPen {s}; it applies on the next start", .{new_version});
+    return new_version;
 }
 
 // ---- automatic updates ------------------------------------------------------------------
@@ -228,12 +248,11 @@ fn autoCheck() void {
     defer arena_state.deinit();
     const s = main.shared.get(main.io, arena_state.allocator()) catch return;
     if (!s.autoUpdate) return;
-    const found = check() catch |err| {
+    const found = check(gpa) catch |err| {
         log.info("update check: {s}", .{errorText(err)});
         return;
     };
-    const v = found orelse return;
-    const owned_version = gpa.dupe(u8, v) catch return;
+    const owned_version = found orelse return;
     defer gpa.free(owned_version);
 
     mutex.lockUncancelable(main.io);
@@ -244,11 +263,14 @@ fn autoCheck() void {
 
     const kind = installKind();
     if (kind.canInstall()) {
-        install() catch |err| {
+        const installed = install() catch |err| {
             log.warn("automatic update to {s} failed: {s}", .{ owned_version, errorText(err) });
             return;
         };
-        notify("GhostPen {s} is installed", "It starts the next time you open GhostPen (or restart it from Settings).", owned_version);
+        defer gpa.free(installed);
+        // The version actually installed (a check from the UI may have
+        // found a newer one in between).
+        notify("GhostPen {s} is installed", "It starts the next time you open GhostPen (or restart it from Settings).", installed);
     } else {
         notify("GhostPen {s} is available", "Download it from the GhostPen website (Settings → About & updates).", owned_version);
     }
@@ -260,16 +282,18 @@ fn autoCheck() void {
 
 /// A desktop notification, from the main thread.
 fn notify(comptime title_fmt: []const u8, body: []const u8, v: []const u8) void {
-    const Ctx = struct { title: []u8, body: []const u8 };
-    const title = std.fmt.allocPrint(gpa, title_fmt, .{v}) catch return;
+    // The title lives in the task's own copy of the context: nothing to
+    // free, even when the task is dropped without running (shutdown).
+    const Ctx = struct { buf: [128]u8, len: usize, body: []const u8 };
+    var ctx: Ctx = .{ .buf = undefined, .len = 0, .body = body };
+    ctx.len = (std.fmt.bufPrint(&ctx.buf, title_fmt, .{v}) catch return).len;
     const Show = struct {
         fn run(c: Ctx) void {
-            defer gpa.free(c.title);
-            oriel.notification.notify(.{ .id = "ghostpen-update", .title = c.title, .body = c.body }) catch |err|
+            oriel.notification.notify(.{ .id = "ghostpen-update", .title = c.buf[0..c.len], .body = c.body }) catch |err|
                 log.warn("notification: {s}", .{@errorName(err)});
         }
     };
-    oriel.App.runOnMain(Ctx{ .title = title, .body = body }, Show.run);
+    oriel.App.runOnMain(ctx, Show.run);
 }
 
 /// A short reason for the UI and the log.

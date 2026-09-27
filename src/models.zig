@@ -22,6 +22,17 @@ pub fn init(io: std.Io) void {
     // loaded meanwhile waits for the GPU instead of falling back to the CPU.
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
+    initLocked(io);
+}
+
+var gpu_ready = false;
+
+/// The GPU backend, once; caller holds `mutex`. Also called before a load,
+/// so a load that wins the race against `init` (the transcription server
+/// starts on its own thread) still gets the GPU.
+fn initLocked(io: std.Io) void {
+    if (gpu_ready) return;
+    gpu_ready = true;
     whisper.silenceLogs();
     if (oriel.ggml_gpu.load(io) > 0) gpu = oriel.ggml_gpu.gpuName();
     log.info("whisper backend: {s}", .{gpu orelse "CPU"});
@@ -59,7 +70,8 @@ pub fn isDownloaded(io: std.Io, gpa: std.mem.Allocator, id: []const u8) bool {
 }
 
 /// Load `id` unless it's already the resident model. Caller holds `mutex`.
-fn ensureLocked(gpa: std.mem.Allocator, id: []const u8) !whisper.Context {
+fn ensureLocked(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !whisper.Context {
+    initLocked(io);
     if (loaded) |ctx| if (loaded_name) |n| if (std.mem.eql(u8, n, id)) return ctx;
     const p = try path(gpa, id);
     defer gpa.free(p);
@@ -81,14 +93,14 @@ fn ensureLocked(gpa: std.mem.Allocator, id: []const u8) !whisper.Context {
 pub fn ensure(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !void {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
-    _ = try ensureLocked(gpa, id);
+    _ = try ensureLocked(io, gpa, id);
 }
 
 /// Transcribe mono 16 kHz samples with model `id`. Caller frees the text.
 pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, id: []const u8, samples: []const f32, language: []const u8, translate: bool) ![]u8 {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
-    const ctx = try ensureLocked(gpa, id);
+    const ctx = try ensureLocked(io, gpa, id);
     const lang = try gpa.dupeZ(u8, if (language.len == 0) "auto" else language);
     defer gpa.free(lang);
     const threads: c_int = @intCast(@min(std.Thread.getCpuCount() catch 4, 8));
@@ -125,7 +137,7 @@ pub const Transcript = struct {
 pub fn transcribeSegments(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id: []const u8, samples: []const f32, language: []const u8) !Transcript {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
-    const ctx = try ensureLocked(gpa, id);
+    const ctx = try ensureLocked(io, gpa, id);
     const c = whisper.c;
     const n_samples = std.math.cast(c_int, samples.len) orelse return error.AudioTooLong;
     const lang = try arena.dupeZ(u8, if (language.len == 0) "auto" else language);

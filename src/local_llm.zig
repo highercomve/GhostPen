@@ -107,6 +107,10 @@ pub fn chat(
         diag.* = "The text is too long for the built-in model (about 200 KB at most): select less.";
         return error.LocalFailed;
     }
+    if (req.image) |img| if (std.base64.standard.Encoder.calcSize(img.len) + req.system.len + req.user.len > max_image_line_bytes) {
+        diag.* = "The image is too large for the built-in model.";
+        return error.LocalFailed;
+    };
     if (req.image != null and cfg.mmproj == null) {
         diag.* = "This built-in model can't read images: download its image projector in Settings → Built-in models, or pick a model that has one.";
         return error.LocalFailed;
