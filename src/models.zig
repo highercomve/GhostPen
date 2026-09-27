@@ -148,6 +148,33 @@ pub fn ensure(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !void {
     _ = try ensureLocked(io, gpa, id);
 }
 
+/// Oriel's voice activity detection model, written once to `<models>/vad`
+/// (not next to the whisper models, which the Speech models list scans).
+/// Whisper then hears only the speech: silence made it invent text and, past
+/// 30 s, repeat the last sentence until the end of the recording.
+var vad_path: ?[:0]u8 = null;
+var vad_tried = false;
+
+/// The VAD model's path, or null (logged once) when it can't be written:
+/// transcription then runs on all of the audio. Caller holds `mutex`.
+fn vadLocked(io: std.Io, gpa: std.mem.Allocator) ?[:0]const u8 {
+    if (vad_tried) return vad_path;
+    vad_tried = true;
+    const d = dir(gpa) catch return null;
+    defer gpa.free(d);
+    const vad_dir = std.fs.path.join(gpa, &.{ d, "vad" }) catch return null;
+    defer gpa.free(vad_dir);
+    vad_path = whisper.VadModel.install(io, gpa, vad_dir) catch |err| {
+        log.warn("voice activity detection unavailable ({s}): transcribing all the audio", .{@errorName(err)});
+        return null;
+    };
+    return vad_path;
+}
+
+fn threads() c_int {
+    return @intCast(@min(std.Thread.getCpuCount() catch 4, 8));
+}
+
 /// Transcribe mono 16 kHz samples with model `id`. Caller frees the text.
 pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, id: []const u8, samples: []const f32, language: []const u8, translate: bool) ![]u8 {
     mutex.lockUncancelable(io);
@@ -155,8 +182,7 @@ pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, id: []const u8, samples: [
     const ctx = try ensureLocked(io, gpa, id);
     const lang = try gpa.dupeZ(u8, if (language.len == 0) "auto" else language);
     defer gpa.free(lang);
-    const threads: c_int = @intCast(@min(std.Thread.getCpuCount() catch 4, 8));
-    return ctx.transcribe(gpa, samples, .{ .language = lang, .translate = translate, .threads = threads });
+    return ctx.transcribe(gpa, samples, .{ .language = lang, .translate = translate, .threads = threads(), .vad_model = vadLocked(io, gpa) });
 }
 
 pub const Segment = struct {
@@ -193,14 +219,8 @@ pub fn transcribeSegments(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.All
     const c = whisper.c;
     const n_samples = std.math.cast(c_int, samples.len) orelse return error.AudioTooLong;
     const lang = try arena.dupeZ(u8, if (language.len == 0) "auto" else language);
-    var p = c.whisper_full_default_params(c.WHISPER_SAMPLING_GREEDY);
-    p.print_progress = false;
-    p.print_realtime = false;
-    p.print_timestamps = false;
-    p.print_special = false;
-    p.no_context = true;
-    p.language = lang.ptr;
-    p.n_threads = @intCast(@min(std.Thread.getCpuCount() catch 4, 8));
+    // With VAD, whisper.cpp maps segment times back onto the original audio.
+    const p = whisper.fullParams(.{ .language = lang, .threads = threads(), .vad_model = vadLocked(io, gpa) });
     if (c.whisper_full(ctx.handle, p, samples.ptr, n_samples) != 0) return error.TranscribeFailed;
 
     const n: usize = @intCast(@max(0, c.whisper_full_n_segments(ctx.handle)));
