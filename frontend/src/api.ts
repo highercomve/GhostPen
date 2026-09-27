@@ -51,6 +51,8 @@ export interface Settings {
   profiles: Profile[];
   forceSynthetic: boolean;
   restoreDelayMs: number;
+  /** After a menu action: paste over the selection, or show it in the menu. */
+  afterAction?: "paste" | "show";
   customActions: CustomAction[];
   ocr: OcrSettings;
   captions: CaptionsSettings;
@@ -104,6 +106,8 @@ export interface ProcessResult {
   output: string;
   pasted: boolean;
   manual: boolean;
+  /** Shown in the menu instead of pasted (Shift+action, or Settings). */
+  shown?: boolean;
 }
 
 // ---- command wrappers ----------------------------------------------------------------
@@ -120,11 +124,11 @@ export const copyText = (text: string) => invoke<void>("copy_text", { text });
 export type Level = "subtle" | "balanced" | "strong";
 export const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 
-export const processAiAction = (action: string, targetLang: string | null, level: Level) =>
-  invoke<ProcessResult>("process_ai_action", { action, targetLang, level });
+export const processAiAction = (action: string, targetLang: string | null, level: Level, show = false) =>
+  invoke<ProcessResult>("process_ai_action", { action, targetLang, level, show });
 /** Freeform instruction (menu prompt bar) applied to the selection, pasted back like an action. */
-export const processAiCustom = (instruction: string) =>
-  invoke<ProcessResult>("process_ai_custom", { instruction });
+export const processAiCustom = (instruction: string, show = false) =>
+  invoke<ProcessResult>("process_ai_custom", { instruction, show });
 /** Playground: transform text directly, no clipboard involved. */
 export const processText = (action: string, targetLang: string | null, level: Level, text: string) =>
   invoke<string>("process_text", { action, targetLang, level, text });

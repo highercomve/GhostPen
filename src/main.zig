@@ -134,7 +134,13 @@ const SelectionInfo = struct {
     }
 };
 
-const ProcessResult = struct { output: []const u8, pasted: bool, manual: bool };
+const ProcessResult = struct {
+    output: []const u8,
+    pasted: bool,
+    manual: bool,
+    /// Shown in the menu instead of pasted (Shift+action, or Settings).
+    shown: bool = false,
+};
 
 pub const Events = struct {
     @"ghostpen://show": struct {},
@@ -236,6 +242,13 @@ pub fn proofread(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     const system = (try ai.builtinPrompt(arena, "proofread", null, .balanced)).?;
     var diag: ai.Diag = .{};
     return ai.complete(io, gpa, arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } }, &diag);
+}
+
+/// The result stays in the menu (with Copy): nothing pasted, the clipboard
+/// untouched, e.g. for text selected in something read-only.
+fn showResult(output: []const u8) ProcessResult {
+    log.info("deliver: {d} chars shown in the menu", .{output.len});
+    return .{ .output = output, .pasted = false, .manual = false, .shown = true };
 }
 
 /// Put the result on the clipboard, paste it into the app underneath (hide
@@ -479,23 +492,27 @@ pub const Commands = struct {
         oriel.clipboard.writeText(args.text) catch |err| return oriel.ipc.fail("Could not write the clipboard ({s}).", .{@errorName(err)});
     }
 
-    pub fn process_ai_action(arena: std.mem.Allocator, args: struct { action: []const u8, targetLang: ?[]const u8 = null, level: ?[]const u8 = null }) !ProcessResult {
+    /// `show`: keep the result in the menu (Shift+action) instead of pasting
+    /// it over the selection; also when Settings say "show".
+    pub fn process_ai_action(arena: std.mem.Allocator, args: struct { action: []const u8, targetLang: ?[]const u8 = null, level: ?[]const u8 = null, show: bool = false }) !ProcessResult {
         try acquireBusy();
         defer busy.store(false, .release);
         const s = try shared.get(io, arena);
         const text = try selectionText(arena);
         const r = try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
         const output = try complete(arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = text } });
+        if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }
 
-    pub fn process_ai_custom(arena: std.mem.Allocator, args: struct { instruction: []const u8 }) !ProcessResult {
+    pub fn process_ai_custom(arena: std.mem.Allocator, args: struct { instruction: []const u8, show: bool = false }) !ProcessResult {
         try acquireBusy();
         defer busy.store(false, .release);
         const s = try shared.get(io, arena);
         const text = try selectionText(arena);
         const system = try ai.instructionPrompt(arena, args.instruction);
         const output = try complete(arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } });
+        if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }
 

@@ -399,6 +399,15 @@ export default function Settings() {
           Force synthetic copy/paste on Wayland (needs libei; off = manual-copy mode)
         </label>
         <label>
+          After an action
+          <select value={settings.afterAction ?? "paste"}
+            onChange={(e) => update({ afterAction: e.target.value as "paste" | "show" })}>
+            <option value="paste">Paste the result over the selection</option>
+            <option value="show">Show the result in the menu (with Copy)</option>
+          </select>
+        </label>
+        <p className="muted small">Hold <kbd>Shift</kbd> when you pick an action to get the other one, e.g. to translate text you can't edit (a web page, a chat).</p>
+        <label>
           Clipboard restore delay (ms)
           <input type="number" min={0} max={2000} value={settings.restoreDelayMs}
             onChange={(e) => update({ restoreDelayMs: parseInt(e.target.value || "0", 10) })} />

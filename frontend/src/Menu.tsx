@@ -96,11 +96,28 @@ export default function Menu() {
     }
   }, []);
 
+  // Whether Shift is down (keys and clicks): Shift+action shows the result.
+  const shiftHeld = useRef(false);
+  useEffect(() => {
+    const track = (e: KeyboardEvent | MouseEvent) => {
+      shiftHeld.current = e.shiftKey;
+    };
+    window.addEventListener("keydown", track, true);
+    window.addEventListener("keyup", track, true);
+    window.addEventListener("mousedown", track, true);
+    return () => {
+      window.removeEventListener("keydown", track, true);
+      window.removeEventListener("keyup", track, true);
+      window.removeEventListener("mousedown", track, true);
+    };
+  }, []);
+
   const run = useCallback(
     async (action: string, targetLang: string | null, label: string) => {
       setView({ kind: "loading", label });
       try {
-        const result = await processAiAction(action, targetLang, level);
+        // Shift held (key or click): show the result here instead of pasting.
+        const result = await processAiAction(action, targetLang, level, shiftHeld.current);
         setView({ kind: "result", result });
       } catch (e) {
         setView({ kind: "error", message: String(e) });
@@ -117,7 +134,7 @@ export default function Menu() {
     if (!instruction || empty) return;
     setView({ kind: "loading", label: instruction });
     try {
-      const result = await processAiCustom(instruction);
+      const result = await processAiCustom(instruction, shiftHeld.current);
       setPrompt("");
       setView({ kind: "result", result });
     } catch (e) {
@@ -303,8 +320,10 @@ export default function Menu() {
           }
           break;
         default:
-          if (/^[1-9]$/.test(e.key)) {
-            const idx = Number(e.key) - 1;
+          // e.code: Shift+1 gives "!" as the key.
+          const digit = /^Digit([1-9])$/.exec(e.code)?.[1] ?? (/^[1-9]$/.test(e.key) ? e.key : null);
+          if (digit) {
+            const idx = Number(digit) - 1;
             if (idx < n) {
               e.preventDefault();
               setCursor(idx);
@@ -445,6 +464,7 @@ export default function Menu() {
                 className={`action ${i === cursor ? "selected" : ""}`}
                 disabled={empty}
                 onClick={() => a.activate()}
+                title="Shift+click (or Shift+number): show the result instead of pasting it"
                 onMouseEnter={() => setCursor(i)}
               >
                 <Icon name={a.icon} className="action-icon" />
@@ -507,13 +527,18 @@ export default function Menu() {
       {view.kind === "result" && (
         <div className="state result">
           <div className="state-label ok">
-            {view.result.pasted ? "✓ Pasted" : "✓ Result copied"}
+            {view.result.shown ? "✓ Result" : view.result.pasted ? "✓ Pasted" : "✓ Result copied"}
           </div>
-          {!view.result.pasted && (
+          {!view.result.pasted && !view.result.shown && (
             <div className="hint">On the clipboard — press <kbd>{PASTE_KEYS}</kbd> to paste.</div>
           )}
           <pre className="output">{view.result.output}</pre>
           <div className="row">
+            {view.result.shown && (
+              <button className="action small primary" onClick={() => { copyText(view.result.output); dismissMenu(); }}>
+                Copy
+              </button>
+            )}
             <button className="action small" onClick={() => setView({ kind: "menu" })}>
               Back
             </button>
