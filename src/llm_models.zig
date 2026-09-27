@@ -286,6 +286,16 @@ pub fn isDownloading() bool {
     return downloading.load(.acquire);
 }
 
+/// Hold off downloads while deleting (a delete racing a download's start
+/// would unlink the `.part` it writes). False: a download is running.
+pub fn beginExclusive() bool {
+    return !downloading.swap(true, .acq_rel);
+}
+
+pub fn endExclusive() void {
+    downloading.store(false, .release);
+}
+
 /// Download catalog model `id` into `d.own`: the model when it's missing,
 /// then its image projector when it has one and that's missing. Each file
 /// resumes a `.part`, is checked against its SHA-256, then renamed.
@@ -585,7 +595,8 @@ fn Sink(comptime Ctx: type, comptime on_progress: fn (Ctx, Progress) void) type 
 /// Delete a downloaded model (and its partial download) from our folder.
 pub fn remove(io: std.Io, arena: std.mem.Allocator, d: Dirs, id: []const u8) !void {
     const e = find(id) orelse return error.UnknownModel;
-    if (isDownloading()) return error.Busy;
+    if (!beginExclusive()) return error.Busy;
+    defer endExclusive();
     const final = try std.fs.path.join(arena, &.{ d.own, e.file });
     std.Io.Dir.cwd().deleteFile(io, final) catch {};
     std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}.part", .{final})) catch {};

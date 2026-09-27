@@ -66,6 +66,11 @@ fn parseBind(bind: []const u8) !std.Io.net.IpAddress {
     return std.Io.net.IpAddress.parse(host, port);
 }
 
+/// The model the server was started with (GHOSTPEN_STT_MODEL), if any.
+pub fn modelOverride() ?[]const u8 {
+    return config.model_override;
+}
+
 /// The model to serve now: the override, else the live captions setting.
 fn currentModel(arena: std.mem.Allocator) []const u8 {
     if (config.model_override) |m| return m;

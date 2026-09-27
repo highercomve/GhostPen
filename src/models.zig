@@ -72,7 +72,7 @@ pub fn find(id: []const u8) ?Entry {
     return null;
 }
 
-/// Other apps' model folders (GhostReel's), searched for `ggml-<id>.bin`
+/// Other apps' model folders (GhostReel's; LM Studio's), searched for `ggml-<id>.bin`
 /// and never written. Set once at startup.
 pub var search_dirs: []const []const u8 = &.{};
 
@@ -250,7 +250,8 @@ pub fn status(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator) !Sta
         if (try resolve(io, gpa, e.id)) |p| {
             defer gpa.free(p);
             st.path = try arena.dupe(u8, p);
-            st.external = !std.mem.startsWith(u8, p, own);
+            const parent = std.fs.path.dirname(p) orelse "";
+            st.external = !std.mem.eql(u8, std.mem.trimEnd(u8, parent, "/\\"), std.mem.trimEnd(u8, own, "/\\"));
         } else {
             const part = try std.fmt.allocPrint(arena, "{s}{c}ggml-{s}.bin.part", .{ own, std.fs.path.sep, e.id });
             if (std.Io.Dir.cwd().statFile(io, part, .{})) |f| st.partial = f.size else |_| {}
@@ -304,6 +305,10 @@ pub fn download(
     status_out: *std.http.Status,
 ) !void {
     const e = find(id) orelse return error.UnknownModel;
+    if (try resolve(io, gpa, id)) |p| {
+        gpa.free(p); // already here (ours or another app's)
+        return;
+    }
     const own = try dir(arena);
     const name = try std.fmt.allocPrint(arena, "ggml-{s}.bin", .{e.id});
     const url = try std.fmt.allocPrint(arena, "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{s}", .{name});
@@ -322,10 +327,12 @@ pub fn isDownloading() bool {
 /// Delete model `id` (and a partial download) from our folder; unloaded
 /// first when it's the resident one. Another app's copy is never touched.
 pub fn remove(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !void {
-    if (isDownloading()) return error.Busy;
+    if (!llm_models.beginExclusive()) return error.Busy;
+    defer llm_models.endExclusive();
     const p = try path(gpa, id);
     defer gpa.free(p);
     {
+        // Held through the delete: no load of this file in between.
         mutex.lockUncancelable(io);
         defer mutex.unlock(io);
         const resident = if (loaded_name) |n| std.mem.eql(u8, n, id) else false;
@@ -335,8 +342,8 @@ pub fn remove(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !void {
             loaded = null;
             loaded_name = null;
         }
+        std.Io.Dir.cwd().deleteFile(io, p) catch |err| if (err != error.FileNotFound) return err;
     }
-    std.Io.Dir.cwd().deleteFile(io, p) catch |err| if (err != error.FileNotFound) return err;
     const part = try std.fmt.allocPrint(gpa, "{s}.part", .{p});
     defer gpa.free(part);
     std.Io.Dir.cwd().deleteFile(io, part) catch {};

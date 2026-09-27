@@ -155,6 +155,8 @@ pub const Events = struct {
     @"ghostpen://dictation-show": struct {},
     /// Local model downloads (to the Settings window).
     @"ghostpen://llm-download": llm_models.Progress,
+    /// Speech (whisper) model downloads (Settings).
+    @"ghostpen://whisper-download": llm_models.Progress,
     /// Update download progress (Settings).
     @"ghostpen://update-progress": updates.Progress,
 };

@@ -6,6 +6,7 @@ const std = @import("std");
 const oriel = @import("oriel");
 const main = @import("main.zig");
 const models = @import("models.zig");
+const stt_server = @import("stt_server.zig");
 
 const App = oriel.App;
 const audio = oriel.audio_capture;
@@ -426,6 +427,8 @@ pub const Commands = struct {
         const s = try main.shared.get(main.io, arena);
         if (std.mem.eql(u8, s.captions.model, args.id))
             return oriel.ipc.fail("Captions and dictation use this model: pick another one first.", .{});
+        if (stt_server.modelOverride()) |m| if (std.mem.eql(u8, m, args.id))
+            return oriel.ipc.fail("The transcription server uses this model (GHOSTPEN_STT_MODEL).", .{});
         if (!models.validId(args.id)) return oriel.ipc.fail("Invalid model name.", .{});
         models.remove(main.io, gpa, args.id) catch |err| return if (err == error.Busy)
             oriel.ipc.fail("Wait for the download to finish (or pause it) first.", .{})

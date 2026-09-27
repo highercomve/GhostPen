@@ -56,7 +56,8 @@ export default function WhisperModels(props: {
     try {
       await whisperDownloadModel(id);
     } catch (e) {
-      setMessage(String(e));
+      // The progress event already said why, unless it never started.
+      setMessage((m) => m || String(e));
     } finally {
       setProgress(null);
       refresh();
@@ -147,7 +148,12 @@ export default function WhisperModels(props: {
                     <button className="btn" disabled={busy} onClick={() => download(m.id)}>
                       Resume ({Math.round((m.partial / m.size) * 100)}%)
                     </button>
-                    {!active && <button className="btn" disabled={busy} onClick={() => remove(m.id)}>Clear</button>}
+                    {!active &&
+                      (confirmDelete === m.id ? (
+                        <button className="btn danger" disabled={busy} onClick={() => remove(m.id)}>Discard {formatBytes(m.partial)}?</button>
+                      ) : (
+                        <button className="btn" disabled={busy} onClick={() => setConfirmDelete(m.id)}>Clear</button>
+                      ))}
                   </>
                 ) : (
                   <button className="btn" disabled={busy} onClick={() => download(m.id)}>Download</button>
@@ -177,6 +183,15 @@ export default function WhisperModels(props: {
                     <button className="btn primary" disabled={active} onClick={() => use(o.id)}>
                       {active ? "Using" : "Use"}
                     </button>
+                    {!o.external && !active &&
+                      (confirmDelete === o.id ? (
+                        <>
+                          <button className="btn danger" onClick={() => remove(o.id)}>Delete {formatBytes(o.size)}?</button>
+                          <button className="btn" onClick={() => setConfirmDelete(null)}>Keep</button>
+                        </>
+                      ) : (
+                        <button className="btn" onClick={() => setConfirmDelete(o.id)}>Delete</button>
+                      ))}
                   </div>
                 </div>
               );
