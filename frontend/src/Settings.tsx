@@ -235,6 +235,7 @@ export default function Settings() {
   return (
     <div className="settings">
       <h1>GhostPen Settings</h1>
+      <div className="settings-cards">
 
       {/* Diagnostics */}
       {status && (
@@ -624,6 +625,7 @@ export default function Settings() {
       </section>
 
       <AboutUpdates autoUpdate={settings.autoUpdate ?? true} onAutoUpdate={(on) => update({ autoUpdate: on })} />
+      </div>
 
       <div className="footer">
         {saveError && <span className="save-error">⚠ {saveError}</span>}

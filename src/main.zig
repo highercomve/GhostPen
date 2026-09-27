@@ -208,10 +208,18 @@ fn resolveAction(arena: std.mem.Allocator, s: Settings, action: []const u8, lang
 
 fn complete(arena: std.mem.Allocator, req: ai.Request) ![]const u8 {
     var diag: ai.Diag = .{};
-    return ai.complete(io, gpa, arena, req, &diag) catch |err| switch (err) {
-        error.AiFailed => oriel.ipc.fail("{s}", .{diag.message}),
-        else => err,
+    const start = std.Io.Clock.awake.now(io);
+    const out = ai.complete(io, gpa, arena, req, &diag) catch |err| {
+        log.warn("AI request ({s} {s}) failed: {s}", .{ req.profile.name, req.profile.model, if (err == error.AiFailed) diag.message else @errorName(err) });
+        return switch (err) {
+            error.AiFailed => oriel.ipc.fail("{s}", .{diag.message}),
+            else => err,
+        };
     };
+    const ms = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    log.info("AI request ({s} {s}): {d} chars in {d} ms", .{ req.profile.name, req.profile.model, out.len, ms });
+    if (std.mem.trim(u8, out, " \t\r\n").len == 0) log.warn("AI request returned only whitespace", .{});
+    return out;
 }
 
 /// AI translation for captions (runs on the captions worker).
@@ -234,8 +242,14 @@ pub fn proofread(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
 /// the menu first so it gets the keystroke), then restore what the
 /// clipboard held before.
 fn deliver(output: []const u8, s: Settings) !ProcessResult {
-    oriel.clipboard.writeText(output) catch |err| return oriel.ipc.fail("Could not write the clipboard ({s}).", .{@errorName(err)});
-    if (!useSynthetic(s)) return .{ .output = output, .pasted = false, .manual = true };
+    oriel.clipboard.writeText(output) catch |err| {
+        log.warn("deliver: writing the clipboard failed: {s}", .{@errorName(err)});
+        return oriel.ipc.fail("Could not write the clipboard ({s}).", .{@errorName(err)});
+    };
+    if (!useSynthetic(s)) {
+        log.info("deliver: {d} chars on the clipboard (manual mode: paste with Ctrl+V)", .{output.len});
+        return .{ .output = output, .pasted = false, .manual = true };
+    }
 
     App.runOnMain({}, struct {
         fn hide(_: void) void {
@@ -247,6 +261,7 @@ fn deliver(output: []const u8, s: Settings) !ProcessResult {
         log.warn("paste failed ({s}); the result is on the clipboard", .{@errorName(err)});
         return .{ .output = output, .pasted = false, .manual = true };
     };
+    log.info("deliver: {d} chars on the clipboard, Ctrl+V sent; the previous clipboard comes back in {d} ms", .{ output.len, s.restoreDelayMs });
 
     // Restore after the target app has read the clipboard. The snapshot is
     // taken now: a new trigger during the delay must not replace it.
@@ -265,6 +280,7 @@ fn deliver(output: []const u8, s: Settings) !ProcessResult {
 fn restoreSnapshot(snap: Content, delay_ms: u64) void {
     defer snap.deinit();
     io.sleep(.fromMilliseconds(@intCast(@min(delay_ms, 60_000))), .awake) catch {};
+    log.info("deliver: previous clipboard restored ({s})", .{@tagName(snap)});
     switch (snap) {
         .empty => {},
         .text => |t| oriel.clipboard.writeText(t) catch |err| log.warn("restore clipboard: {s}", .{@errorName(err)}),

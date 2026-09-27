@@ -376,13 +376,22 @@ kbd {
 
 /* ---------- Settings ---------- */
 
+/* The whole window is the page (a tiling window manager may make it any
+   size): the cards flow into two columns when there's room. */
 .settings {
   background: var(--bg);
   min-height: 100vh;
   padding: 20px;
-  max-width: 540px;
-  margin: 0 auto;
 }
+.settings > h1,
+.settings-cards,
+.settings > .footer {
+  max-width: 1120px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.settings-cards { columns: 2 480px; column-gap: 16px; }
+.settings-cards > * { break-inside: avoid; }
 .settings.loading-page { display: flex; align-items: center; justify-content: center; color: var(--muted); }
 .settings h1 { font-size: 20px; margin: 0 0 16px; }
 .settings h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -494,7 +503,8 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   gap: 10px;
   position: sticky;
   bottom: 0;
-  padding-top: 8px;
+  padding: 8px 0;
+  background: var(--bg);
 }
 .footer .save-error { color: var(--danger); margin-right: auto; }
 
