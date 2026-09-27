@@ -101,7 +101,7 @@ export default function LocalModels(props: {
         Ollama or LM Studio needed, nothing sent over the network. Use one with a profile set to
         {" "}<b>Built-in</b> (the <b>Use</b> button creates one).
         Models LM Studio or GhostReel already downloaded are found and reused.
-        Image text extraction still needs a vision endpoint.
+        Models that <b>read images</b> (with their image projector) also do Extract Text.
       </p>
 
       <div className="llm-list">
@@ -116,10 +116,16 @@ export default function LocalModels(props: {
                 <div>
                   <b>{m.name}</b> <span className="muted small">{formatBytes(m.size)}</span>
                   {active && <span className="llm-badge">in use</span>}
+                  {m.vision && <span className="llm-badge vision">reads images</span>}
                 </div>
                 <span className="muted small">
                   Speed {scoreMeter(m.speed)} · Quality {scoreMeter(m.quality)} · {m.note}
                 </span>
+                {installed && m.vision_available && !m.vision && !p && (
+                  <span className="muted small">
+                    Its image projector ({formatBytes(m.projector_size)}) isn't downloaded: without it, Extract Text can't use this model.
+                  </span>
+                )}
                 {installed && m.external && (
                   <span className="muted small" title={m.path}>Found in another app's folder: reused</span>
                 )}
@@ -142,6 +148,9 @@ export default function LocalModels(props: {
                     <button className="btn primary" disabled={active} onClick={() => props.onUse(m.id, m.name)}>
                       {active ? "Using" : "Use"}
                     </button>
+                    {m.vision_available && !m.vision && (
+                      <button className="btn" disabled={busy} onClick={() => download(m.id)}>Add image support</button>
+                    )}
                     {!m.external &&
                       (confirmDelete === m.id ? (
                         <>
@@ -180,6 +189,7 @@ export default function LocalModels(props: {
                     <div>
                       <b>{o.name}</b> <span className="muted small">{formatBytes(o.size)}</span>
                       {active && <span className="llm-badge">in use</span>}
+                      {o.vision && <span className="llm-badge vision">reads images</span>}
                     </div>
                     <span className="muted small llm-path" title={o.path}>{o.path}</span>
                   </div>

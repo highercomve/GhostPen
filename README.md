@@ -99,7 +99,11 @@ the app down. The Linux and Windows releases run it on the GPU through Vulkan (a
 vendor; the CPU without a Vulkan driver), and the `-cuda` releases through
 CUDA on NVIDIA GPUs when the CUDA 13 runtime is installed (Vulkan
 otherwise); build with `-Dcuda` for CUDA; macOS uses Metal. `ghostpen-cli` uses Built-in profiles too (`ghostpen-cli models`
-lists them). Image text extraction still needs a vision endpoint.
+lists them). Extract Text (reading an image's text) works on built-in models
+that have their image projector, llama.cpp's `mmproj`: every catalog model has
+one, downloaded with the model ("Add image support" for a model you already
+have), and LM Studio's `mmproj-*.gguf` next to a model is picked up. Those
+models show **reads images** in Settings.
 
 Built-in profiles are new to this port: the Tauri app, if it reads the same
 settings, sees them as endpoints with no URL.

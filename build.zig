@@ -31,6 +31,8 @@ pub fn build(b: *std.Build) void {
         .whisper = true,
         // The local model runner ("This computer" profiles; src/llm_helper.zig).
         .llama = true,
+        // Images for vision models (their mmproj projector): Extract Text on Built-in profiles.
+        .llama_mtmd = true,
         .audio_capture = true,
         // Whisper and the local model on an NVIDIA GPU: `oriel build -Dcuda` (Linux, CUDA toolkit).
         .ggml_cuda = b.option(bool, "cuda", "Run whisper and the local model on an NVIDIA GPU (libggml-cuda.so; needs the CUDA toolkit)") orelse false,

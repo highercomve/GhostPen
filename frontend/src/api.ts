@@ -266,6 +266,11 @@ export interface LlmModel {
   external: boolean;
   /** Bytes of an interrupted download. */
   partial: number;
+  /** It has an image projector (mmproj) to download. */
+  vision_available: boolean;
+  projector_size: number;
+  /** The projector is there: it reads images (Extract Text). */
+  vision: boolean;
 }
 
 /** A GGUF found on disk that isn't in the catalog (id = "file:<path>"). */
@@ -274,6 +279,8 @@ export interface LlmLocalFile {
   name: string;
   path: string;
   size: number;
+  /** An mmproj next to it: it reads images. */
+  vision: boolean;
 }
 
 export interface LlmStatus {

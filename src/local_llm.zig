@@ -16,6 +16,8 @@ pub const Config = struct {
     exe: []const u8,
     /// The model file (.gguf).
     model: []const u8,
+    /// Its vision projector (mmproj .gguf): images in `Chat.image`.
+    mmproj: ?[]const u8 = null,
     ctx: u32 = 8192,
     gpu: bool = true,
     idle_minutes: u32 = 10,
@@ -27,6 +29,8 @@ pub const Chat = struct {
     temperature: f64 = 0.2,
     think: bool = false,
     max_tokens: u32 = 2048,
+    /// An image (PNG/JPEG bytes) before the text; needs `Config.mmproj`.
+    image: ?[]const u8 = null,
 };
 
 pub const Result = struct {
@@ -42,8 +46,10 @@ const load_timeout_ms = 10 * 60 * 1000;
 /// One answer, however slow the machine: then it's stopped (and the helper
 /// killed if it doesn't stop).
 const generate_timeout_ms = 5 * 60 * 1000;
-/// Request lines the helper accepts (its line buffer is 256 KiB).
+/// Text the helper accepts in one request.
 const max_request_bytes = 240 * 1024;
+/// A request line with an image in base64 (the helper's line buffer is 32 MiB).
+const max_image_line_bytes = 30 * 1024 * 1024;
 
 const Runner = struct {
     child: std.process.Child,
@@ -77,7 +83,7 @@ var tail_buf: [2048]u8 = undefined;
 var tail_len: usize = 0;
 
 fn keyOf(arena: std.mem.Allocator, cfg: Config) ![]u8 {
-    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{d}\x00{}", .{ cfg.exe, cfg.model, cfg.ctx, cfg.gpu });
+    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{d}\x00{}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.ctx, cfg.gpu });
 }
 
 /// Run one chat request; `on_chunk(ctx, delta)` for each piece of visible text.
@@ -101,9 +107,18 @@ pub fn chat(
         diag.* = "The text is too long for the built-in model (about 200 KB at most): select less.";
         return error.LocalFailed;
     }
+    if (req.image != null and cfg.mmproj == null) {
+        diag.* = "This built-in model can't read images: download its image projector in Settings → Built-in models, or pick a model that has one.";
+        return error.LocalFailed;
+    }
     const r = try ensure(io, gpa, arena, cfg, diag);
     const id = r.next_id;
     r.next_id += 1;
+    const image_b64: []const u8 = if (req.image) |img| blk: {
+        const enc = std.base64.standard.Encoder;
+        const out = try arena.alloc(u8, enc.calcSize(img.len));
+        break :blk enc.encode(out, img);
+    } else "";
     const line_out = try std.json.Stringify.valueAlloc(arena, .{
         .id = id,
         .cmd = "chat",
@@ -112,8 +127,13 @@ pub fn chat(
         .max_tokens = req.max_tokens,
         .temperature = req.temperature,
         .think = req.think,
+        .image = image_b64,
     }, .{});
-    if (line_out.len > max_request_bytes) {
+    if (image_b64.len > 0 and line_out.len > max_image_line_bytes) {
+        diag.* = "The image is too large for the built-in model.";
+        return error.LocalFailed;
+    }
+    if (image_b64.len == 0 and line_out.len > max_request_bytes) {
         diag.* = "The text is too long for the built-in model (about 200 KB at most): select less.";
         return error.LocalFailed;
     }
@@ -248,6 +268,7 @@ fn ensure(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Con
 fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, key: []const u8, diag: *[]const u8) (Error || error{GpuFailed})!*Runner {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ cfg.exe, "--llm-helper", "--model", cfg.model, "--ctx", try std.fmt.allocPrint(arena, "{d}", .{cfg.ctx}) });
+    if (cfg.mmproj) |m| try argv.appendSlice(arena, &.{ "--mmproj", m });
     if (!cfg.gpu) try argv.append(arena, "--cpu");
     var child = std.process.spawn(io, .{
         .argv = argv.items,

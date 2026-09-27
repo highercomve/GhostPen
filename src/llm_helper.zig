@@ -1,17 +1,21 @@
 //! The local LLM runner: GhostPen's own executable started as
-//! `ghostpen --llm-helper --model <file.gguf> [--ctx N] [--cpu]` by
+//! `ghostpen --llm-helper --model <file.gguf> [--mmproj <file.gguf>] [--ctx N] [--cpu]` by
 //! `local_llm.zig`. A separate process so a crash or an out-of-memory in
 //! llama.cpp can't take the app down, Stop can always kill it, and the
 //! model's memory is returned when it exits.
 //!
 //! Protocol: JSON lines. Once the model is loaded the helper prints
 //!
-//!     {"ready":true,"ctx":8192,"gpu":"NVIDIA GeForce RTX 4070","load_ms":2140}
+//!     {"ready":true,"ctx":8192,"gpu":"NVIDIA GeForce RTX 4070","vision":true,"load_ms":2140}
 //!
 //! then reads requests from stdin, one at a time:
 //!
 //!     {"id":1,"cmd":"chat","system":"…","user":"…","max_tokens":2048,"temperature":0.2,"think":false}
 //!     {"cmd":"cancel"}                        stop the running request
+//!
+//! With `--mmproj` (the model's vision projector) a chat can carry an image,
+//! `"image":"<base64 PNG/JPEG>"`: llama.cpp's mtmd turns it into tokens
+//! placed before the user's text.
 //!
 //! and answers each with deltas and one final line:
 //!
@@ -31,6 +35,7 @@ const log = std.log.scoped(.llm);
 
 const Options = struct {
     model: [:0]const u8,
+    mmproj: ?[:0]const u8 = null,
     ctx: u32 = 8192,
     cpu: bool = false,
 };
@@ -44,7 +49,12 @@ const Request = struct {
     temperature: f32 = 0.2,
     think: bool = false,
     seed: u32 = 42,
+    /// Base64 image (PNG, JPEG, ...), for models with a vision projector.
+    image: []const u8 = "",
 };
+
+/// Request lines: text, or an image in base64 (a 1024-pixel PNG is ~1-3 MB).
+const max_line_bytes = 32 * 1024 * 1024;
 
 var io: std.Io = undefined;
 var out_mutex: std.Io.Mutex = .init;
@@ -98,6 +108,9 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
         if (std.mem.eql(u8, a, "--model") and has_value) {
             i += 1;
             opts.model = gpa.dupeZ(u8, args[i]) catch return 1;
+        } else if (std.mem.eql(u8, a, "--mmproj") and has_value) {
+            i += 1;
+            opts.mmproj = gpa.dupeZ(u8, args[i]) catch return 1;
         } else if (std.mem.eql(u8, a, "--ctx") and has_value) {
             i += 1;
             opts.ctx = std.fmt.parseInt(u32, args[i], 10) catch 8192;
@@ -112,6 +125,7 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
 
     c.llama_log_set(logCallback, null);
     c.ggml_log_set(logCallback, null);
+    c.mtmd_helper_log_set(logCallback, null);
     const start = std.Io.Clock.awake.now(io);
     const gpus: usize = if (opts.cpu) 0 else oriel.ggml_gpu.load(io);
     c.llama_backend_init();
@@ -157,6 +171,27 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
     };
     defer c.llama_free(ctx);
 
+    // The vision projector: on the GPU with the model; without it the model
+    // still answers text.
+    const vision: ?*c.mtmd_context = if (opts.mmproj) |path| blk: {
+        var mp = c.mtmd_context_params_default();
+        mp.use_gpu = ngl > 0;
+        mp.n_threads = threads;
+        mp.print_timings = false;
+        mp.warmup = false;
+        const m = c.mtmd_init_from_file(path.ptr, model, mp) orelse {
+            std.debug.print("ghostpen-llm: could not load the vision projector {s}; images won't be read\n", .{path});
+            break :blk null;
+        };
+        if (!c.mtmd_support_vision(m)) {
+            c.mtmd_free(m);
+            std.debug.print("ghostpen-llm: {s} has no vision encoder; images won't be read\n", .{path});
+            break :blk null;
+        }
+        break :blk m;
+    } else null;
+    defer if (vision) |m| c.mtmd_free(m);
+
     const template: ?[]const u8 = if (c.llama_model_chat_template(model, null)) |t| std.mem.span(t) else null;
     const format = chat_format.detect(template);
 
@@ -167,15 +202,17 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
         .gpu = if (ngl > 0) (oriel.ggml_gpu.gpuName() orelse "GPU") else null,
         .gpu_layers = ngl,
         .format = @tagName(format),
+        .vision = vision != null,
         .load_ms = load_ms,
     });
 
-    var engine: Engine = .{ .gpa = gpa, .model = model, .ctx = ctx, .vocab = c.llama_model_get_vocab(model).?, .format = format, .template = template };
+    var engine: Engine = .{ .gpa = gpa, .model = model, .ctx = ctx, .vocab = c.llama_model_get_vocab(model).?, .format = format, .template = template, .vision = vision };
 
     // Requests: the worker generates; this thread keeps reading so a cancel
     // gets through.
-    var in_buf: [256 * 1024]u8 = undefined;
-    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    const in_buf = gpa.alloc(u8, max_line_bytes) catch return 1;
+    defer gpa.free(in_buf);
+    var reader = std.Io.File.stdin().readerStreaming(io, in_buf);
     var worker: ?std.Thread = null;
     defer if (worker) |t| {
         cancel.store(true, .release);
@@ -276,6 +313,7 @@ const Engine = struct {
     vocab: *const c.llama_vocab,
     format: chat_format.Format,
     template: ?[]const u8,
+    vision: ?*c.mtmd_context,
 
     fn run(self: *Engine, parsed: std.json.Parsed(Request)) void {
         defer parsed.deinit();
@@ -296,15 +334,17 @@ const Engine = struct {
         return error.Reported;
     }
 
-    fn prompt(self: *Engine, arena: std.mem.Allocator, req: Request) Error![]const u8 {
-        if (try chat_format.render(arena, self.format, req.system, req.user, req.think)) |p| return p;
+    /// The whole prompt; `user` is the user's turn (with the media marker
+    /// in front when there's an image).
+    fn prompt(self: *Engine, arena: std.mem.Allocator, req: Request, user: []const u8) Error![]const u8 {
+        if (try chat_format.render(arena, self.format, req.system, user, req.think)) |p| return p;
         // llama.cpp's built-in templates (by the model's template, else ChatML).
         const msgs = [_]c.llama_chat_message{
             .{ .role = "system", .content = (try arena.dupeZ(u8, req.system)).ptr },
-            .{ .role = "user", .content = (try arena.dupeZ(u8, req.user)).ptr },
+            .{ .role = "user", .content = (try arena.dupeZ(u8, user)).ptr },
         };
         const tmpl: ?[*:0]const u8 = if (self.template) |t| (try arena.dupeZ(u8, t)).ptr else null;
-        var cap: usize = (req.system.len + req.user.len) * 2 + 512;
+        var cap: usize = (req.system.len + user.len) * 2 + 512;
         while (true) {
             const buf = try arena.alloc(u8, cap);
             var n = c.llama_chat_apply_template(tmpl, &msgs, msgs.len, true, buf.ptr, @intCast(cap));
@@ -324,23 +364,14 @@ const Engine = struct {
     }
 
     fn generate(self: *Engine, arena: std.mem.Allocator, req: Request) Error!void {
-        const text = try self.prompt(arena, req);
-        const tokens = try self.tokenize(arena, text);
         const n_ctx: usize = c.llama_n_ctx(self.ctx);
-        if (tokens.len == 0) return fail(req.id, "Empty prompt.", .{});
-        if (tokens.len + 16 > n_ctx)
-            return fail(req.id, "The text is too long for the built-in model's context ({d} tokens, the context holds {d}): raise the context size in Settings.", .{ tokens.len, n_ctx });
-        const budget = @min(@as(usize, req.max_tokens), n_ctx - tokens.len);
-
         c.llama_memory_clear(c.llama_get_memory(self.ctx), true);
-        var pos: usize = 0;
-        while (pos < tokens.len) {
-            const n = @min(tokens.len - pos, 512);
-            const rc = c.llama_decode(self.ctx, c.llama_batch_get_one(tokens[pos..].ptr, @intCast(n)));
-            if (cancel.load(.acquire)) return self.finish(req.id, tokens.len, 0, false, true);
-            if (rc != 0) return fail(req.id, "The built-in model failed to read the prompt (llama_decode {d}).", .{rc});
-            pos += n;
-        }
+        const n_prompt = if (req.image.len > 0)
+            try self.readImagePrompt(arena, req, n_ctx)
+        else
+            try self.readTextPrompt(arena, req, n_ctx);
+        if (n_prompt == 0) return self.finish(req.id, 0, 0, false, true); // cancelled
+        const budget = @min(@as(usize, req.max_tokens), n_ctx - n_prompt);
 
         const chain = c.llama_sampler_chain_init(c.llama_sampler_chain_default_params()) orelse return error.OutOfMemory;
         defer c.llama_sampler_free(chain);
@@ -396,7 +427,57 @@ const Engine = struct {
             }
         }
         if (filter.visible(out.items)) |vis| if (vis.len > sent) send(.{ .id = req.id, .delta = try chat_format.validUtf8(arena, vis[sent..]) });
-        return self.finish(req.id, tokens.len, generated, !cancelled and generated >= budget, cancelled);
+        return self.finish(req.id, n_prompt, generated, !cancelled and generated >= budget, cancelled);
+    }
+
+    /// Decode the text prompt; its token count (0: cancelled).
+    fn readTextPrompt(self: *Engine, arena: std.mem.Allocator, req: Request, n_ctx: usize) Error!usize {
+        const text = try self.prompt(arena, req, req.user);
+        const tokens = try self.tokenize(arena, text);
+        if (tokens.len == 0) return fail(req.id, "Empty prompt.", .{});
+        if (tokens.len + 16 > n_ctx)
+            return fail(req.id, "The text is too long for the built-in model's context ({d} tokens, the context holds {d}): raise the context size in Settings.", .{ tokens.len, n_ctx });
+        var pos: usize = 0;
+        while (pos < tokens.len) {
+            const n = @min(tokens.len - pos, 512);
+            const rc = c.llama_decode(self.ctx, c.llama_batch_get_one(tokens[pos..].ptr, @intCast(n)));
+            if (cancel.load(.acquire)) return 0;
+            if (rc != 0) return fail(req.id, "The built-in model failed to read the prompt (llama_decode {d}).", .{rc});
+            pos += n;
+        }
+        return tokens.len;
+    }
+
+    /// Decode a prompt with an image (through the vision projector); its
+    /// token count (0: cancelled).
+    fn readImagePrompt(self: *Engine, arena: std.mem.Allocator, req: Request, n_ctx: usize) Error!usize {
+        const mctx = self.vision orelse return fail(req.id, "This built-in model can't read images: download its image projector in Settings → Built-in models, or pick a model that has one.", .{});
+        const decoder = std.base64.standard.Decoder;
+        const size = decoder.calcSizeForSlice(req.image) catch return fail(req.id, "The image isn't valid base64.", .{});
+        const bytes = try arena.alloc(u8, size);
+        decoder.decode(bytes, req.image) catch return fail(req.id, "The image isn't valid base64.", .{});
+        const wrapped = c.mtmd_helper_bitmap_init_from_buf(mctx, bytes.ptr, bytes.len, false, c.mtmd_helper_init_opt_default());
+        const bitmap = wrapped.bitmap orelse return fail(req.id, "The built-in model couldn't decode the image.", .{});
+        defer c.mtmd_bitmap_free(bitmap);
+
+        // The image goes where the marker is: before the user's text.
+        const user = try std.fmt.allocPrint(arena, "{s}\n{s}", .{ std.mem.span(c.mtmd_default_marker()), req.user });
+        const text = try self.prompt(arena, req, user);
+        const text_z = try arena.dupeZ(u8, text);
+        const input: c.mtmd_input_text = .{ .text = text_z.ptr, .text_len = text.len, .add_special = true, .parse_special = true };
+        const chunks = c.mtmd_input_chunks_init() orelse return error.OutOfMemory;
+        defer c.mtmd_input_chunks_free(chunks);
+        const bitmaps = [_]?*const c.mtmd_bitmap{bitmap};
+        const trc = c.mtmd_tokenize(mctx, chunks, &input, @ptrCast(&bitmaps), bitmaps.len);
+        if (trc != 0) return fail(req.id, "The built-in model couldn't read the image (mtmd_tokenize {d}).", .{trc});
+        const n_tokens = c.mtmd_helper_get_n_tokens(chunks);
+        if (n_tokens + 16 > n_ctx)
+            return fail(req.id, "The image and text need {d} tokens, the built-in model's context holds {d}: raise the context size in Settings.", .{ n_tokens, n_ctx });
+        var n_past: c.llama_pos = 0;
+        const rc = c.mtmd_helper_eval_chunks(mctx, self.ctx, chunks, 0, 0, 512, true, &n_past);
+        if (cancel.load(.acquire)) return 0;
+        if (rc != 0) return fail(req.id, "The built-in model failed to read the image ({d}).", .{rc});
+        return n_tokens;
     }
 
     fn finish(_: *Engine, id: u64, prompt_tokens: usize, gen_tokens: usize, truncated: bool, cancelled: bool) Error!void {

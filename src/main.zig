@@ -177,7 +177,7 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings_mod.Profile, diag: *
         diag.message = "Can't find GhostPen's executable to start the built-in model.";
         return error.AiFailed;
     };
-    return .{ .exe = exe, .model = path, .ctx = s.localLlm.ctxTokens, .gpu = s.localLlm.gpu, .idle_minutes = s.localLlm.idleMinutes };
+    return .{ .exe = exe, .model = path, .mmproj = llm_models.projector(io, arena, d, path), .ctx = s.localLlm.ctxTokens, .gpu = s.localLlm.gpu, .idle_minutes = s.localLlm.idleMinutes };
 }
 
 /// A local model setting for display: the catalog name, or the file's name.

@@ -908,6 +908,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .llm-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
 .llm-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .llm-badge { margin-left: 8px; padding: 1px 6px; border-radius: 6px; font-size: 11px; background: var(--accent-soft); color: var(--accent); }
+.llm-badge.vision { background: rgba(34, 160, 107, 0.14); color: #1f8f5f; }
 .llm-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .llm-progress { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 .llm-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-elev); overflow: hidden; }
