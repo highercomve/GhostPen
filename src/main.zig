@@ -317,13 +317,37 @@ fn readClipboard() Content {
 fn readClipboardChecked() !Content {
     var text_err: ?anyerror = null;
     if (oriel.clipboard.readText(gpa)) |text| {
-        if (std.mem.trim(u8, text, " \t\r\n").len > 0) return .{ .text = text };
+        // An image offered as text (an X11 owner that serves its data for any
+        // target, e.g. xclip) arrives as binary: that's not text.
+        if (std.mem.trim(u8, text, " \t\r\n").len > 0 and isText(text)) return .{ .text = text };
         gpa.free(text);
     } else |err| text_err = err;
     if (oriel.clipboard.readImage(gpa)) |maybe| {
         if (maybe) |png| return .{ .image = png };
     } else |err| if (text_err != null) return err;
     return .empty;
+}
+
+/// Valid UTF-8 without control characters other than tab and line breaks
+/// (binary data that GTK turned into "text" keeps its control bytes).
+fn isText(bytes: []const u8) bool {
+    if (!std.unicode.utf8ValidateSlice(bytes)) return false;
+    for (bytes) |c| switch (c) {
+        '\t', '\n', '\r' => {},
+        0...8, 11, 12, 14...31, 127 => return false,
+        else => {},
+    };
+    return true;
+}
+
+test isText {
+    try std.testing.expect(isText("teh quick brown fox"));
+    try std.testing.expect(isText("año · 日本"));
+    try std.testing.expect(!isText("\x89PNG\r\n\x1a\n"));
+    try std.testing.expect(!isText("a\x00b"));
+    // What GTK makes of a PNG served as text.
+    try std.testing.expect(!isText("\\89PNG\r\n\x1a\n"));
+    try std.testing.expect(isText("line one\r\n\tindented"));
 }
 
 /// Show (and focus) a window by label, centering the menu.
