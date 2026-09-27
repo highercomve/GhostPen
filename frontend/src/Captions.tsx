@@ -137,7 +137,8 @@ export default function Captions() {
   const running = status?.running ?? false;
 
   return (
-    <div className={`captions ${ghost ? "ghost" : ""}`}>
+    // Pressed anywhere but a button, the overlay moves (Oriel drag region).
+    <div className={`captions ${ghost ? "ghost" : ""}`} data-oriel-drag-region>
       {!ghost && (
         <div className="cap-bar">
           <span className="cap-brand">GhostPen Captions</span>
