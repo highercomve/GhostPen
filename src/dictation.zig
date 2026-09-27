@@ -345,8 +345,6 @@ fn end(finalize: bool) void {
 
 fn showOverlay() void {
     const w = App.getWindow("dictation") orelse return;
-    // Not where the user dragged it (Oriel drops the placement then).
-    if (w.options.placement != null) w.place(.{ .anchor = .bottom, .margin = 64 });
     w.show();
     w.focus();
     App.emit("ghostpen://dictation-show", .{});
