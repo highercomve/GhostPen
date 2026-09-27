@@ -316,6 +316,26 @@ const Status = struct {
     target_lang: []const u8,
 };
 
+/// An audio source for the Settings pickers: `name` is what the settings
+/// store (on Windows an endpoint id, unreadable), `label` what to show.
+pub const Device = struct { name: []const u8, label: []const u8, monitor: bool };
+
+/// The audio sources, system audio included only when `monitors` is set.
+pub fn listDevices(arena: std.mem.Allocator, monitors: bool) ![]const Device {
+    const sources = audio.listSources(gpa) catch |err| return oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)});
+    defer audio.freeSources(gpa, sources);
+    var list: std.ArrayList(Device) = .empty;
+    for (sources) |src| {
+        if (src.monitor and !monitors) continue;
+        try list.append(arena, .{
+            .name = try arena.dupe(u8, src.name),
+            .label = try arena.dupe(u8, if (src.description.len > 0) src.description else src.name),
+            .monitor = src.monitor,
+        });
+    }
+    return list.items;
+}
+
 pub const Commands = struct {
     pub fn open_captions(_: std.mem.Allocator) void {
         open();
@@ -333,12 +353,8 @@ pub const Commands = struct {
         };
     }
 
-    pub fn captions_list_devices(arena: std.mem.Allocator) ![]const []const u8 {
-        const sources = audio.listSources(gpa) catch |err| return oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)});
-        defer audio.freeSources(gpa, sources);
-        const names = try arena.alloc([]const u8, sources.len);
-        for (sources, names) |src, *n| n.* = try arena.dupe(u8, src.name);
-        return names;
+    pub fn captions_list_devices(arena: std.mem.Allocator) ![]const Device {
+        return listDevices(arena, true);
     }
 
     pub fn captions_start(arena: std.mem.Allocator) ![]const u8 {

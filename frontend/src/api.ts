@@ -149,7 +149,15 @@ export const openSettings = () => invoke<void>("open_settings");
 
 export const openCaptions = () => invoke<void>("open_captions");
 export const captionsStatus = () => invoke<CaptionsStatus>("captions_status");
-export const captionsListDevices = () => invoke<string[]>("captions_list_devices");
+/** An audio source: `name` goes in the settings, `label` is shown. */
+export interface AudioDevice {
+  name: string;
+  label: string;
+  /** System audio (what the speakers play), not a microphone. */
+  monitor: boolean;
+}
+
+export const captionsListDevices = () => invoke<AudioDevice[]>("captions_list_devices");
 /** Start capturing + transcribing; resolves to the capture device name. */
 export const captionsStart = () => invoke<string>("captions_start");
 export const captionsStop = () => invoke<void>("captions_stop");
@@ -189,7 +197,7 @@ export interface DictationUpdate {
 }
 
 /** Microphone candidates for the Settings picker (no monitor/loopback sources). */
-export const dictationListDevices = () => invoke<string[]>("dictation_list_devices");
+export const dictationListDevices = () => invoke<AudioDevice[]>("dictation_list_devices");
 export const dictationStatus = () => invoke<DictationStatus>("dictation_status");
 /** Start listening; resolves to the capture device name. */
 export const dictationStart = () => invoke<string>("dictation_start");
