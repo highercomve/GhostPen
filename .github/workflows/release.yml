@@ -87,7 +87,9 @@ jobs:
           zig build --fetch >/dev/null
           ORIEL_DIR=$(ls -d zig-pkg/oriel-$(sed -n 's/.*\.hash = "oriel-\([^"]*\)".*/\1/p' build.zig.zon))
           CUDA_PARTS='/^pub const CudaOptions/,/^};/{print} /^fn cudaArchArgs/,/^}/{print} /^fn isComputeCapability/,/^}/{print} /^fn addCudaBackend/,/^}/{print} /^const cuda_sources/,/^};/{print}'
-          GGML_KEY=$( { grep -A2 '\.llama = ' "$ORIEL_DIR/build.zig.zon"; awk "$CUDA_PARTS" "$ORIEL_DIR/build/ggml.zig"; } | sha256sum | cut -c1-16)
+          # Comments and error reporting don't change the library: left out,
+          # so a reworded message doesn't rebuild it.
+          GGML_KEY=$( { grep -A2 '\.llama = ' "$ORIEL_DIR/build.zig.zon"; awk "$CUDA_PARTS" "$ORIEL_DIR/build/ggml.zig" | grep -v -E '^\s*//|buildFail|panic\(' ; } | sha256sum | cut -c1-16)
           echo "GGML_KEY=$GGML_KEY" >> "$GITHUB_ENV"
           # Cache keys can't contain commas.
           echo "CUDA_ARCHS_KEY=${CUDA_ARCHS//,/_}" >> "$GITHUB_ENV"
