@@ -238,9 +238,9 @@ fn postCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, 
 
 /// One completion on GhostPen's built-in model; `on_chunk` gets the visible deltas.
 fn localCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, thinking: bool, ctx: anytype, comptime on_chunk: fn (@TypeOf(ctx), []const u8) void, diag: *Diag) Error![]const u8 {
-    const text = switch (req.user) {
-        .text => |t| t,
-        .image_with_text => return fail(diag, "The built-in model reads text only: extracting text from images needs a vision model endpoint (choose an endpoint profile)."),
+    const text, const image: ?[]const u8 = switch (req.user) {
+        .text => |t| .{ t, null },
+        .image_with_text => |iw| .{ iw.text, iw.png },
     };
     const resolver = local_resolver orelse return fail(diag, "Built-in models aren't available in this build.");
     const cfg = try resolver(arena, req.profile, diag);
@@ -251,6 +251,7 @@ fn localCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator,
         .temperature = req.profile.temperature,
         .think = thinking,
         .max_tokens = max_tokens,
+        .image = image,
     }, ctx, on_chunk, &message) catch |err| switch (err) {
         error.LocalFailed => return fail(diag, message),
         error.OutOfMemory => return error.OutOfMemory,

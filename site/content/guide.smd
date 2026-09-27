@@ -112,8 +112,11 @@ loopback device such as BlackHole to hear the system audio.
 
 Copy an image (a screenshot) and trigger GhostPen: **Extract text** reads
 it with a vision model through your profile, and the text becomes the
-selection. This needs an endpoint with a vision model (e.g. `gemma4:e4b`
-in Ollama); the built-in models read text only.
+selection. It works with a vision model on an endpoint (e.g. `gemma4:e4b`
+in Ollama) or with a built-in model that **reads images**: every catalog
+model has an image projector, downloaded with it (or **Add image support**
+in Settings → Built-in models for one you already have), and GhostPen runs
+it on your GPU.
 
 # Hotkeys
 

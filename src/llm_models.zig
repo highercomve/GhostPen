@@ -19,19 +19,29 @@ pub const Entry = struct {
     file: []const u8,
     size: u64,
     sha256: []const u8,
+    /// The vision projector (llama.cpp's mmproj) in the same repo: images
+    /// for Extract Text. Saved as `<model stem>.mmproj.gguf`.
+    projector: ?Projector = null,
     /// Relative 1-5 scores for the UI.
     speed: u8,
     quality: u8,
     note: []const u8,
 };
 
+pub const Projector = struct {
+    /// The file in the model's repo.
+    file: []const u8,
+    size: u64,
+    sha256: []const u8,
+};
+
 /// Smallest first. Sizes and hashes from Hugging Face's API (2026-09).
 pub const catalog = [_]Entry{
-    .{ .id = "qwen3.5-2b", .name = "Qwen3.5 2B", .repo = "unsloth/Qwen3.5-2B-GGUF", .file = "Qwen3.5-2B-Q4_K_M.gguf", .size = 1280835840, .sha256 = "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223", .speed = 5, .quality = 2, .note = "fastest; fine for proofreading" },
-    .{ .id = "gemma-3-4b-it", .name = "Gemma 3 4B", .repo = "ggml-org/gemma-3-4b-it-GGUF", .file = "gemma-3-4b-it-Q4_K_M.gguf", .size = 2489757856, .sha256 = "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863", .speed = 4, .quality = 3, .note = "good all-rounder, many languages" },
-    .{ .id = "qwen3.5-4b", .name = "Qwen3.5 4B", .repo = "unsloth/Qwen3.5-4B-GGUF", .file = "Qwen3.5-4B-Q4_K_M.gguf", .size = 2740937888, .sha256 = "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4", .speed = 4, .quality = 3, .note = "balanced" },
-    .{ .id = "gemma-4-e4b-it", .name = "Gemma 4 E4B", .repo = "unsloth/gemma-4-E4B-it-GGUF", .file = "gemma-4-E4B-it-Q4_K_M.gguf", .size = 4977171584, .sha256 = "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87", .speed = 3, .quality = 4, .note = "recommended; the model GhostPen's Ollama preset uses" },
-    .{ .id = "qwen3.5-9b", .name = "Qwen3.5 9B", .repo = "unsloth/Qwen3.5-9B-GGUF", .file = "Qwen3.5-9B-UD-Q4_K_XL.gguf", .size = 5966095584, .sha256 = "6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293", .speed = 2, .quality = 5, .note = "best quality; needs ~8 GB of GPU memory" },
+    .{ .id = "qwen3.5-2b", .name = "Qwen3.5 2B", .repo = "unsloth/Qwen3.5-2B-GGUF", .file = "Qwen3.5-2B-Q4_K_M.gguf", .size = 1280835840, .sha256 = "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223", .projector = .{ .file = "mmproj-F16.gguf", .size = 668227264, .sha256 = "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7" }, .speed = 5, .quality = 2, .note = "fastest; fine for proofreading" },
+    .{ .id = "gemma-3-4b-it", .name = "Gemma 3 4B", .repo = "ggml-org/gemma-3-4b-it-GGUF", .file = "gemma-3-4b-it-Q4_K_M.gguf", .size = 2489757856, .sha256 = "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863", .projector = .{ .file = "mmproj-model-f16.gguf", .size = 851251104, .sha256 = "8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb" }, .speed = 4, .quality = 3, .note = "good all-rounder, many languages" },
+    .{ .id = "qwen3.5-4b", .name = "Qwen3.5 4B", .repo = "unsloth/Qwen3.5-4B-GGUF", .file = "Qwen3.5-4B-Q4_K_M.gguf", .size = 2740937888, .sha256 = "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4", .projector = .{ .file = "mmproj-F16.gguf", .size = 672423616, .sha256 = "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864" }, .speed = 4, .quality = 3, .note = "balanced" },
+    .{ .id = "gemma-4-e4b-it", .name = "Gemma 4 E4B", .repo = "unsloth/gemma-4-E4B-it-GGUF", .file = "gemma-4-E4B-it-Q4_K_M.gguf", .size = 4977171584, .sha256 = "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87", .projector = .{ .file = "mmproj-F16.gguf", .size = 990372672, .sha256 = "ddf46c21d7078e95338cfc22306b19b276a29a5ad089023449dd54d4b6170a51" }, .speed = 3, .quality = 4, .note = "recommended; the model GhostPen's Ollama preset uses" },
+    .{ .id = "qwen3.5-9b", .name = "Qwen3.5 9B", .repo = "unsloth/Qwen3.5-9B-GGUF", .file = "Qwen3.5-9B-UD-Q4_K_XL.gguf", .size = 5966095584, .sha256 = "6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293", .projector = .{ .file = "mmproj-F16.gguf", .size = 918166080, .sha256 = "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f" }, .speed = 2, .quality = 5, .note = "best quality; needs ~8 GB of GPU memory" },
 };
 
 pub const default_id = "gemma-4-e4b-it";
@@ -42,7 +52,39 @@ pub fn find(id: []const u8) ?Entry {
 }
 
 pub fn url(arena: std.mem.Allocator, e: Entry) ![]const u8 {
-    return std.fmt.allocPrint(arena, "https://huggingface.co/{s}/resolve/main/{s}", .{ e.repo, e.file });
+    return repoUrl(arena, e.repo, e.file);
+}
+
+fn repoUrl(arena: std.mem.Allocator, repo: []const u8, file: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "https://huggingface.co/{s}/resolve/main/{s}", .{ repo, file });
+}
+
+/// Where a catalog model's projector is saved: `<model stem>.mmproj.gguf`
+/// (the repos all call theirs mmproj-F16.gguf, and our folder holds several).
+pub fn projectorName(arena: std.mem.Allocator, model_file: []const u8) ![]const u8 {
+    const stem = if (std.ascii.endsWithIgnoreCase(model_file, ".gguf")) model_file[0 .. model_file.len - ".gguf".len] else model_file;
+    return std.fmt.allocPrint(arena, "{s}.mmproj.gguf", .{stem});
+}
+
+/// The vision projector for the model at `model_path`: `<stem>.mmproj.gguf`
+/// next to it, else (outside our own folder, where each model has a folder
+/// of its own, as in LM Studio) the one `mmproj*.gguf` beside it.
+pub fn projector(io: std.Io, arena: std.mem.Allocator, d: Dirs, model_path: []const u8) ?[]const u8 {
+    const dir_path = std.fs.path.dirname(model_path) orelse return null;
+    const named = std.fs.path.join(arena, &.{ dir_path, projectorName(arena, std.fs.path.basename(model_path)) catch return null }) catch return null;
+    if (std.Io.Dir.cwd().access(io, named, .{})) |_| return named else |_| {}
+    if (std.mem.eql(u8, std.mem.trimEnd(u8, dir_path, "/\\"), std.mem.trimEnd(u8, d.own, "/\\"))) return null;
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var found: ?[]const u8 = null;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.ascii.startsWithIgnoreCase(entry.name, "mmproj") or !std.ascii.endsWithIgnoreCase(entry.name, ".gguf")) continue;
+        if (found != null) return null; // several: which one is ambiguous
+        found = std.fs.path.join(arena, &.{ dir_path, entry.name }) catch return null;
+    }
+    return found;
 }
 
 /// Where the models live and where else to look.
@@ -135,10 +177,16 @@ pub const ModelState = struct {
     external: bool = false,
     /// Bytes of an interrupted download (resumable).
     partial: u64 = 0,
+    /// It has an image projector to download (catalog).
+    vision_available: bool = false,
+    /// Size of that projector.
+    projector_size: u64 = 0,
+    /// The projector is there: it reads images.
+    vision: bool = false,
 };
 
 /// A GGUF found in another app's folder that isn't in the catalog.
-pub const LocalFile = struct { id: []const u8, name: []const u8, path: []const u8, size: u64 };
+pub const LocalFile = struct { id: []const u8, name: []const u8, path: []const u8, size: u64, vision: bool = false };
 
 pub const Status = struct {
     dir: []const u8,
@@ -150,9 +198,14 @@ pub fn status(io: std.Io, arena: std.mem.Allocator, d: Dirs) !Status {
     var models: std.ArrayList(ModelState) = .empty;
     for (catalog) |e| {
         var s: ModelState = .{ .id = e.id, .name = e.name, .file = e.file, .size = e.size, .speed = e.speed, .quality = e.quality, .note = e.note };
+        if (e.projector) |pj| {
+            s.vision_available = true;
+            s.projector_size = pj.size;
+        }
         if (resolve(io, arena, d, e.id)) |p| {
             s.path = p;
             s.external = !std.mem.startsWith(u8, p, d.own);
+            s.vision = projector(io, arena, d, p) != null;
         } else {
             const part = try std.fmt.allocPrint(arena, "{s}{c}{s}.part", .{ d.own, std.fs.path.sep, e.file });
             if (std.Io.Dir.cwd().statFile(io, part, .{})) |st| s.partial = st.size else |_| {}
@@ -191,6 +244,7 @@ fn scanOthers(io: std.Io, arena: std.mem.Allocator, d: Dirs) ![]const LocalFile 
                 .name = try arena.dupe(u8, base[0 .. base.len - ".gguf".len]),
                 .path = path,
                 .size = st.size,
+                .vision = projector(io, arena, d, path) != null,
             });
         }
     }
@@ -229,8 +283,10 @@ pub fn isDownloading() bool {
     return downloading.load(.acquire);
 }
 
-/// Download catalog model `id` into `d.own`, resuming a `.part`, verifying
-/// the SHA-256, then renaming. `on_progress(ctx, p)` at most every 200 ms.
+/// Download catalog model `id` into `d.own`: the model when it's missing,
+/// then its image projector when it has one and that's missing. Each file
+/// resumes a `.part`, is checked against its SHA-256, then renamed.
+/// `on_progress(ctx, p)` at most every 200 ms. Returns the model's path.
 pub fn download(
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -247,7 +303,36 @@ pub fn download(
     cancel_flag.store(false, .release);
 
     try std.Io.Dir.cwd().createDirPath(io, d.own);
-    const final = try std.fs.path.join(arena, &.{ d.own, e.file });
+    const model_path = resolve(io, arena, d, id) orelse
+        try fetchFile(io, gpa, arena, d, id, e.file, try url(arena, e), e.size, e.sha256, "", ctx, on_progress, status_out);
+    if (e.projector) |pj| {
+        if (projector(io, arena, d, model_path) == null) {
+            // Next to the model (another app's folder is never written: then ours).
+            const name = try projectorName(arena, std.fs.path.basename(model_path));
+            _ = try fetchFile(io, gpa, arena, d, id, name, try repoUrl(arena, e.repo, pj.file), pj.size, pj.sha256, "image projector: ", ctx, on_progress, status_out);
+        }
+    }
+    return model_path;
+}
+
+/// One file into `d.own/name`: resumed, verified, renamed; its path.
+fn fetchFile(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    d: Dirs,
+    id: []const u8,
+    name: []const u8,
+    target_url: []const u8,
+    size: u64,
+    sha256: []const u8,
+    what: []const u8,
+    ctx: anytype,
+    comptime on_progress: fn (@TypeOf(ctx), Progress) void,
+    status_out: *std.http.Status,
+) ![]const u8 {
+    const e: struct { size: u64, sha256: []const u8, file: []const u8 } = .{ .size = size, .sha256 = sha256, .file = name };
+    const final = try std.fs.path.join(arena, &.{ d.own, name });
     const part = try std.fmt.allocPrint(arena, "{s}.part", .{final});
 
     // Resume: hash what's there, then ask for the rest.
@@ -257,7 +342,7 @@ pub fn download(
         defer f.close(io);
         var rbuf: [256 * 1024]u8 = undefined;
         var r = f.reader(io, &rbuf);
-        on_progress(ctx, .{ .id = id, .state = "verifying", .done = 0, .total = e.size, .message = "Checking the partial download…" });
+        on_progress(ctx, .{ .id = id, .state = "verifying", .done = 0, .total = e.size, .message = try std.fmt.allocPrint(arena, "{s}Checking the partial download…", .{what}) });
         while (true) {
             if (cancel_flag.load(.acquire)) return error.Cancelled;
             const chunk = r.interface.peekGreedy(1) catch break;
@@ -293,7 +378,7 @@ pub fn download(
     sink.init();
 
     if (have < e.size) {
-        const target = try url(arena, e);
+        const target = target_url;
         const Outcome = union(enum) { fetched: anyerror!void, watched: error{ Cancelled, Stalled } };
         var buf: [2]Outcome = undefined;
         var sel = std.Io.Select(Outcome).init(io, &buf);
@@ -478,6 +563,10 @@ pub fn remove(io: std.Io, arena: std.mem.Allocator, d: Dirs, id: []const u8) !vo
     const final = try std.fs.path.join(arena, &.{ d.own, e.file });
     std.Io.Dir.cwd().deleteFile(io, final) catch {};
     std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}.part", .{final})) catch {};
+    // Its image projector too.
+    const pj = try std.fs.path.join(arena, &.{ d.own, try projectorName(arena, e.file) });
+    std.Io.Dir.cwd().deleteFile(io, pj) catch {};
+    std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}.part", .{pj})) catch {};
 }
 
 test "catalog ids and hashes" {
@@ -487,6 +576,20 @@ test "catalog ids and hashes" {
         try std.testing.expect(find(e.id) != null);
     }
     try std.testing.expect(find(default_id) != null);
+}
+
+test projectorName {
+    const name = try projectorName(std.testing.allocator, "Qwen3.5-2B-Q4_K_M.gguf");
+    defer std.testing.allocator.free(name);
+    try std.testing.expectEqualStrings("Qwen3.5-2B-Q4_K_M.mmproj.gguf", name);
+}
+
+test "every catalog model has a projector" {
+    for (catalog) |e| {
+        const pj = e.projector orelse return error.TestExpectedProjector;
+        try std.testing.expectEqual(@as(usize, 64), pj.sha256.len);
+        try std.testing.expect(pj.size > 100 * 1024 * 1024);
+    }
 }
 
 test rangeStart {
