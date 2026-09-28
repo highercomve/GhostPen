@@ -5,6 +5,12 @@
 //! action shouldn't pay the load time) and stopped after `idle_minutes`
 //! without use, or when the model or its settings change. Plain std: the CLI
 //! uses it too.
+//!
+//! Two runners, each started only when needed and stopped on its own: one
+//! for chat (the model and its vision projector), one for embeddings (a small
+//! model: a search never loads the chat model). A request's `keep_alive_ms`
+//! (the model service's `keep_alive`) overrides the idle time: 0 stops the
+//! runner as soon as it answers.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -39,6 +45,9 @@ pub const Chat = struct {
     image: ?[]const u8 = null,
     /// A JSON Schema the answer must match ("" = free text).
     schema: []const u8 = "",
+    /// Keep the runner this long after the answer (0: stop it now); null:
+    /// `Config.idle_minutes`.
+    keep_alive_ms: ?u64 = null,
 };
 
 pub const Result = struct {
@@ -73,22 +82,53 @@ const Runner = struct {
     next_id: u64 = 1,
     last_used: std.Io.Clock.Timestamp,
     idle_minutes: u32,
+    /// A request's keep_alive: this long after the last answer, not
+    /// `idle_minutes`.
+    idle_override_ms: ?u64 = null,
 };
 
-var mutex: std.Io.Mutex = .init;
-var runner: ?*Runner = null;
-/// Serializes writes to the runner's stdin (a cancel can come from another thread).
-var stdin_mutex: std.Io.Mutex = .init;
-var stdin_writer: ?*std.Io.File.Writer = null;
-var busy: std.atomic.Value(bool) = .init(false);
-var is_loaded: std.atomic.Value(bool) = .init(false);
+/// One runner's state: chat or embeddings.
+const Slot = struct {
+    name: []const u8,
+    mutex: std.Io.Mutex = .init,
+    runner: ?*Runner = null,
+    /// Serializes writes to the runner's stdin (a cancel can come from another thread).
+    stdin_mutex: std.Io.Mutex = .init,
+    stdin_writer: ?*std.Io.File.Writer = null,
+    busy: std.atomic.Value(bool) = .init(false),
+    is_loaded: std.atomic.Value(bool) = .init(false),
+    /// The last lines llama.cpp wrote to stderr, for error messages.
+    tail_mutex: std.Io.Mutex = .init,
+    tail_buf: [2048]u8 = undefined,
+    tail_len: usize = 0,
+};
+
+var chat_slot: Slot = .{ .name = "built-in model" };
+var embed_slot: Slot = .{ .name = "embedding model" };
 var watchdog: ?std.Thread = null;
 var gpa_global: std.mem.Allocator = undefined;
 
-/// The last lines llama.cpp wrote to stderr, for error messages.
-var tail_mutex: std.Io.Mutex = .init;
-var tail_buf: [2048]u8 = undefined;
-var tail_len: usize = 0;
+/// The chat runner's configuration (no embedding model).
+fn chatConfig(cfg: Config) Config {
+    var c = cfg;
+    c.embed_model = null;
+    return c;
+}
+
+/// The embedding runner's configuration (the embedding model only).
+fn embedConfig(cfg: Config) Config {
+    var c = cfg;
+    c.model = "";
+    c.mmproj = null;
+    return c;
+}
+
+/// After an answer: the request's keep_alive (0: stop the runner now).
+fn keepAlive(io: std.Io, s: *Slot, r: *Runner, keep_ms: ?u64) void {
+    const ms = keep_ms orelse return;
+    if (ms == 0) return stop(io, s);
+    r.idle_override_ms = ms;
+}
 
 fn keyOf(arena: std.mem.Allocator, cfg: Config) ![]u8 {
     return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{s}\x00{d}\x00{}\x00{s}\x00{s}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.embed_model orelse "", cfg.ctx, cfg.gpu, cfg.kv_type, cfg.flash_attn });
@@ -105,10 +145,11 @@ pub fn chat(
     comptime on_chunk: fn (@TypeOf(ctx), []const u8) void,
     diag: *[]const u8,
 ) Error!Result {
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    busy.store(true, .release);
-    defer busy.store(false, .release);
+    const s = &chat_slot;
+    s.mutex.lockUncancelable(io);
+    defer s.mutex.unlock(io);
+    s.busy.store(true, .release);
+    defer s.busy.store(false, .release);
 
     // Before loading anything (escaping only makes the line longer).
     if (req.system.len + req.user.len > max_request_bytes) {
@@ -123,7 +164,7 @@ pub fn chat(
         diag.* = "This built-in model can't read images: download its image projector in Settings → Built-in models, or pick a model that has one.";
         return error.LocalFailed;
     }
-    const r = try ensure(io, gpa, arena, cfg, diag);
+    const r = try ensure(io, s, gpa, arena, chatConfig(cfg), diag);
     const id = r.next_id;
     r.next_id += 1;
     const image_b64: []const u8 = if (req.image) |img| blk: {
@@ -151,12 +192,12 @@ pub fn chat(
         return error.LocalFailed;
     }
     {
-        stdin_mutex.lockUncancelable(io);
-        defer stdin_mutex.unlock(io);
+        s.stdin_mutex.lockUncancelable(io);
+        defer s.stdin_mutex.unlock(io);
         const w = &r.stdin.interface;
-        w.writeAll(line_out) catch return lost(io, arena, diag);
-        w.writeByte('\n') catch return lost(io, arena, diag);
-        w.flush() catch return lost(io, arena, diag);
+        w.writeAll(line_out) catch return lost(io, s, arena, diag);
+        w.writeByte('\n') catch return lost(io, s, arena, diag);
+        w.flush() catch return lost(io, s, arena, diag);
     }
 
     // Too slow: ask it to stop, then kill it.
@@ -177,11 +218,11 @@ pub fn chat(
         const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse {
             deadline.finish();
             if (deadline.timed_out.load(.acquire)) {
-                stop(io);
+                stop(io, s);
                 diag.* = "The built-in model took too long and was stopped.";
                 return error.LocalFailed;
             }
-            return lost(io, arena, diag);
+            return lost(io, s, arena, diag);
         };
         const msg = std.json.parseFromSliceLeaky(Line, arena, line, .{ .ignore_unknown_fields = true }) catch continue;
         // Id 0: an error about a request it couldn't read (only one runs at a time).
@@ -201,6 +242,8 @@ pub fn chat(
                 diag.* = "The built-in model took too long (over 5 minutes) and was stopped.";
                 return error.LocalFailed;
             }
+            deadline.finish(); // before a keep_alive of 0 kills the runner
+            keepAlive(io, s, r, req.keep_alive_ms);
             return .{ .text = text.items, .truncated = msg.truncated, .cancelled = msg.cancelled };
         }
     }
@@ -216,27 +259,29 @@ pub fn embed(
     cfg: Config,
     texts: []const []const u8,
     model_out: *[]const u8,
+    keep_alive_ms: ?u64,
     diag: *[]const u8,
 ) Error![]const []const f32 {
     if (cfg.embed_model == null) {
         diag.* = "No embedding model is set up.";
         return error.LocalFailed;
     }
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    busy.store(true, .release);
-    defer busy.store(false, .release);
-    const r = try ensure(io, gpa, arena, cfg, diag);
+    const s = &embed_slot;
+    s.mutex.lockUncancelable(io);
+    defer s.mutex.unlock(io);
+    s.busy.store(true, .release);
+    defer s.busy.store(false, .release);
+    const r = try ensure(io, s, gpa, arena, embedConfig(cfg), diag);
     const id = r.next_id;
     r.next_id += 1;
     const line_out = try std.json.Stringify.valueAlloc(arena, .{ .id = id, .cmd = "embed", .texts = texts }, .{});
     {
-        stdin_mutex.lockUncancelable(io);
-        defer stdin_mutex.unlock(io);
+        s.stdin_mutex.lockUncancelable(io);
+        defer s.stdin_mutex.unlock(io);
         const w = &r.stdin.interface;
-        w.writeAll(line_out) catch return lost(io, arena, diag);
-        w.writeByte('\n') catch return lost(io, arena, diag);
-        w.flush() catch return lost(io, arena, diag);
+        w.writeAll(line_out) catch return lost(io, s, arena, diag);
+        w.writeByte('\n') catch return lost(io, s, arena, diag);
+        w.flush() catch return lost(io, s, arena, diag);
     }
     const Line = struct {
         id: u64 = 0,
@@ -246,7 +291,7 @@ pub fn embed(
         model: []const u8 = "",
     };
     while (true) {
-        const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse return lost(io, arena, diag);
+        const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse return lost(io, s, arena, diag);
         const msg = std.json.parseFromSliceLeaky(Line, arena, line, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
         if (msg.id != id and !(msg.id == 0 and msg.@"error" != null)) continue;
         r.last_used = .now(io, .awake);
@@ -256,6 +301,7 @@ pub fn embed(
         }
         if (msg.done) {
             model_out.* = msg.model;
+            keepAlive(io, s, r, keep_alive_ms);
             return msg.embeddings;
         }
     }
@@ -263,58 +309,79 @@ pub fn embed(
 
 /// Stop the running request (it returns what it has so far).
 pub fn cancel(io: std.Io) void {
-    if (!busy.load(.acquire)) return;
-    stdin_mutex.lockUncancelable(io);
-    defer stdin_mutex.unlock(io);
-    const w = stdin_writer orelse return;
+    const s = &chat_slot;
+    if (!s.busy.load(.acquire)) return;
+    s.stdin_mutex.lockUncancelable(io);
+    defer s.stdin_mutex.unlock(io);
+    const w = s.stdin_writer orelse return;
     w.interface.writeAll("{\"cmd\":\"cancel\"}\n") catch return;
     w.interface.flush() catch {};
 }
 
-/// Stop the runner (frees the model's memory).
+/// Stop both runners (frees the models' memory).
 pub fn unload(io: std.Io) void {
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    stop(io);
+    unloadChat(io);
+    unloadEmbeddings(io);
 }
 
-/// The model is loaded right now.
+/// Stop the chat runner (waits for an answer being written).
+pub fn unloadChat(io: std.Io) void {
+    chat_slot.mutex.lockUncancelable(io);
+    defer chat_slot.mutex.unlock(io);
+    stop(io, &chat_slot);
+}
+
+/// Stop the embedding runner.
+pub fn unloadEmbeddings(io: std.Io) void {
+    embed_slot.mutex.lockUncancelable(io);
+    defer embed_slot.mutex.unlock(io);
+    stop(io, &embed_slot);
+}
+
+/// The chat model is loaded right now.
 pub fn loaded() bool {
-    return is_loaded.load(.acquire);
+    return chat_slot.is_loaded.load(.acquire);
+}
+
+/// The embedding model is loaded right now.
+pub fn embeddingsLoaded() bool {
+    return embed_slot.is_loaded.load(.acquire);
 }
 
 /// The runner died or the pipe broke: stop it and explain.
-fn lost(io: std.Io, arena: std.mem.Allocator, diag: *[]const u8) Error {
-    stop(io);
-    const why = tail(io, arena);
-    diag.* = std.fmt.allocPrint(arena, "GhostPen's built-in model stopped (crash or out of memory){s}{s}", .{ if (why.len > 0) ": " else ".", why }) catch "GhostPen's built-in model stopped.";
+fn lost(io: std.Io, s: *Slot, arena: std.mem.Allocator, diag: *[]const u8) Error {
+    stop(io, s);
+    const why = tail(io, s, arena);
+    diag.* = std.fmt.allocPrint(arena, "GhostPen's {s} stopped (crash or out of memory){s}{s}", .{ s.name, if (why.len > 0) ": " else ".", why }) catch "GhostPen's built-in model stopped.";
     return error.LocalFailed;
 }
 
-fn tail(io: std.Io, arena: std.mem.Allocator) []const u8 {
-    tail_mutex.lockUncancelable(io);
-    defer tail_mutex.unlock(io);
-    const t = std.mem.trim(u8, tail_buf[0..tail_len], " \t\r\n");
+fn tail(io: std.Io, s: *Slot, arena: std.mem.Allocator) []const u8 {
+    s.tail_mutex.lockUncancelable(io);
+    defer s.tail_mutex.unlock(io);
+    const t = std.mem.trim(u8, s.tail_buf[0..s.tail_len], " \t\r\n");
     // The last line is usually the one that explains.
     const last = if (std.mem.lastIndexOfScalar(u8, t, '\n')) |i| t[i + 1 ..] else t;
     return arena.dupe(u8, last) catch "";
 }
 
-/// The runner for `cfg`, started (and the model loaded) if needed. Caller holds `mutex`.
-fn ensure(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, diag: *[]const u8) Error!*Runner {
+/// The slot's runner for `cfg`, started (and the model loaded) if needed.
+/// Caller holds `s.mutex`.
+fn ensure(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, diag: *[]const u8) Error!*Runner {
     const key = try keyOf(arena, cfg);
-    if (runner) |r| {
+    if (s.runner) |r| {
         if (std.mem.eql(u8, r.key, key)) {
             r.idle_minutes = cfg.idle_minutes;
             return r;
         }
-        stop(io);
+        stop(io, s);
     }
-    std.Io.Dir.cwd().access(io, cfg.model, .{}) catch {
-        diag.* = std.fmt.allocPrint(arena, "The model file is missing: {s}. Download it in Settings → Built-in models.", .{cfg.model}) catch "The model file is missing.";
+    const file = if (cfg.model.len > 0) cfg.model else cfg.embed_model orelse "";
+    std.Io.Dir.cwd().access(io, file, .{}) catch {
+        diag.* = std.fmt.allocPrint(arena, "The model file is missing: {s}. Download it in Settings → Built-in models.", .{file}) catch "The model file is missing.";
         return error.LocalFailed;
     };
-    return start(io, gpa, arena, cfg, key, diag) catch |err| {
+    return start(io, s, gpa, arena, cfg, key, diag) catch |err| {
         // The GPU ran out of memory mid-load (another app took it: llama.cpp
         // aborts then): once more on the CPU. The key stays the requested one.
         switch (err) {
@@ -325,7 +392,7 @@ fn ensure(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Con
         log.warn("GPU load failed ({s}); loading on the CPU", .{diag.*});
         var cpu = cfg;
         cpu.gpu = false;
-        return start(io, gpa, arena, cpu, key, diag) catch |e| switch (e) {
+        return start(io, s, gpa, arena, cpu, key, diag) catch |e| switch (e) {
             error.GpuFailed => error.LocalFailed,
             else => |x| x,
         };
@@ -333,9 +400,10 @@ fn ensure(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Con
 }
 
 /// Start the helper for `cfg` and wait until its model is loaded.
-fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, key: []const u8, diag: *[]const u8) (Error || error{GpuFailed})!*Runner {
+fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, key: []const u8, diag: *[]const u8) (Error || error{GpuFailed})!*Runner {
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(arena, &.{ cfg.exe, "--llm-helper", "--model", cfg.model, "--ctx", try std.fmt.allocPrint(arena, "{d}", .{cfg.ctx}) });
+    try argv.appendSlice(arena, &.{ cfg.exe, "--llm-helper", "--ctx", try std.fmt.allocPrint(arena, "{d}", .{cfg.ctx}) });
+    if (cfg.model.len > 0) try argv.appendSlice(arena, &.{ "--model", cfg.model });
     if (cfg.mmproj) |m| try argv.appendSlice(arena, &.{ "--mmproj", m });
     if (cfg.embed_model) |m| try argv.appendSlice(arena, &.{ "--embed-model", m });
     try argv.appendSlice(arena, &.{ "--kv-type", cfg.kv_type, "--flash-attn", cfg.flash_attn });
@@ -382,20 +450,20 @@ fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Conf
     r.reader = r.child.stdout.?.readerStreaming(io, r.stdout_buf);
     r.stdin = r.child.stdin.?.writerStreaming(io, &r.stdin_buf);
     gpa_global = gpa;
-    tail_mutex.lockUncancelable(io);
-    tail_len = 0;
-    tail_mutex.unlock(io);
-    runner = r;
-    r.stderr_thread = std.Thread.spawn(.{}, drainStderr, .{ io, r.child.stderr.? }) catch {
+    s.tail_mutex.lockUncancelable(io);
+    s.tail_len = 0;
+    s.tail_mutex.unlock(io);
+    s.runner = r;
+    r.stderr_thread = std.Thread.spawn(.{}, drainStderr, .{ io, s, r.child.stderr.? }) catch {
         // Nothing would drain stderr: the helper could block on it.
-        stop(io);
+        stop(io, s);
         diag.* = "Could not start GhostPen's built-in model runner (no thread).";
         return error.LocalFailed;
     };
     {
-        stdin_mutex.lockUncancelable(io);
-        defer stdin_mutex.unlock(io);
-        stdin_writer = &r.stdin;
+        s.stdin_mutex.lockUncancelable(io);
+        defer s.stdin_mutex.unlock(io);
+        s.stdin_writer = &r.stdin;
     }
 
     // Wait for the ready line (the model loads in the helper); anything else
@@ -406,8 +474,8 @@ fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Conf
     const ready: Ready = while (true) {
         const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse {
             deadline.finish();
-            stop(io);
-            const why = tail(io, arena);
+            stop(io, s);
+            const why = tail(io, s, arena);
             diag.* = if (deadline.timed_out.load(.acquire))
                 "The built-in model took more than 10 minutes to load and was stopped."
             else
@@ -426,8 +494,11 @@ fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Conf
     deadline.finish();
     r.ctx = ready.ctx;
     r.gpu = gpa.dupe(u8, ready.gpu orelse "CPU") catch &.{};
-    is_loaded.store(true, .release);
-    log.info("built-in model loaded: {s} ({d}-token context, {s})", .{ std.fs.path.basename(cfg.model), r.ctx, if (r.gpu.len > 0) r.gpu else "CPU" });
+    s.is_loaded.store(true, .release);
+    if (cfg.model.len > 0)
+        log.info("built-in model loaded: {s} ({d}-token context, {s})", .{ std.fs.path.basename(cfg.model), r.ctx, if (r.gpu.len > 0) r.gpu else "CPU" })
+    else
+        log.info("embedding model loaded: {s} ({s})", .{ std.fs.path.basename(cfg.embed_model orelse ""), if (r.gpu.len > 0) r.gpu else "CPU" });
 
     if (watchdog == null) watchdog = std.Thread.spawn(.{}, idleWatch, .{io}) catch null;
     return r;
@@ -483,16 +554,16 @@ fn killOnly(child: *std.process.Child) void {
     }
 }
 
-/// Kill the runner and free it. Caller holds `mutex`.
-fn stop(io: std.Io) void {
-    const r = runner orelse return;
+/// Kill the slot's runner and free it. Caller holds `s.mutex`.
+fn stop(io: std.Io, s: *Slot) void {
+    const r = s.runner orelse return;
     {
-        stdin_mutex.lockUncancelable(io);
-        defer stdin_mutex.unlock(io);
-        stdin_writer = null;
+        s.stdin_mutex.lockUncancelable(io);
+        defer s.stdin_mutex.unlock(io);
+        s.stdin_writer = null;
     }
-    runner = null;
-    is_loaded.store(false, .release);
+    s.runner = null;
+    s.is_loaded.store(false, .release);
     // Kill, let the stderr drain see EOF and end, then reap (which closes
     // the pipes): never close a pipe another thread still reads.
     killOnly(&r.child);
@@ -502,10 +573,10 @@ fn stop(io: std.Io) void {
     gpa_global.free(r.stdout_buf);
     if (r.gpu.len > 0) gpa_global.free(r.gpu);
     gpa_global.destroy(r);
-    log.info("built-in model unloaded", .{});
+    log.info("{s} unloaded", .{s.name});
 }
 
-fn drainStderr(io: std.Io, file: std.Io.File) void {
+fn drainStderr(io: std.Io, s: *Slot, file: std.Io.File) void {
     var buf: [4096]u8 = undefined;
     var reader = file.readerStreaming(io, &buf);
     while (true) {
@@ -517,31 +588,34 @@ fn drainStderr(io: std.Io, file: std.Io.File) void {
             else => return,
         } orelse return;
         log.debug("runner: {s}", .{line});
-        tail_mutex.lockUncancelable(io);
-        defer tail_mutex.unlock(io);
-        const keep = @min(line.len + 1, tail_buf.len);
-        if (tail_len + keep > tail_buf.len) {
-            const drop = tail_len + keep - tail_buf.len;
-            std.mem.copyForwards(u8, tail_buf[0 .. tail_len - drop], tail_buf[drop..tail_len]);
-            tail_len -= drop;
+        s.tail_mutex.lockUncancelable(io);
+        defer s.tail_mutex.unlock(io);
+        const keep = @min(line.len + 1, s.tail_buf.len);
+        if (s.tail_len + keep > s.tail_buf.len) {
+            const drop = s.tail_len + keep - s.tail_buf.len;
+            std.mem.copyForwards(u8, s.tail_buf[0 .. s.tail_len - drop], s.tail_buf[drop..s.tail_len]);
+            s.tail_len -= drop;
         }
-        @memcpy(tail_buf[tail_len..][0 .. keep - 1], line[line.len - (keep - 1) ..]);
-        tail_buf[tail_len + keep - 1] = '\n';
-        tail_len += keep;
+        @memcpy(s.tail_buf[s.tail_len..][0 .. keep - 1], line[line.len - (keep - 1) ..]);
+        s.tail_buf[s.tail_len + keep - 1] = '\n';
+        s.tail_len += keep;
     }
 }
 
-/// Unload the model after `idle_minutes` without a request.
+/// Stop each runner once it's been idle long enough: its request's
+/// keep_alive, else `idle_minutes` (0: never). Never while a request runs.
 fn idleWatch(io: std.Io) void {
     while (true) {
-        io.sleep(.fromSeconds(30), .awake) catch return;
-        if (busy.load(.acquire)) continue;
-        mutex.lockUncancelable(io);
-        defer mutex.unlock(io);
-        const r = runner orelse continue;
-        if (r.idle_minutes == 0) continue;
-        const idle = r.last_used.durationTo(.now(io, .awake));
-        if (idle.raw.toSeconds() >= @as(i64, r.idle_minutes) * 60) stop(io);
+        io.sleep(.fromSeconds(5), .awake) catch return;
+        for ([_]*Slot{ &chat_slot, &embed_slot }) |s| {
+            if (s.busy.load(.acquire)) continue;
+            s.mutex.lockUncancelable(io);
+            defer s.mutex.unlock(io);
+            const r = s.runner orelse continue;
+            const limit_ms: i64 = if (r.idle_override_ms) |ms| @intCast(ms) else if (r.idle_minutes == 0) continue else @as(i64, r.idle_minutes) * 60_000;
+            const idle = r.last_used.durationTo(.now(io, .awake));
+            if (idle.raw.toMilliseconds() >= limit_ms) stop(io, s);
+        }
     }
 }
 

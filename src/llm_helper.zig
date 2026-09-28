@@ -171,8 +171,8 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
             opts.cpu = true;
         }
     }
-    if (opts.model.len == 0) {
-        std.debug.print("ghostpen-llm: --model is required\n", .{});
+    if (opts.model.len == 0 and opts.embed_model == null) {
+        std.debug.print("ghostpen-llm: nothing to load: --model and/or --embed-model\n", .{});
         return 2;
     }
 
@@ -183,93 +183,34 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
     const gpus: usize = if (opts.cpu) 0 else oriel.ggml_gpu.load(io);
     c.llama_backend_init();
     defer c.llama_backend_free();
-
-    // As many layers on the GPU as its free memory holds (other apps may use
-    // it too); on failure fewer, down to the CPU alone.
-    var ngl: i32 = if (gpus > 0) gpuLayers(opts) else 0;
-    const model = while (true) {
-        var mparams = c.llama_model_default_params();
-        mparams.n_gpu_layers = ngl;
-        if (c.llama_model_load_from_file(opts.model.ptr, mparams)) |m| break m;
-        if (ngl == 0) {
-            std.debug.print("ghostpen-llm: could not load the model {s} (unsupported or damaged file)\n", .{opts.model});
-            return 1;
-        }
-        ngl = if (ngl >= 999) @max(@divTrunc(layerCount(opts) * 2, 3), 0) else @divTrunc(ngl, 2);
-        std.debug.print("ghostpen-llm: not enough GPU memory, retrying with {d} layers on the GPU\n", .{ngl});
-    };
-    defer c.llama_model_free(model);
-
-    // The context: as asked, capped at what the model was trained for; on
-    // failure (out of memory) halved down to 2048.
-    const trained: u32 = @intCast(@max(c.llama_model_n_ctx_train(model), 512));
-    var n_ctx = @max(@min(opts.ctx, trained), 512);
     const threads: i32 = @intCast(@min(std.Thread.getCpuCount() catch 4, 8));
-    const ctx = while (true) {
-        var cparams = c.llama_context_default_params();
-        cparams.n_ctx = n_ctx;
-        cparams.n_batch = 512;
-        cparams.n_ubatch = 512;
-        cparams.n_threads = threads;
-        cparams.n_threads_batch = threads;
-        cparams.no_perf = true;
-        cparams.abort_callback = abortCallback;
-        cparams.type_k = opts.kv_type;
-        cparams.type_v = opts.kv_type;
-        cparams.flash_attn_type = opts.flash_attn;
-        if (c.llama_init_from_model(model, cparams)) |ctx| break ctx;
-        if (n_ctx <= 2048) {
-            std.debug.print("ghostpen-llm: could not create a {d}-token context (out of memory?)\n", .{n_ctx});
-            return 1;
-        }
-        n_ctx = @max(n_ctx / 2, 2048);
-        std.debug.print("ghostpen-llm: retrying with a {d}-token context\n", .{n_ctx});
-    };
-    defer c.llama_free(ctx);
 
-    // The vision projector: on the GPU with the model; without it the model
-    // still answers text.
-    const vision: ?*c.mtmd_context = if (opts.mmproj) |path| blk: {
-        var mp = c.mtmd_context_params_default();
-        mp.use_gpu = ngl > 0;
-        mp.n_threads = threads;
-        mp.print_timings = false;
-        mp.warmup = false;
-        const m = c.mtmd_init_from_file(path.ptr, model, mp) orelse {
-            std.debug.print("ghostpen-llm: could not load the vision projector {s}; images won't be read\n", .{path});
-            break :blk null;
-        };
-        if (!c.mtmd_support_vision(m)) {
-            c.mtmd_free(m);
-            std.debug.print("ghostpen-llm: {s} has no vision encoder; images won't be read\n", .{path});
-            break :blk null;
-        }
-        break :blk m;
-    } else null;
-    defer if (vision) |m| c.mtmd_free(m);
+    // The chat model, unless this runner only embeds (`--embed-model` alone:
+    // a search doesn't load a chat model).
+    var chat: ?ChatModel = if (opts.model.len > 0) (ChatModel.load(opts, gpus, threads) orelse return 1) else null;
+    defer if (chat) |*m| m.deinit();
 
-    var embedder: ?Embedder = if (opts.embed_model) |path| Embedder.load(path, ngl > 0, threads) catch |err| blk: {
+    var embedder: ?Embedder = if (opts.embed_model) |path| Embedder.load(path, gpus > 0, threads) catch |err| blk: {
         std.debug.print("ghostpen-llm: could not load the embedding model {s} ({s}); no embeddings\n", .{ path, @errorName(err) });
+        if (chat == null) return 1; // nothing else to serve
         break :blk null;
     } else null;
     defer if (embedder) |*e| e.deinit();
 
-    const template: ?[]const u8 = if (c.llama_model_chat_template(model, null)) |t| std.mem.span(t) else null;
-    const format = chat_format.detect(template);
-
     const load_ms = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
     send(.{
         .ready = true,
-        .ctx = c.llama_n_ctx(ctx),
-        .gpu = if (ngl > 0) (oriel.ggml_gpu.gpuName() orelse "GPU") else null,
-        .gpu_layers = ngl,
-        .format = @tagName(format),
-        .vision = vision != null,
+        .chat = chat != null,
+        .ctx = if (chat) |m| c.llama_n_ctx(m.ctx) else 0,
+        .gpu = if (gpus > 0) (oriel.ggml_gpu.gpuName() orelse "GPU") else null,
+        .gpu_layers = if (chat) |m| m.ngl else 0,
+        .format = if (chat) |m| @tagName(m.format) else "",
+        .vision = if (chat) |m| m.vision != null else false,
         .embed_dim = if (embedder) |e| e.dim else 0,
         .load_ms = load_ms,
     });
 
-    var engine: Engine = .{ .gpa = gpa, .model = model, .ctx = ctx, .vocab = c.llama_model_get_vocab(model).?, .format = format, .template = template, .vision = vision };
+    var engine: ?Engine = if (chat) |m| .{ .gpa = gpa, .model = m.model, .ctx = m.ctx, .vocab = c.llama_model_get_vocab(m.model).?, .format = m.format, .template = m.template, .vision = m.vision } else null;
 
     // Requests: the worker generates; this thread keeps reading so a cancel
     // gets through.
@@ -320,6 +261,11 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
             parsed.deinit();
             continue;
         }
+        const eng = if (engine) |*e| e else {
+            sendError(req.id, "This runner has no chat model (embeddings only).");
+            parsed.deinit();
+            continue;
+        };
         if (busy.load(.acquire)) {
             sendError(req.id, "The built-in model is busy.");
             parsed.deinit();
@@ -329,7 +275,7 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
         worker = null;
         cancel.store(false, .release);
         busy.store(true, .release);
-        worker = std.Thread.spawn(.{}, Engine.run, .{ &engine, parsed }) catch {
+        worker = std.Thread.spawn(.{}, Engine.run, .{ eng, parsed }) catch {
             busy.store(false, .release);
             sendError(req.id, "Could not start the request.");
             parsed.deinit();
@@ -338,6 +284,90 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
     }
     return 0;
 }
+
+/// The chat model with its context and (optional) vision projector.
+const ChatModel = struct {
+    model: *c.llama_model,
+    ctx: *c.llama_context,
+    vision: ?*c.mtmd_context,
+    ngl: i32,
+    template: ?[]const u8,
+    format: chat_format.Format,
+
+    /// Null (the reason on stderr) when it can't be loaded.
+    fn load(opts: Options, gpus: usize, threads: i32) ?ChatModel {
+        // As many layers on the GPU as its free memory holds (other apps may
+        // use it too); on failure fewer, down to the CPU alone.
+        var ngl: i32 = if (gpus > 0) gpuLayers(opts) else 0;
+        const model = while (true) {
+            var mparams = c.llama_model_default_params();
+            mparams.n_gpu_layers = ngl;
+            if (c.llama_model_load_from_file(opts.model.ptr, mparams)) |m| break m;
+            if (ngl == 0) {
+                std.debug.print("ghostpen-llm: could not load the model {s} (unsupported or damaged file)\n", .{opts.model});
+                return null;
+            }
+            ngl = if (ngl >= 999) @max(@divTrunc(layerCount(opts) * 2, 3), 0) else @divTrunc(ngl, 2);
+            std.debug.print("ghostpen-llm: not enough GPU memory, retrying with {d} layers on the GPU\n", .{ngl});
+        };
+        errdefer c.llama_model_free(model);
+
+        // The context: as asked, capped at what the model was trained for; on
+        // failure (out of memory) halved down to 2048.
+        const trained: u32 = @intCast(@max(c.llama_model_n_ctx_train(model), 512));
+        var n_ctx = @max(@min(opts.ctx, trained), 512);
+        const ctx = while (true) {
+            var cparams = c.llama_context_default_params();
+            cparams.n_ctx = n_ctx;
+            cparams.n_batch = 512;
+            cparams.n_ubatch = 512;
+            cparams.n_threads = threads;
+            cparams.n_threads_batch = threads;
+            cparams.no_perf = true;
+            cparams.abort_callback = abortCallback;
+            cparams.type_k = opts.kv_type;
+            cparams.type_v = opts.kv_type;
+            cparams.flash_attn_type = opts.flash_attn;
+            if (c.llama_init_from_model(model, cparams)) |ctx| break ctx;
+            if (n_ctx <= 2048) {
+                std.debug.print("ghostpen-llm: could not create a {d}-token context (out of memory?)\n", .{n_ctx});
+                c.llama_model_free(model);
+                return null;
+            }
+            n_ctx = @max(n_ctx / 2, 2048);
+            std.debug.print("ghostpen-llm: retrying with a {d}-token context\n", .{n_ctx});
+        };
+
+        // The vision projector: on the GPU with the model; without it the
+        // model still answers text.
+        const vision: ?*c.mtmd_context = if (opts.mmproj) |path| blk: {
+            var mp = c.mtmd_context_params_default();
+            mp.use_gpu = ngl > 0;
+            mp.n_threads = threads;
+            mp.print_timings = false;
+            mp.warmup = false;
+            const m = c.mtmd_init_from_file(path.ptr, model, mp) orelse {
+                std.debug.print("ghostpen-llm: could not load the vision projector {s}; images won't be read\n", .{path});
+                break :blk null;
+            };
+            if (!c.mtmd_support_vision(m)) {
+                c.mtmd_free(m);
+                std.debug.print("ghostpen-llm: {s} has no vision encoder; images won't be read\n", .{path});
+                break :blk null;
+            }
+            break :blk m;
+        } else null;
+
+        const template: ?[]const u8 = if (c.llama_model_chat_template(model, null)) |t| std.mem.span(t) else null;
+        return .{ .model = model, .ctx = ctx, .vision = vision, .ngl = ngl, .template = template, .format = chat_format.detect(template) };
+    }
+
+    fn deinit(self: *ChatModel) void {
+        if (self.vision) |m| c.mtmd_free(m);
+        c.llama_free(self.ctx);
+        c.llama_model_free(self.model);
+    }
+};
 
 /// A small embedding model (e.g. embeddinggemma-300M) with its own context.
 /// Only the reading thread uses it.

@@ -164,6 +164,8 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
         try model_server.propsReply(arena)
     else if (std.mem.eql(u8, path, "/slots") and request.head.method == .GET)
         try model_server.slotsReply(arena)
+    else if (std.mem.eql(u8, path, "/unload") and request.head.method == .POST)
+        try model_server.unloadReply(io, arena, try readJsonBody(arena, request) orelse "")
     else if (std.mem.eql(u8, path, "/v1/embeddings") and request.head.method == .POST)
         try model_server.embeddingsReply(io, arena, try readJsonBody(arena, request) orelse return error.BadBody)
     else if (std.mem.eql(u8, path, "/v1/chat/completions") and request.head.method == .POST) blk: {
@@ -225,6 +227,8 @@ fn modelsBody(arena: std.mem.Allocator) ![]const u8 {
 fn readJsonBody(arena: std.mem.Allocator, request: *std.http.Server.Request) !?[]const u8 {
     const limit = 40 * 1024 * 1024;
     if (request.head.content_length) |len| if (len > limit) return null;
+    // No length and not chunked: HTTP says there's no body (don't wait for one).
+    if (request.head.content_length == null and request.head.transfer_encoding == .none) return "";
     var body_buf: [64 * 1024]u8 = undefined;
     const r = request.readerExpectContinue(&body_buf) catch return null;
     return r.allocRemaining(arena, .limited(limit)) catch |err| switch (err) {

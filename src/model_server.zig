@@ -17,6 +17,14 @@
 //!   from embeddinggemma when it's on disk (GhostReel's or LM Studio's copy).
 //! - `GET /props`: `modalities.vision` and `total_slots` (1); `GET /slots`:
 //!   the context size.
+//! - `POST /unload` (`{"models":["chat","embeddings","stt"]}`, or no body
+//!   for all): stop those runners now, freeing their (GPU) memory, e.g. when
+//!   a job is over.
+//!
+//! Models load when a request needs them (chat, embeddings and whisper each
+//! in its own runner) and stop after a while unused. A request's
+//! `keep_alive` (Ollama's: seconds, or "30s", "5m", "1h"; 0 = unload right
+//! after the answer; negative = the default) sets how long its runner stays.
 //!
 //! Other apps find it through a discovery file (`discoveryPath`), written
 //! when the server listens: its URL, this process's pid and what it serves.
@@ -95,14 +103,70 @@ pub fn slotsReply(arena: std.mem.Allocator) !Reply {
     return .{ .body = try std.json.Stringify.valueAlloc(arena, .{.{ .id = 0, .n_ctx = cfg.ctx }}, .{}) };
 }
 
+/// A request's `keep_alive` in milliseconds (null: the runner's default).
+fn keepAliveMs(obj: std.json.ObjectMap) ?u64 {
+    const v = obj.get("keep_alive") orelse return null;
+    return switch (v) {
+        .integer => |n| if (n < 0) null else @as(u64, @intCast(n)) * 1000,
+        .float => |f| if (f < 0) null else @intFromFloat(f * 1000),
+        .string => |t| parseDuration(t),
+        else => null,
+    };
+}
+
+/// "30s", "5m", "1h", "250ms" or plain seconds; null when negative or unreadable.
+fn parseDuration(text: []const u8) ?u64 {
+    const t = std.mem.trim(u8, text, " ");
+    if (t.len == 0 or t[0] == '-') return null;
+    const units = [_]struct { suffix: []const u8, ms: u64 }{
+        .{ .suffix = "ms", .ms = 1 },
+        .{ .suffix = "s", .ms = 1000 },
+        .{ .suffix = "m", .ms = 60_000 },
+        .{ .suffix = "h", .ms = 3_600_000 },
+    };
+    for (units) |u| if (std.mem.endsWith(u8, t, u.suffix)) {
+        const n = std.fmt.parseFloat(f64, t[0 .. t.len - u.suffix.len]) catch return null;
+        return @intFromFloat(n * @as(f64, @floatFromInt(u.ms)));
+    };
+    const n = std.fmt.parseFloat(f64, t) catch return null;
+    return @intFromFloat(n * 1000);
+}
+
+// ---- /unload --------------------------------------------------------------------------
+
+pub fn unloadReply(io: std.Io, arena: std.mem.Allocator, body: []const u8) !Reply {
+    var chat = true;
+    var embeddings = true;
+    var stt = true;
+    if (std.mem.trim(u8, body, " \t\r\n").len > 0) {
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return errorReply(.bad_request, "the body isn't JSON", arena);
+        if (root == .object) if (root.object.get("models")) |m| if (m == .array) {
+            chat = false;
+            embeddings = false;
+            stt = false;
+            for (m.array.items) |item| if (item == .string) {
+                if (std.mem.eql(u8, item.string, "chat")) chat = true;
+                if (std.mem.eql(u8, item.string, "embeddings")) embeddings = true;
+                if (std.mem.eql(u8, item.string, "stt")) stt = true;
+            };
+        };
+    }
+    if (chat) local_llm.unloadChat(io);
+    if (embeddings) local_llm.unloadEmbeddings(io);
+    if (stt) models.unload(io);
+    log.info("unloaded on request:{s}{s}{s}", .{ if (chat) " chat" else "", if (embeddings) " embeddings" else "", if (stt) " stt" else "" });
+    return .{ .body = try std.json.Stringify.valueAlloc(arena, .{ .unloaded = .{ .chat = chat, .embeddings = embeddings, .stt = stt } }, .{}) };
+}
+
 // ---- /v1/embeddings -----------------------------------------------------------------
 
 pub fn embeddingsReply(io: std.Io, arena: std.mem.Allocator, body: []const u8) !Reply {
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return errorReply(.bad_request, "the body isn't JSON", arena);
-    const input = switch (parsed) {
-        .object => |o| o.get("input") orelse return errorReply(.bad_request, "missing input", arena),
+    const obj = switch (parsed) {
+        .object => |o| o,
         else => return errorReply(.bad_request, "expected a JSON object", arena),
     };
+    const input = obj.get("input") orelse return errorReply(.bad_request, "missing input", arena);
     var texts: std.ArrayList([]const u8) = .empty;
     switch (input) {
         .string => |t| try texts.append(arena, t),
@@ -119,7 +183,7 @@ pub fn embeddingsReply(io: std.Io, arena: std.mem.Allocator, body: []const u8) !
     if (cfg.embed_model == null) return errorReply(.service_unavailable, "no embedding model (embeddinggemma-300M-Q8_0.gguf) found in the model folders", arena);
     var model: []const u8 = "";
     var diag: []const u8 = "";
-    const vectors = local_llm.embed(io, gpa, arena, cfg, texts.items, &model, &diag) catch |err| switch (err) {
+    const vectors = local_llm.embed(io, gpa, arena, cfg, texts.items, &model, keepAliveMs(obj), &diag) catch |err| switch (err) {
         error.OutOfMemory => return err,
         error.LocalFailed => return errorReply(.internal_server_error, diag, arena),
     };
@@ -240,6 +304,7 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
             chat.schema = "{\"type\":\"object\"}";
         }
     };
+    chat.keep_alive_ms = keepAliveMs(obj);
     const stream = if (obj.get("stream")) |s| s == .bool and s.bool else false;
     return .{ .chat = chat, .stream = stream };
 }
@@ -428,6 +493,15 @@ pub fn removeDiscovery(io: std.Io, env: *const std.process.Environ.Map) void {
     const parsed = std.json.parseFromSliceLeaky(Pid, arena, data, .{ .ignore_unknown_fields = true }) catch return;
     const me: i64 = if (builtin.os.tag == .windows) std.os.windows.GetCurrentProcessId() else std.c.getpid();
     if (parsed.pid == me) std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+test parseDuration {
+    try std.testing.expectEqual(@as(?u64, 30_000), parseDuration("30s"));
+    try std.testing.expectEqual(@as(?u64, 300_000), parseDuration("5m"));
+    try std.testing.expectEqual(@as(?u64, 250), parseDuration("250ms"));
+    try std.testing.expectEqual(@as(?u64, 0), parseDuration("0"));
+    try std.testing.expectEqual(@as(?u64, null), parseDuration("-1"));
+    try std.testing.expectEqual(@as(?u64, null), parseDuration("soon"));
 }
 
 test "parseChat: system, history folded, image, thinking and schema" {

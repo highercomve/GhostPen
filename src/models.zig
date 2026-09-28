@@ -406,6 +406,13 @@ fn ensureRunner(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator) !*
     return r;
 }
 
+/// Stop the whisper runner now (frees its memory; the next request starts it again).
+pub fn unload(io: std.Io) void {
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    stop(io);
+}
+
 /// Kill the runner and free it. Caller holds `mutex`.
 fn stop(io: std.Io) void {
     const r = runner orelse return;
