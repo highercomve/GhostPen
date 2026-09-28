@@ -442,6 +442,12 @@ pub const Commands = struct {
 
     pub fn save_settings(arena: std.mem.Allocator, args: struct { settings: Settings }) !void {
         shared.set(io, gpa, args.settings) catch |err| return oriel.ipc.fail("Could not save the settings ({s}).", .{@errorName(err)});
+        // Switched to an endpoint (a local server may need the GPU memory):
+        // the built-in model goes now, not after its idle timeout. Off the
+        // main thread: unloading waits for an answer still being written.
+        if (!args.settings.activeProfile().isLocal() and local_llm.loaded()) {
+            if (std.Thread.spawn(.{}, local_llm.unload, .{io})) |t| t.detach() else |_| {}
+        }
         captions.settingsChanged();
         dictation.settingsChanged();
         const failed = registerHotkeys(arena, args.settings);
