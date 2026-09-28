@@ -19,7 +19,7 @@ permissions:
 env:
   ZIG_VERSION: 0.16.0
   # The Oriel CLI used to package; the app's Oriel dependency is pinned in build.zig.zon.
-  ORIEL_VERSION: v0.6.18
+  ORIEL_VERSION: v0.6.19
   NFPM_VERSION: 2.43.0
   # Windows GPU builds: glslc and the Vulkan headers (LunarG SDK).
   VULKAN_SDK_VERSION: 1.4.357.0
