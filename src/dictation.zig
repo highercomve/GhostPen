@@ -344,7 +344,7 @@ fn end(finalize: bool) void {
 }
 
 fn showOverlay() void {
-    const w = App.getWindow("dictation") orelse return;
+    const w = App.ensureWindow("dictation") catch |err| return log.err("dictation window: {s}", .{@errorName(err)});
     w.show();
     w.focus();
     App.emit("ghostpen://dictation-show", .{});

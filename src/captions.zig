@@ -266,7 +266,7 @@ fn stop() void {
 
 /// Show the overlay with its controls (leave ghost mode), at the bottom.
 pub fn open() void {
-    const w = App.getWindow("captions") orelse return;
+    const w = App.ensureWindow("captions") catch |err| return log.err("captions window: {s}", .{@errorName(err)});
     w.setClickThrough(false);
     w.show();
     w.focus();
@@ -360,7 +360,7 @@ pub const Commands = struct {
         const device = try start(arena);
         App.runOnMain({}, struct {
             fn show(_: void) void {
-                const w = App.getWindow("captions") orelse return;
+                const w = App.ensureWindow("captions") catch |err| return log.err("captions window: {s}", .{@errorName(err)});
                 w.show();
             }
         }.show);
