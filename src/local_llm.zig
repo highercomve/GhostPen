@@ -48,6 +48,9 @@ pub const Chat = struct {
     /// Keep the runner this long after the answer (0: stop it now); null:
     /// `Config.idle_minutes`.
     keep_alive_ms: ?u64 = null,
+    /// The context this request needs, when more than `Config.ctx`: the
+    /// runner restarts with it (and keeps it until it stops).
+    ctx: ?u32 = null,
 };
 
 pub const Result = struct {
@@ -85,6 +88,9 @@ const Runner = struct {
     /// A request's keep_alive: this long after the last answer, not
     /// `idle_minutes`.
     idle_override_ms: ?u64 = null,
+    /// The context it was started with (what it got can be less: the helper
+    /// halves it when the memory runs out; asking again won't help).
+    requested_ctx: u32 = 0,
 };
 
 /// One runner's state: chat or embeddings.
@@ -130,8 +136,10 @@ fn keepAlive(io: std.Io, s: *Slot, r: *Runner, keep_ms: ?u64) void {
     r.idle_override_ms = ms;
 }
 
+/// What a runner was started with, except the context size (a runner with
+/// at least the context a request needs serves it: `ensure`).
 fn keyOf(arena: std.mem.Allocator, cfg: Config) ![]u8 {
-    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{s}\x00{d}\x00{}\x00{s}\x00{s}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.embed_model orelse "", cfg.ctx, cfg.gpu, cfg.kv_type, cfg.flash_attn });
+    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{s}\x00{}\x00{s}\x00{s}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.embed_model orelse "", cfg.gpu, cfg.kv_type, cfg.flash_attn });
 }
 
 /// Run one chat request; `on_chunk(ctx, delta)` for each piece of visible text.
@@ -164,7 +172,9 @@ pub fn chat(
         diag.* = "This built-in model can't read images: download its image projector in Settings → Built-in models, or pick a model that has one.";
         return error.LocalFailed;
     }
-    const r = try ensure(io, s, gpa, arena, chatConfig(cfg), diag);
+    var ccfg = chatConfig(cfg);
+    if (req.ctx) |n| ccfg.ctx = @max(ccfg.ctx, n);
+    const r = try ensure(io, s, gpa, arena, ccfg, diag);
     const id = r.next_id;
     r.next_id += 1;
     const image_b64: []const u8 = if (req.image) |img| blk: {
@@ -370,10 +380,11 @@ fn tail(io: std.Io, s: *Slot, arena: std.mem.Allocator) []const u8 {
 fn ensure(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, diag: *[]const u8) Error!*Runner {
     const key = try keyOf(arena, cfg);
     if (s.runner) |r| {
-        if (std.mem.eql(u8, r.key, key)) {
+        if (std.mem.eql(u8, r.key, key) and r.requested_ctx >= cfg.ctx) {
             r.idle_minutes = cfg.idle_minutes;
             return r;
         }
+        if (std.mem.eql(u8, r.key, key)) log.info("restarting the {s} for a {d}-token context", .{ s.name, cfg.ctx });
         stop(io, s);
     }
     const file = if (cfg.model.len > 0) cfg.model else cfg.embed_model orelse "";
@@ -446,6 +457,7 @@ fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator,
         .ctx = 0,
         .last_used = .now(io, .awake),
         .idle_minutes = cfg.idle_minutes,
+        .requested_ctx = cfg.ctx,
     };
     r.reader = r.child.stdout.?.readerStreaming(io, r.stdout_buf);
     r.stdin = r.child.stdin.?.writerStreaming(io, &r.stdin_buf);
@@ -624,5 +636,8 @@ test keyOf {
     defer arena.deinit();
     const a = try keyOf(arena.allocator(), .{ .exe = "x", .model = "m", .ctx = 8192 });
     const b = try keyOf(arena.allocator(), .{ .exe = "x", .model = "m", .ctx = 4096 });
-    try std.testing.expect(!std.mem.eql(u8, a, b));
+    const c = try keyOf(arena.allocator(), .{ .exe = "x", .model = "n", .ctx = 8192 });
+    // The context size is compared apart (at least as much is fine).
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expect(!std.mem.eql(u8, a, c));
 }

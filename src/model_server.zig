@@ -103,6 +103,19 @@ pub fn slotsReply(arena: std.mem.Allocator) !Reply {
     return .{ .body = try std.json.Stringify.valueAlloc(arena, .{.{ .id = 0, .n_ctx = cfg.ctx }}, .{}) };
 }
 
+/// The context a request asks for: Ollama's `options.num_ctx`, or `n_ctx`
+/// (null: GhostPen's setting). At most 256k tokens.
+fn requestedCtx(obj: std.json.ObjectMap) ?u32 {
+    const v = blk: {
+        if (obj.get("options")) |o| if (o == .object) if (o.object.get("num_ctx")) |n| break :blk n;
+        break :blk obj.get("n_ctx") orelse return null;
+    };
+    return switch (v) {
+        .integer => |n| if (n <= 0) null else @intCast(@min(n, 262144)),
+        else => null,
+    };
+}
+
 /// A request's `keep_alive` in milliseconds (null: the runner's default).
 fn keepAliveMs(obj: std.json.ObjectMap) ?u64 {
     const v = obj.get("keep_alive") orelse return null;
@@ -305,6 +318,7 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
         }
     };
     chat.keep_alive_ms = keepAliveMs(obj);
+    chat.ctx = requestedCtx(obj);
     const stream = if (obj.get("stream")) |s| s == .bool and s.bool else false;
     return .{ .chat = chat, .stream = stream };
 }
@@ -527,6 +541,10 @@ test "parseChat: system, history folded, image, thinking and schema" {
     try std.testing.expect(!req.chat.think);
     try std.testing.expectEqual(@as(u32, 300), req.chat.max_tokens);
     try std.testing.expectEqualStrings("{\"type\":\"object\"}", req.chat.schema);
+    try std.testing.expect(req.chat.ctx == null);
+
+    const big = (try parseChat(arena, "{\"options\":{\"num_ctx\":65536},\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", &err)).?;
+    try std.testing.expectEqual(@as(?u32, 65536), big.chat.ctx);
 
     try std.testing.expect((try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}]}", &err)) == null);
 }
