@@ -185,7 +185,26 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings_mod.Profile, diag: *
         diag.message = "Can't find GhostPen's executable to start the built-in model.";
         return error.AiFailed;
     };
-    return .{ .exe = exe, .model = path, .mmproj = llm_models.projector(io, arena, d, path), .ctx = s.localLlm.ctxTokens, .gpu = s.localLlm.gpu, .idle_minutes = s.localLlm.idleMinutes };
+    return .{
+        .exe = exe,
+        .model = path,
+        .mmproj = llm_models.projector(io, arena, d, path),
+        // Always, so the app and the model service share one runner (a
+        // different configuration would restart it).
+        .embed_model = llm_models.embeddingModel(io, arena, d),
+        .ctx = s.localLlm.ctxTokens,
+        .gpu = s.localLlm.gpu,
+        .idle_minutes = s.localLlm.idleMinutes,
+    };
+}
+
+/// The built-in model's runner configuration, whatever profile is active:
+/// the first Built-in profile's model, else the default one. What the model
+/// service shares with other apps.
+pub fn builtinConfig(arena: std.mem.Allocator, diag: *ai.Diag) ai.Error!local_llm.Config {
+    const s = shared.get(io, arena) catch Settings{};
+    for (s.profiles) |p| if (p.isLocal()) return resolveLocal(arena, p, diag);
+    return resolveLocal(arena, .{ .id = "this-computer", .name = "Built-in", .provider = "local", .model = llm_models.default_id }, diag);
 }
 
 /// A local model setting for display: the catalog name, or the file's name.
@@ -866,7 +885,8 @@ fn setup() !void {
 
     captions.init();
     dictation.init();
-    // GHOSTPEN_STT_SERVER=1: whisper for other local tools (stt_server.zig).
+    // The model service (chat, vision, embeddings, transcription) for other
+    // local apps: stt_server.zig, model_server.zig.
     @import("stt_server.zig").maybeStart(io, environ_map);
     updates.init(environ_map);
     handleArgs(launch_args);
@@ -923,6 +943,9 @@ pub fn main(init: std.process.Init) !u8 {
         @import("models.zig").test_audio = try @import("models.zig").decodeWav(init.arena.allocator(), data);
     }
 
+    // The model service's discovery file goes with the app (a stale one is
+    // also ignored: its pid is gone).
+    defer @import("model_server.zig").removeDiscovery(io, environ_map);
     return oriel.main(init, .{ .commands = Commands, .events = Events }, .{
         .id = settings_mod.app_id,
         .title = "GhostPen",

@@ -8,4 +8,5 @@ test {
     _ = @import("local_llm.zig");
     _ = @import("llm_models.zig");
     _ = @import("stt_server.zig");
+    _ = @import("model_server.zig");
 }
