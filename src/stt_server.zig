@@ -3,8 +3,14 @@
 //! transcribe through GhostPen's own whisper model instead of running a
 //! second one.
 //!
-//! Enabled with `GHOSTPEN_STT_SERVER=1`. Binds `GHOSTPEN_STT_BIND` (default
-//! `0.0.0.0:8771`) and serves:
+//! It is also the model service (`model_server.zig`): chat, vision and
+//! embeddings from the built-in models, for other local apps (GhostReel).
+//!
+//! On by default, on `127.0.0.1:8771` (this machine only);
+//! `GHOSTPEN_MODEL_SERVER=0` turns it off. `GHOSTPEN_STT_SERVER=1` (as
+//! before) also loads the whisper model at startup and listens on
+//! `GHOSTPEN_STT_BIND` (default `0.0.0.0:8771`, reachable from the network).
+//! It serves:
 //!
 //! - `POST /v1/audio/transcriptions`: the OpenAI Whisper API shape: a
 //!   multipart `file` (any format ffmpeg reads), optional `language` and
@@ -23,6 +29,7 @@
 const std = @import("std");
 const main = @import("main.zig");
 const models = @import("models.zig");
+const model_server = @import("model_server.zig");
 
 const log = std.log.scoped(.stt_server);
 const gpa = std.heap.smp_allocator;
@@ -37,11 +44,18 @@ const Config = struct {
 
 var config: Config = .{ .model_override = null, .language = "auto" };
 
-/// Start the server when `GHOSTPEN_STT_SERVER=1`. Never fails: problems are logged.
+var env_map: *const std.process.Environ.Map = undefined;
+/// Whisper loaded at startup (GHOSTPEN_STT_SERVER=1), else on the first request.
+var preload = false;
+
+/// Start the server (see the top of the file). Never fails: problems are logged.
 pub fn maybeStart(io: std.Io, env: *const std.process.Environ.Map) void {
-    const flag = env.get("GHOSTPEN_STT_SERVER") orelse return;
-    if (!std.mem.eql(u8, flag, "1")) return;
-    const bind = env.get("GHOSTPEN_STT_BIND") orelse "0.0.0.0:8771";
+    env_map = env;
+    const stt_flag = if (env.get("GHOSTPEN_STT_SERVER")) |f| std.mem.eql(u8, f, "1") else false;
+    const off = if (env.get("GHOSTPEN_MODEL_SERVER")) |f| std.mem.eql(u8, f, "0") else false;
+    if (off and !stt_flag) return;
+    preload = stt_flag;
+    const bind = env.get("GHOSTPEN_STT_BIND") orelse if (stt_flag) "0.0.0.0:8771" else "127.0.0.1:8771";
     config = .{
         .model_override = if (env.get("GHOSTPEN_STT_MODEL")) |m| (if (std.mem.trim(u8, m, " ").len > 0) gpa.dupe(u8, m) catch null else null) else null,
         .language = gpa.dupe(u8, env.get("GHOSTPEN_STT_LANGUAGE") orelse "auto") catch "auto",
@@ -79,9 +93,9 @@ fn currentModel(arena: std.mem.Allocator) []const u8 {
 }
 
 fn serve(io: std.Io, address: std.Io.net.IpAddress, bind: []const u8) void {
-    // Load the model first so the first request isn't slow; not downloaded:
-    // don't serve (every request would fail).
-    {
+    // GHOSTPEN_STT_SERVER=1: load the model first so the first request isn't
+    // slow; not downloaded: don't serve (every request would fail).
+    if (preload) {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
         const model = currentModel(arena.allocator());
@@ -96,6 +110,14 @@ fn serve(io: std.Io, address: std.Io.net.IpAddress, bind: []const u8) void {
         return;
     };
     defer server.deinit(io);
+    {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        // Other apps connect over loopback whatever the bind address.
+        const url = std.fmt.allocPrint(arena.allocator(), "http://127.0.0.1:{d}", .{address.getPort()}) catch return;
+        model_server.writeDiscovery(io, env_map, url, currentModel(arena.allocator()));
+        log.info("model service on http://{s}", .{bind});
+    }
     while (true) {
         const stream = server.accept(io) catch |err| {
             log.warn("accept: {s}", .{@errorName(err)});
@@ -130,7 +152,7 @@ fn handleConnection(io: std.Io, stream: std.Io.net.Stream) void {
 var active: std.atomic.Value(u32) = .init(0);
 const max_active = 2;
 
-const Reply = struct { status: std.http.Status = .ok, body: []const u8, content_type: []const u8 = "application/json" };
+const Reply = model_server.Reply;
 
 fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request) !void {
     const path = if (std.mem.indexOfScalar(u8, request.head.target, '?')) |q| request.head.target[0..q] else request.head.target;
@@ -138,7 +160,16 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
         .{ .body = "ok", .content_type = "text/plain; charset=utf-8" }
     else if (std.mem.eql(u8, path, "/v1/models") and request.head.method == .GET)
         .{ .body = try modelsBody(arena) }
-    else if (std.mem.eql(u8, path, "/v1/audio/transcriptions") and request.head.method == .POST) blk: {
+    else if (std.mem.eql(u8, path, "/props") and request.head.method == .GET)
+        try model_server.propsReply(arena)
+    else if (std.mem.eql(u8, path, "/slots") and request.head.method == .GET)
+        try model_server.slotsReply(arena)
+    else if (std.mem.eql(u8, path, "/v1/embeddings") and request.head.method == .POST)
+        try model_server.embeddingsReply(io, arena, try readJsonBody(arena, request) orelse return error.BadBody)
+    else if (std.mem.eql(u8, path, "/v1/chat/completions") and request.head.method == .POST) blk: {
+        const body = try readJsonBody(arena, request) orelse return error.BadBody;
+        break :blk (try model_server.chatReply(io, arena, request, body)) orelse return; // streamed
+    } else if (std.mem.eql(u8, path, "/v1/audio/transcriptions") and request.head.method == .POST) blk: {
         // Each request can hold hundreds of MB (the upload and its PCM) while
         // it waits for the one whisper model: a few at a time.
         if (active.fetchAdd(1, .acq_rel) >= max_active) {
@@ -165,19 +196,41 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
     });
 }
 
+/// The whisper model first (clients read its `segments` capability from the
+/// first entry), then the built-in chat and embedding models.
 fn modelsBody(arena: std.mem.Allocator) ![]const u8 {
-    return std.json.Stringify.valueAlloc(arena, .{
-        .object = "list",
-        .data = .{.{
-            .id = currentModel(arena),
-            .object = "model",
-            .owned_by = "ghostpen",
-            .capabilities = .{
-                .response_formats = .{ "json", "text", "verbose_json", "srt", "vtt" },
-                .segments = true,
-            },
-        }},
-    }, .{});
+    var w: std.Io.Writer.Allocating = .init(arena);
+    var js: std.json.Stringify = .{ .writer = &w.writer };
+    try js.beginObject();
+    try js.objectField("object");
+    try js.write("list");
+    try js.objectField("data");
+    try js.beginArray();
+    try js.write(.{
+        .id = currentModel(arena),
+        .object = "model",
+        .owned_by = "ghostpen",
+        .capabilities = .{
+            .response_formats = .{ "json", "text", "verbose_json", "srt", "vtt" },
+            .segments = true,
+        },
+    });
+    for (try model_server.modelEntries(arena)) |e| try js.write(e);
+    try js.endArray();
+    try js.endObject();
+    return w.written();
+}
+
+/// A JSON request body (chat requests carry base64 images: up to 40 MB).
+fn readJsonBody(arena: std.mem.Allocator, request: *std.http.Server.Request) !?[]const u8 {
+    const limit = 40 * 1024 * 1024;
+    if (request.head.content_length) |len| if (len > limit) return null;
+    var body_buf: [64 * 1024]u8 = undefined;
+    const r = request.readerExpectContinue(&body_buf) catch return null;
+    return r.allocRemaining(arena, .limited(limit)) catch |err| switch (err) {
+        error.OutOfMemory => err,
+        else => null,
+    };
 }
 
 fn badRequest(message: []const u8) Reply {

@@ -129,6 +129,18 @@ fn platformDataDir(arena: std.mem.Allocator, env: *const std.process.Environ.Map
     };
 }
 
+/// The embedding model GhostReel uses (and GhostPen serves to it): 768-dim
+/// embeddinggemma. Not downloaded by GhostPen; found where GhostReel or LM
+/// Studio put it.
+pub const embedding_file = "embeddinggemma-300M-Q8_0.gguf";
+
+/// The embedding model's path in one of the model folders, or null.
+pub fn embeddingModel(io: std.Io, arena: std.mem.Allocator, d: Dirs) ?[]const u8 {
+    if (findFile(io, arena, d.own, embedding_file)) |p| return p;
+    for (d.others) |root| if (findFile(io, arena, root, embedding_file)) |p| return p;
+    return null;
+}
+
 /// `name` (case-insensitive) under `root`, at most 4 levels deep; non-empty files only.
 fn findFile(io: std.Io, arena: std.mem.Allocator, root: []const u8, name: []const u8) ?[]const u8 {
     var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return null;

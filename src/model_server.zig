@@ -1,0 +1,458 @@
+//! The model service: GhostPen's built-in models for other local apps
+//! (GhostReel first), on the transcription server's port, so two apps don't
+//! each load a model into GPU memory. It uses the very runners GhostPen's
+//! own features use (`local_llm.zig`, `models.zig`), so a request from
+//! another app never loads a second copy.
+//!
+//! The OpenAI-compatible routes, shaped like llama-server's where clients
+//! probe them (GhostReel's `probe.rs`):
+//!
+//! - `POST /v1/chat/completions`: messages (text, and `image_url` data URLs
+//!   when the model has a vision projector), `max_tokens`, `temperature`,
+//!   `stream`, `chat_template_kwargs.enable_thinking`, and `response_format`
+//!   `json_schema` (the answer matches the schema). The runner takes one
+//!   system and one user turn: earlier turns are folded into the user text.
+//!   The `model` field is ignored: the built-in model answers.
+//! - `POST /v1/embeddings`: `input` (a string or strings), 768-dim vectors
+//!   from embeddinggemma when it's on disk (GhostReel's or LM Studio's copy).
+//! - `GET /props`: `modalities.vision` and `total_slots` (1); `GET /slots`:
+//!   the context size.
+//!
+//! Other apps find it through a discovery file (`discoveryPath`), written
+//! when the server listens: its URL, this process's pid and what it serves.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const oriel = @import("oriel");
+const main = @import("main.zig");
+const ai = @import("ai.zig");
+const local_llm = @import("local_llm.zig");
+const models = @import("models.zig");
+const llm_models = @import("llm_models.zig");
+
+const log = std.log.scoped(.model_server);
+const gpa = std.heap.smp_allocator;
+
+pub const Reply = struct { status: std.http.Status = .ok, body: []const u8, content_type: []const u8 = "application/json" };
+
+fn errorReply(status: std.http.Status, message: []const u8, arena: std.mem.Allocator) Reply {
+    const body = std.json.Stringify.valueAlloc(arena, .{ .@"error" = .{ .message = message, .type = "invalid_request_error" } }, .{}) catch "{}";
+    return .{ .status = status, .body = body };
+}
+
+/// The built-in model's runner configuration, or null (logged) when it
+/// isn't downloaded.
+fn config(arena: std.mem.Allocator, why: *[]const u8) ?local_llm.Config {
+    var diag: ai.Diag = .{};
+    return main.builtinConfig(arena, &diag) catch {
+        why.* = if (diag.message.len > 0) diag.message else "the built-in model isn't available";
+        return null;
+    };
+}
+
+fn modelName(cfg: local_llm.Config) []const u8 {
+    const base = std.fs.path.basename(cfg.model);
+    return if (std.ascii.endsWithIgnoreCase(base, ".gguf")) base[0 .. base.len - ".gguf".len] else base;
+}
+
+fn embedName(cfg: local_llm.Config) ?[]const u8 {
+    const p = cfg.embed_model orelse return null;
+    const base = std.fs.path.basename(p);
+    return if (std.ascii.endsWithIgnoreCase(base, ".gguf")) base[0 .. base.len - ".gguf".len] else base;
+}
+
+/// The chat and embedding entries for `/v1/models` (after the whisper one).
+pub fn modelEntries(arena: std.mem.Allocator) ![]const ModelEntry {
+    var why: []const u8 = "";
+    const cfg = config(arena, &why) orelse return &.{};
+    var list: std.ArrayList(ModelEntry) = .empty;
+    try list.append(arena, .{ .id = modelName(cfg), .capabilities = .{ .chat = true, .vision = cfg.mmproj != null } });
+    if (embedName(cfg)) |e| try list.append(arena, .{ .id = e, .capabilities = .{ .embeddings = true } });
+    return list.items;
+}
+
+pub const ModelEntry = struct {
+    id: []const u8,
+    object: []const u8 = "model",
+    owned_by: []const u8 = "ghostpen",
+    capabilities: struct { chat: bool = false, vision: bool = false, embeddings: bool = false },
+};
+
+pub fn propsReply(arena: std.mem.Allocator) !Reply {
+    var why: []const u8 = "";
+    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
+        .model_path = cfg.model,
+        .total_slots = 1,
+        .modalities = .{ .vision = cfg.mmproj != null, .audio = false },
+        .default_generation_settings = .{ .n_ctx = cfg.ctx },
+    }, .{}) };
+}
+
+pub fn slotsReply(arena: std.mem.Allocator) !Reply {
+    var why: []const u8 = "";
+    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    return .{ .body = try std.json.Stringify.valueAlloc(arena, .{.{ .id = 0, .n_ctx = cfg.ctx }}, .{}) };
+}
+
+// ---- /v1/embeddings -----------------------------------------------------------------
+
+pub fn embeddingsReply(io: std.Io, arena: std.mem.Allocator, body: []const u8) !Reply {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return errorReply(.bad_request, "the body isn't JSON", arena);
+    const input = switch (parsed) {
+        .object => |o| o.get("input") orelse return errorReply(.bad_request, "missing input", arena),
+        else => return errorReply(.bad_request, "expected a JSON object", arena),
+    };
+    var texts: std.ArrayList([]const u8) = .empty;
+    switch (input) {
+        .string => |t| try texts.append(arena, t),
+        .array => |a| for (a.items) |item| switch (item) {
+            .string => |t| try texts.append(arena, t),
+            else => return errorReply(.bad_request, "input must be strings", arena),
+        },
+        else => return errorReply(.bad_request, "input must be a string or strings", arena),
+    }
+    if (texts.items.len == 0) return errorReply(.bad_request, "input is empty", arena);
+
+    var why: []const u8 = "";
+    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    if (cfg.embed_model == null) return errorReply(.service_unavailable, "no embedding model (embeddinggemma-300M-Q8_0.gguf) found in the model folders", arena);
+    var model: []const u8 = "";
+    var diag: []const u8 = "";
+    const vectors = local_llm.embed(io, gpa, arena, cfg, texts.items, &model, &diag) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.LocalFailed => return errorReply(.internal_server_error, diag, arena),
+    };
+    const Item = struct { object: []const u8 = "embedding", index: usize, embedding: []const f32 };
+    const data = try arena.alloc(Item, vectors.len);
+    for (data, vectors, 0..) |*d, v, i| d.* = .{ .index = i, .embedding = v };
+    return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
+        .object = "list",
+        .model = model,
+        .data = data,
+        .usage = .{ .prompt_tokens = 0, .total_tokens = 0 },
+    }, .{}) };
+}
+
+// ---- /v1/chat/completions -----------------------------------------------------------
+
+const ChatRequest = struct {
+    chat: local_llm.Chat,
+    stream: bool,
+};
+
+/// The runner's request from an OpenAI chat body; null (with `err` set) when
+/// it can't be served.
+fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?ChatRequest {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch {
+        err.* = "the body isn't JSON";
+        return null;
+    };
+    const obj = switch (root) {
+        .object => |o| o,
+        else => {
+            err.* = "expected a JSON object";
+            return null;
+        },
+    };
+    const messages = switch (obj.get("messages") orelse .null) {
+        .array => |a| a.items,
+        else => {
+            err.* = "missing messages";
+            return null;
+        },
+    };
+
+    var system: std.ArrayList(u8) = .empty;
+    var history: std.ArrayList(u8) = .empty;
+    var last_user: []const u8 = "";
+    var image: ?[]const u8 = null;
+    var last_user_index: ?usize = null;
+    for (messages, 0..) |m, i| if (roleOf(m)) |r| if (std.mem.eql(u8, r, "user")) {
+        last_user_index = i;
+    };
+    for (messages, 0..) |m, i| {
+        const role = roleOf(m) orelse continue;
+        const content = m.object.get("content") orelse continue;
+        var text: std.ArrayList(u8) = .empty;
+        switch (content) {
+            .string => |t| try text.appendSlice(arena, t),
+            .array => |parts| for (parts.items) |part| {
+                const p = switch (part) {
+                    .object => |o| o,
+                    else => continue,
+                };
+                const kind = if (p.get("type")) |t| (if (t == .string) t.string else "") else "";
+                if (std.mem.eql(u8, kind, "text")) {
+                    if (p.get("text")) |t| if (t == .string) {
+                        if (text.items.len > 0) try text.append(arena, '\n');
+                        try text.appendSlice(arena, t.string);
+                    };
+                } else if (std.mem.eql(u8, kind, "image_url") and i == last_user_index) {
+                    if (image != null) continue; // the runner takes one image
+                    image = try imageFromPart(arena, p) orelse {
+                        err.* = "only data: image URLs (base64) are supported";
+                        return null;
+                    };
+                }
+            },
+            else => {},
+        }
+        if (std.mem.eql(u8, role, "system") or std.mem.eql(u8, role, "developer")) {
+            if (system.items.len > 0) try system.appendSlice(arena, "\n\n");
+            try system.appendSlice(arena, text.items);
+        } else if (i == last_user_index) {
+            last_user = text.items;
+        } else {
+            // Earlier turns: folded into the user text (one system and one
+            // user turn is what the runner takes).
+            try history.print(arena, "{s}: {s}\n\n", .{ if (std.mem.eql(u8, role, "assistant")) "Assistant" else "User", text.items });
+        }
+    }
+    const user = if (history.items.len > 0)
+        try std.fmt.allocPrint(arena, "Earlier in this conversation:\n\n{s}Now:\n\n{s}", .{ history.items, last_user })
+    else
+        last_user;
+
+    var chat: local_llm.Chat = .{ .system = system.items, .user = user, .image = image };
+    if (obj.get("max_tokens") orelse obj.get("max_completion_tokens")) |v| switch (v) {
+        .integer => |n| chat.max_tokens = @intCast(std.math.clamp(n, 1, 32768)),
+        else => {},
+    };
+    if (obj.get("temperature")) |v| switch (v) {
+        .float => |f| chat.temperature = f,
+        .integer => |n| chat.temperature = @floatFromInt(n),
+        else => {},
+    };
+    if (obj.get("chat_template_kwargs")) |k| if (k == .object) if (k.object.get("enable_thinking")) |t| if (t == .bool) {
+        chat.think = t.bool;
+    };
+    if (obj.get("think")) |t| if (t == .bool) {
+        chat.think = t.bool; // Ollama's spelling
+    };
+    if (obj.get("response_format")) |rf| if (rf == .object) {
+        const kind = if (rf.object.get("type")) |t| (if (t == .string) t.string else "") else "";
+        if (std.mem.eql(u8, kind, "json_schema")) {
+            const js = rf.object.get("json_schema") orelse .null;
+            const schema = if (js == .object) (js.object.get("schema") orelse .null) else .null;
+            if (schema != .null) chat.schema = try std.json.Stringify.valueAlloc(arena, schema, .{});
+        } else if (std.mem.eql(u8, kind, "json_object")) {
+            chat.schema = "{\"type\":\"object\"}";
+        }
+    };
+    const stream = if (obj.get("stream")) |s| s == .bool and s.bool else false;
+    return .{ .chat = chat, .stream = stream };
+}
+
+fn roleOf(m: std.json.Value) ?[]const u8 {
+    if (m != .object) return null;
+    const r = m.object.get("role") orelse return null;
+    return if (r == .string) r.string else null;
+}
+
+/// The bytes of a `data:image/...;base64,...` URL part.
+fn imageFromPart(arena: std.mem.Allocator, part: std.json.ObjectMap) !?[]const u8 {
+    const iu = part.get("image_url") orelse return null;
+    const url = switch (iu) {
+        .string => |s| s,
+        .object => |o| if (o.get("url")) |u| (if (u == .string) u.string else return null) else return null,
+        else => return null,
+    };
+    if (!std.mem.startsWith(u8, url, "data:")) return null;
+    const comma = std.mem.indexOfScalar(u8, url, ',') orelse return null;
+    if (std.mem.indexOf(u8, url[0..comma], ";base64") == null) return null;
+    const b64 = url[comma + 1 ..];
+    const dec = std.base64.standard.Decoder;
+    const size = dec.calcSizeForSlice(b64) catch return null;
+    const bytes = try arena.alloc(u8, size);
+    dec.decode(bytes, b64) catch return null;
+    return bytes;
+}
+
+fn completionId(buf: []u8) []const u8 {
+    var r: [8]u8 = undefined;
+    main.io.random(&r);
+    return std.fmt.bufPrint(buf, "chatcmpl-{x}", .{std.mem.readInt(u64, &r, .little)}) catch "chatcmpl";
+}
+
+/// A non-streaming answer as a Reply; a streaming one written to `request`
+/// (null returned: already answered).
+pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request, body: []const u8) !?Reply {
+    var err: []const u8 = "";
+    const req = (try parseChat(arena, body, &err)) orelse return errorReply(.bad_request, err, arena);
+    var why: []const u8 = "";
+    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    if (req.chat.image != null and cfg.mmproj == null) return errorReply(.bad_request, "the built-in model can't read images (no vision projector)", arena);
+    const model = modelName(cfg);
+    var id_buf: [32]u8 = undefined;
+    const id = completionId(&id_buf);
+    const created = std.Io.Clock.real.now(io).toSeconds();
+
+    if (!req.stream) {
+        var diag: []const u8 = "";
+        const res = local_llm.chat(io, gpa, arena, cfg, req.chat, {}, struct {
+            fn f(_: void, _: []const u8) void {}
+        }.f, &diag) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            error.LocalFailed => return errorReply(.internal_server_error, diag, arena),
+        };
+        return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
+            .id = id,
+            .object = "chat.completion",
+            .created = created,
+            .model = model,
+            .choices = .{.{
+                .index = 0,
+                .message = .{ .role = "assistant", .content = res.text },
+                .finish_reason = if (res.truncated) "length" else "stop",
+            }},
+            .usage = .{ .prompt_tokens = 0, .completion_tokens = 0, .total_tokens = 0 },
+        }, .{}) };
+    }
+
+    // Server-sent events, one per piece of text as the runner writes it.
+    var sse_buf: [16 * 1024]u8 = undefined;
+    var bw = try request.respondStreaming(&sse_buf, .{ .respond_options = .{
+        .keep_alive = false,
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "text/event-stream" },
+            .{ .name = "cache-control", .value = "no-cache" },
+        },
+    } });
+    const Sse = struct {
+        w: *std.http.BodyWriter,
+        arena: std.mem.Allocator,
+        id: []const u8,
+        model: []const u8,
+        created: i64,
+        failed: bool = false,
+        fn event(self: *@This(), delta: anytype, finish: ?[]const u8) void {
+            if (self.failed) return;
+            const json = std.json.Stringify.valueAlloc(self.arena, .{
+                .id = self.id,
+                .object = "chat.completion.chunk",
+                .created = self.created,
+                .model = self.model,
+                .choices = .{.{ .index = 0, .delta = delta, .finish_reason = finish }},
+            }, .{}) catch return;
+            self.w.writer.print("data: {s}\n\n", .{json}) catch {
+                self.failed = true;
+                return;
+            };
+            self.w.flush() catch {
+                self.failed = true;
+            };
+        }
+        fn chunk(self: *@This(), text: []const u8) void {
+            self.event(.{ .content = text }, null);
+        }
+    };
+    var sse: Sse = .{ .w = &bw, .arena = arena, .id = id, .model = model, .created = created };
+    sse.event(.{ .role = "assistant", .content = "" }, null);
+    var diag: []const u8 = "";
+    const res = local_llm.chat(io, gpa, arena, cfg, req.chat, &sse, Sse.chunk, &diag) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        error.LocalFailed => {
+            sse.event(.{ .content = "" }, "error");
+            bw.writer.print("data: {{\"error\":{{\"message\":{f}}}}}\n\n", .{std.json.fmt(diag, .{})}) catch {};
+            bw.writer.writeAll("data: [DONE]\n\n") catch {};
+            bw.end() catch {};
+            return null;
+        },
+    };
+    // The last chunk's delta is an empty object (`.{}` would be `[]`).
+    const Empty = struct {};
+    sse.event(Empty{}, if (res.truncated) "length" else "stop");
+    bw.writer.writeAll("data: [DONE]\n\n") catch {};
+    bw.end() catch {};
+    return null;
+}
+
+// ---- discovery ------------------------------------------------------------------------
+
+/// Where other apps look for a running model service (one per user, whatever
+/// app writes it): Linux `$XDG_RUNTIME_DIR/ghost/models.json` (else
+/// `~/.cache/ghost/`), macOS `~/Library/Application Support/Ghost/`,
+/// Windows `%LOCALAPPDATA%\Ghost\`.
+pub fn discoveryPath(arena: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]const u8 {
+    const dir: []const u8 = switch (builtin.os.tag) {
+        .windows => std.fs.path.join(arena, &.{ env.get("LOCALAPPDATA") orelse return null, "Ghost" }) catch return null,
+        .macos => std.fs.path.join(arena, &.{ env.get("HOME") orelse return null, "Library", "Application Support", "Ghost" }) catch return null,
+        else => if (env.get("XDG_RUNTIME_DIR")) |r| (if (r.len > 0) std.fs.path.join(arena, &.{ r, "ghost" }) catch return null else return null) else std.fs.path.join(arena, &.{ env.get("HOME") orelse return null, ".cache", "ghost" }) catch return null,
+    };
+    return std.fs.path.join(arena, &.{ dir, "models.json" }) catch null;
+}
+
+/// Write the discovery file for the server at `url` (atomically). Never
+/// fails: problems are logged.
+pub fn writeDiscovery(io: std.Io, env: *const std.process.Environ.Map, url: []const u8, stt_model: []const u8) void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const path = discoveryPath(arena, env) orelse return log.warn("no place for the discovery file", .{});
+    var why: []const u8 = "";
+    const cfg = config(arena, &why);
+    const stt_ready = models.isDownloaded(io, gpa, stt_model);
+    const body = std.json.Stringify.valueAlloc(arena, .{
+        .version = 1,
+        .app = "GhostPen",
+        .pid = if (builtin.os.tag == .windows) @as(i64, std.os.windows.GetCurrentProcessId()) else @as(i64, std.c.getpid()),
+        .url = url,
+        .capabilities = .{
+            .chat = cfg != null,
+            .vision = if (cfg) |c| c.mmproj != null else false,
+            .embeddings = if (cfg) |c| c.embed_model != null else false,
+            .stt = stt_ready,
+        },
+        .models = .{
+            .chat = if (cfg) |c| modelName(c) else "",
+            .embeddings = if (cfg) |c| (embedName(c) orelse "") else "",
+            .stt = stt_model,
+        },
+        .updated = std.Io.Clock.real.now(io).toSeconds(),
+    }, .{ .whitespace = .indent_2 }) catch return;
+    const dir = std.fs.path.dirname(path) orelse return;
+    std.Io.Dir.cwd().createDirPath(io, dir) catch |err| return log.warn("discovery dir {s}: {s}", .{ dir, @errorName(err) });
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body }) catch |err| return log.warn("discovery file {s}: {s}", .{ path, @errorName(err) });
+    log.info("model service announced in {s}", .{path});
+}
+
+/// Remove the discovery file if it's ours (at exit).
+pub fn removeDiscovery(io: std.Io, env: *const std.process.Environ.Map) void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const path = discoveryPath(arena, env) orelse return;
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 * 1024)) catch return;
+    const Pid = struct { pid: i64 = 0 };
+    const parsed = std.json.parseFromSliceLeaky(Pid, arena, data, .{ .ignore_unknown_fields = true }) catch return;
+    const me: i64 = if (builtin.os.tag == .windows) std.os.windows.GetCurrentProcessId() else std.c.getpid();
+    if (parsed.pid == me) std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+test "parseChat: system, history folded, image, thinking and schema" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var err: []const u8 = "";
+    const req = (try parseChat(arena,
+        \\{"model":"x","stream":true,"max_tokens":300,"temperature":0,
+        \\ "chat_template_kwargs":{"enable_thinking":false},
+        \\ "response_format":{"type":"json_schema","json_schema":{"name":"f","schema":{"type":"object"}}},
+        \\ "messages":[{"role":"system","content":"Be brief."},
+        \\  {"role":"user","content":"Hi"},{"role":"assistant","content":"Hello!"},
+        \\  {"role":"user","content":[{"type":"text","text":"What is this?"},
+        \\   {"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}
+    , &err)).?;
+    try std.testing.expect(req.stream);
+    try std.testing.expectEqualStrings("Be brief.", req.chat.system);
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "User: Hi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "Assistant: Hello!") != null);
+    try std.testing.expect(std.mem.endsWith(u8, req.chat.user, "What is this?"));
+    try std.testing.expectEqualStrings("hello", req.chat.image.?);
+    try std.testing.expect(!req.chat.think);
+    try std.testing.expectEqual(@as(u32, 300), req.chat.max_tokens);
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", req.chat.schema);
+
+    try std.testing.expect((try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}]}", &err)) == null);
+}

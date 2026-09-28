@@ -18,8 +18,14 @@ pub const Config = struct {
     model: []const u8,
     /// Its vision projector (mmproj .gguf): images in `Chat.image`.
     mmproj: ?[]const u8 = null,
+    /// A small embedding model (.gguf) for `embed`.
+    embed_model: ?[]const u8 = null,
     ctx: u32 = 8192,
     gpu: bool = true,
+    /// KV cache precision: f16, q8_0 or q4_0.
+    kv_type: []const u8 = "q8_0",
+    /// auto, on or off.
+    flash_attn: []const u8 = "auto",
     idle_minutes: u32 = 10,
 };
 
@@ -31,6 +37,8 @@ pub const Chat = struct {
     max_tokens: u32 = 2048,
     /// An image (PNG/JPEG bytes) before the text; needs `Config.mmproj`.
     image: ?[]const u8 = null,
+    /// A JSON Schema the answer must match ("" = free text).
+    schema: []const u8 = "",
 };
 
 pub const Result = struct {
@@ -83,7 +91,7 @@ var tail_buf: [2048]u8 = undefined;
 var tail_len: usize = 0;
 
 fn keyOf(arena: std.mem.Allocator, cfg: Config) ![]u8 {
-    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{d}\x00{}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.ctx, cfg.gpu });
+    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{s}\x00{d}\x00{}\x00{s}\x00{s}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.embed_model orelse "", cfg.ctx, cfg.gpu, cfg.kv_type, cfg.flash_attn });
 }
 
 /// Run one chat request; `on_chunk(ctx, delta)` for each piece of visible text.
@@ -132,6 +140,7 @@ pub fn chat(
         .temperature = req.temperature,
         .think = req.think,
         .image = image_b64,
+        .schema = req.schema,
     }, .{});
     if (image_b64.len > 0 and line_out.len > max_image_line_bytes) {
         diag.* = "The image is too large for the built-in model.";
@@ -193,6 +202,61 @@ pub fn chat(
                 return error.LocalFailed;
             }
             return .{ .text = text.items, .truncated = msg.truncated, .cancelled = msg.cancelled };
+        }
+    }
+}
+
+/// Embed `texts` with the runner's embedding model (`cfg.embed_model`), one
+/// L2-normalized vector each; the model's name in `model_out`. Results point
+/// into `arena`.
+pub fn embed(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cfg: Config,
+    texts: []const []const u8,
+    model_out: *[]const u8,
+    diag: *[]const u8,
+) Error![]const []const f32 {
+    if (cfg.embed_model == null) {
+        diag.* = "No embedding model is set up.";
+        return error.LocalFailed;
+    }
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    busy.store(true, .release);
+    defer busy.store(false, .release);
+    const r = try ensure(io, gpa, arena, cfg, diag);
+    const id = r.next_id;
+    r.next_id += 1;
+    const line_out = try std.json.Stringify.valueAlloc(arena, .{ .id = id, .cmd = "embed", .texts = texts }, .{});
+    {
+        stdin_mutex.lockUncancelable(io);
+        defer stdin_mutex.unlock(io);
+        const w = &r.stdin.interface;
+        w.writeAll(line_out) catch return lost(io, arena, diag);
+        w.writeByte('\n') catch return lost(io, arena, diag);
+        w.flush() catch return lost(io, arena, diag);
+    }
+    const Line = struct {
+        id: u64 = 0,
+        done: bool = false,
+        @"error": ?[]const u8 = null,
+        embeddings: []const []const f32 = &.{},
+        model: []const u8 = "",
+    };
+    while (true) {
+        const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse return lost(io, arena, diag);
+        const msg = std.json.parseFromSliceLeaky(Line, arena, line, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
+        if (msg.id != id and !(msg.id == 0 and msg.@"error" != null)) continue;
+        r.last_used = .now(io, .awake);
+        if (msg.@"error") |e| {
+            diag.* = try arena.dupe(u8, e);
+            return error.LocalFailed;
+        }
+        if (msg.done) {
+            model_out.* = msg.model;
+            return msg.embeddings;
         }
     }
 }
@@ -273,6 +337,8 @@ fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Conf
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ cfg.exe, "--llm-helper", "--model", cfg.model, "--ctx", try std.fmt.allocPrint(arena, "{d}", .{cfg.ctx}) });
     if (cfg.mmproj) |m| try argv.appendSlice(arena, &.{ "--mmproj", m });
+    if (cfg.embed_model) |m| try argv.appendSlice(arena, &.{ "--embed-model", m });
+    try argv.appendSlice(arena, &.{ "--kv-type", cfg.kv_type, "--flash-attn", cfg.flash_attn });
     if (!cfg.gpu) try argv.append(arena, "--cpu");
     var child = std.process.spawn(io, .{
         .argv = argv.items,
@@ -289,7 +355,9 @@ fn start(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Conf
         child.kill(io);
         return error.OutOfMemory;
     };
-    const buf = gpa.alloc(u8, 256 * 1024) catch {
+    // A reply is one line: a batch of embeddings (768 floats each) is large;
+    // pages are only touched as used.
+    const buf = gpa.alloc(u8, 16 * 1024 * 1024) catch {
         gpa.destroy(r);
         child.kill(io);
         return error.OutOfMemory;
