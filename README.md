@@ -27,6 +27,11 @@ AppImage, the Windows installer and the macOS app update themselves
 | Windows 10/11 | setup.exe (per user) | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
 | macOS 13+ | .dmg (Apple Silicon) | the GPU through **Metal** |
 
+Linux needs GTK 4.12+ and WebKitGTK 6.0: Ubuntu 24.04, Debian 13, Fedora 39
+or newer (Ubuntu 22.04 and Debian 12 ship older GTK 4; the .deb says so).
+On Wayland the overlays sit at the screen's edge when gtk4-layer-shell is
+installed (Arch: `gtk4-layer-shell`); without it they're ordinary windows.
+
 The React frontend is GhostPen's own; the commands, events and settings keep
 the Tauri version's names and JSON shapes. On first run the Tauri app's
 settings are imported, and its downloaded whisper models are reused.
