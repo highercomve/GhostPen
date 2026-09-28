@@ -216,6 +216,16 @@ pub fn embeddingsReply(io: std.Io, arena: std.mem.Allocator, body: []const u8) !
 const ChatRequest = struct {
     chat: local_llm.Chat,
     stream: bool,
+    /// Tools were offered: the answer is JSON (`ToolAnswer`), turned into
+    /// OpenAI `tool_calls` or content.
+    tools: bool = false,
+};
+
+/// The JSON the model answers with when tools are offered (the grammar
+/// `toolSchema` builds allows exactly this).
+const ToolAnswer = struct {
+    tool_calls: ?[]const struct { name: []const u8, arguments: std.json.Value } = null,
+    answer: ?[]const u8 = null,
 };
 
 /// The runner's request from an OpenAI chat body; null (with `err` set) when
@@ -240,56 +250,64 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
         },
     };
 
+    // Tools (unless tool_choice is "none").
+    const tools: []const std.json.Value = if (obj.get("tools")) |t| (if (t == .array) t.array.items else &.{}) else &.{};
+    var choice: ToolChoice = .auto;
+    if (obj.get("tool_choice")) |tc| switch (tc) {
+        .string => |c| choice = if (std.mem.eql(u8, c, "none")) .none else if (std.mem.eql(u8, c, "required")) .required else .auto,
+        .object => |o| if (o.get("function")) |f| if (f == .object) if (f.object.get("name")) |n| if (n == .string) {
+            choice = .{ .function = n.string };
+        },
+        else => {},
+    };
+    const use_tools = tools.len > 0 and choice != .none;
+
     var system: std.ArrayList(u8) = .empty;
-    var history: std.ArrayList(u8) = .empty;
-    var last_user: []const u8 = "";
     var image: ?[]const u8 = null;
     var last_user_index: ?usize = null;
-    for (messages, 0..) |m, i| if (roleOf(m)) |r| if (std.mem.eql(u8, r, "user")) {
-        last_user_index = i;
+    var simple = true; // one user turn after the system prompt: no transcript
+    var n_turns: usize = 0;
+    for (messages, 0..) |m, i| if (roleOf(m)) |r| {
+        if (std.mem.eql(u8, r, "user")) last_user_index = i;
+        if (!std.mem.eql(u8, r, "system") and !std.mem.eql(u8, r, "developer")) n_turns += 1;
     };
+    simple = n_turns <= 1 and !use_tools;
+
+    // Conversation turns in order; tool results carry the tool's name.
+    var transcript: std.ArrayList(u8) = .empty;
+    var last_user: []const u8 = "";
+    var call_names: std.StringHashMapUnmanaged([]const u8) = .empty;
     for (messages, 0..) |m, i| {
         const role = roleOf(m) orelse continue;
-        const content = m.object.get("content") orelse continue;
-        var text: std.ArrayList(u8) = .empty;
-        switch (content) {
-            .string => |t| try text.appendSlice(arena, t),
-            .array => |parts| for (parts.items) |part| {
-                const p = switch (part) {
-                    .object => |o| o,
-                    else => continue,
-                };
-                const kind = if (p.get("type")) |t| (if (t == .string) t.string else "") else "";
-                if (std.mem.eql(u8, kind, "text")) {
-                    if (p.get("text")) |t| if (t == .string) {
-                        if (text.items.len > 0) try text.append(arena, '\n');
-                        try text.appendSlice(arena, t.string);
-                    };
-                } else if (std.mem.eql(u8, kind, "image_url") and i == last_user_index) {
-                    if (image != null) continue; // the runner takes one image
-                    image = try imageFromPart(arena, p) orelse {
-                        err.* = "only data: image URLs (base64) are supported";
-                        return null;
-                    };
-                }
-            },
-            else => {},
-        }
+        const text = try messageText(arena, m, if (i == last_user_index) &image else null, err) orelse return null;
         if (std.mem.eql(u8, role, "system") or std.mem.eql(u8, role, "developer")) {
             if (system.items.len > 0) try system.appendSlice(arena, "\n\n");
-            try system.appendSlice(arena, text.items);
-        } else if (i == last_user_index) {
-            last_user = text.items;
+            try system.appendSlice(arena, text);
+        } else if (std.mem.eql(u8, role, "assistant")) {
+            if (text.len > 0) try transcript.print(arena, "Assistant: {s}\n\n", .{text});
+            if (m.object.get("tool_calls")) |tcs| if (tcs == .array) {
+                var calls: std.ArrayList(u8) = .empty;
+                for (tcs.array.items) |tc| {
+                    if (tc != .object) continue;
+                    const f = tc.object.get("function") orelse continue;
+                    if (f != .object) continue;
+                    const name = if (f.object.get("name")) |n| (if (n == .string) n.string else "") else "";
+                    const args: []const u8 = if (f.object.get("arguments")) |a| (if (a == .string) a.string else try std.json.Stringify.valueAlloc(arena, a, .{})) else "{}";
+                    if (tc.object.get("id")) |id| if (id == .string) try call_names.put(arena, id.string, name);
+                    try calls.print(arena, "{s}{{\"name\":{f},\"arguments\":{s}}}", .{ if (calls.items.len > 0) "," else "", std.json.fmt(name, .{}), args });
+                }
+                try transcript.print(arena, "Assistant called tools: [{s}]\n\n", .{calls.items});
+            };
+        } else if (std.mem.eql(u8, role, "tool")) {
+            const id = if (m.object.get("tool_call_id")) |t| (if (t == .string) t.string else "") else "";
+            const name = call_names.get(id) orelse (if (m.object.get("name")) |n| (if (n == .string) n.string else "tool") else "tool");
+            try transcript.print(arena, "Tool result ({s}):\n{s}\n\n", .{ name, text });
         } else {
-            // Earlier turns: folded into the user text (one system and one
-            // user turn is what the runner takes).
-            try history.print(arena, "{s}: {s}\n\n", .{ if (std.mem.eql(u8, role, "assistant")) "Assistant" else "User", text.items });
+            if (i == last_user_index) last_user = text;
+            try transcript.print(arena, "User: {s}\n\n", .{text});
         }
     }
-    const user = if (history.items.len > 0)
-        try std.fmt.allocPrint(arena, "Earlier in this conversation:\n\n{s}Now:\n\n{s}", .{ history.items, last_user })
-    else
-        last_user;
+    const user = if (simple) last_user else try std.fmt.allocPrint(arena, "The conversation so far:\n\n{s}Continue as the assistant.", .{transcript.items});
 
     var chat: local_llm.Chat = .{ .system = system.items, .user = user, .image = image };
     if (obj.get("max_tokens") orelse obj.get("max_completion_tokens")) |v| switch (v) {
@@ -307,7 +325,11 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     if (obj.get("think")) |t| if (t == .bool) {
         chat.think = t.bool; // Ollama's spelling
     };
-    if (obj.get("response_format")) |rf| if (rf == .object) {
+    if (use_tools) {
+        chat.schema = try toolSchema(arena, tools, choice);
+        const guide = try toolGuide(arena, tools, choice);
+        chat.system = if (chat.system.len > 0) try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ chat.system, guide }) else guide;
+    } else if (obj.get("response_format")) |rf| if (rf == .object) {
         const kind = if (rf.object.get("type")) |t| (if (t == .string) t.string else "") else "";
         if (std.mem.eql(u8, kind, "json_schema")) {
             const js = rf.object.get("json_schema") orelse .null;
@@ -320,7 +342,95 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     chat.keep_alive_ms = keepAliveMs(obj);
     chat.ctx = requestedCtx(obj);
     const stream = if (obj.get("stream")) |s| s == .bool and s.bool else false;
-    return .{ .chat = chat, .stream = stream };
+    return .{ .chat = chat, .stream = stream, .tools = use_tools };
+}
+
+const ToolChoice = union(enum) { auto, none, required, function: []const u8 };
+
+/// A message's text (text parts joined); its first data-URL image into
+/// `image` when given. Null (with `err` set) on an image it can't take.
+fn messageText(arena: std.mem.Allocator, m: std.json.Value, image: ?*?[]const u8, err: *[]const u8) !?[]const u8 {
+    const content = m.object.get("content") orelse return "";
+    var text: std.ArrayList(u8) = .empty;
+    switch (content) {
+        .string => |t| try text.appendSlice(arena, t),
+        .array => |parts| for (parts.items) |part| {
+            const p = switch (part) {
+                .object => |o| o,
+                else => continue,
+            };
+            const kind = if (p.get("type")) |t| (if (t == .string) t.string else "") else "";
+            if (std.mem.eql(u8, kind, "text")) {
+                if (p.get("text")) |t| if (t == .string) {
+                    if (text.items.len > 0) try text.append(arena, '\n');
+                    try text.appendSlice(arena, t.string);
+                };
+            } else if (std.mem.eql(u8, kind, "image_url")) {
+                const slot = image orelse continue; // earlier turns: text only
+                if (slot.* != null) continue; // the runner takes one image
+                slot.* = try imageFromPart(arena, p) orelse {
+                    err.* = "only data: image URLs (base64) are supported";
+                    return null;
+                };
+            }
+        },
+        else => {},
+    }
+    return text.items;
+}
+
+fn toolName(t: std.json.Value) ?[]const u8 {
+    if (t != .object) return null;
+    const f = t.object.get("function") orelse return null;
+    if (f != .object) return null;
+    const n = f.object.get("name") orelse return null;
+    return if (n == .string) n.string else null;
+}
+
+fn toolField(t: std.json.Value, field: []const u8) ?std.json.Value {
+    const f = t.object.get("function") orelse return null;
+    return if (f == .object) f.object.get(field) else null;
+}
+
+/// The grammar's JSON Schema for a tool answer: tool calls (each with one of
+/// the offered tools' names and arguments matching its parameters) or, when
+/// the choice allows, a final text answer.
+fn toolSchema(arena: std.mem.Allocator, tools: []const std.json.Value, choice: ToolChoice) ![]const u8 {
+    var w: std.Io.Writer.Allocating = .init(arena);
+    const o = &w.writer;
+    try o.writeAll("{\"oneOf\":[{\"type\":\"object\",\"properties\":{\"tool_calls\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":8,\"items\":{\"oneOf\":[");
+    var n: usize = 0;
+    for (tools) |t| {
+        const name = toolName(t) orelse continue;
+        if (choice == .function and !std.mem.eql(u8, choice.function, name)) continue;
+        const params = toolField(t, "parameters") orelse std.json.Value{ .null = {} };
+        try o.print("{s}{{\"type\":\"object\",\"properties\":{{\"name\":{{\"const\":{f}}},\"arguments\":", .{ if (n > 0) "," else "", std.json.fmt(name, .{}) });
+        if (params == .object) try std.json.Stringify.value(params, .{}, o) else try o.writeAll("{\"type\":\"object\"}");
+        try o.writeAll("},\"required\":[\"name\",\"arguments\"],\"additionalProperties\":false}");
+        n += 1;
+    }
+    try o.writeAll("]}}},\"required\":[\"tool_calls\"],\"additionalProperties\":false}");
+    if (choice == .auto) try o.writeAll(",{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"],\"additionalProperties\":false}");
+    try o.writeAll("]}");
+    return w.written();
+}
+
+/// The system prompt's part about the tools and the answer's shape.
+fn toolGuide(arena: std.mem.Allocator, tools: []const std.json.Value, choice: ToolChoice) ![]const u8 {
+    var w: std.Io.Writer.Allocating = .init(arena);
+    const o = &w.writer;
+    try o.writeAll("# Tools\n\nYou can call these tools:\n\n");
+    for (tools) |t| {
+        const name = toolName(t) orelse continue;
+        if (choice == .function and !std.mem.eql(u8, choice.function, name)) continue;
+        const desc = if (toolField(t, "description")) |d| (if (d == .string) d.string else "") else "";
+        try o.print("- {s}: {s}\n  Parameters (JSON Schema): ", .{ name, desc });
+        if (toolField(t, "parameters")) |p| try std.json.Stringify.value(p, .{}, o) else try o.writeAll("{}");
+        try o.writeAll("\n");
+    }
+    try o.writeAll("\nAnswer with JSON only. To call tools: {\"tool_calls\":[{\"name\":\"<tool>\",\"arguments\":{...}}]} (their results come back in the next message).");
+    if (choice == .auto) try o.writeAll(" When you have what you need, answer the user: {\"answer\":\"<your reply>\"}.");
+    return w.written();
 }
 
 fn roleOf(m: std.json.Value) ?[]const u8 {
@@ -366,6 +476,8 @@ pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server
     var id_buf: [32]u8 = undefined;
     const id = completionId(&id_buf);
     const created = std.Io.Clock.real.now(io).toSeconds();
+
+    if (req.tools) return toolReply(io, arena, request, req, cfg, model, id, created);
 
     if (!req.stream) {
         var diag: []const u8 = "";
@@ -447,6 +559,86 @@ pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server
     return null;
 }
 
+/// The OpenAI message for a tool-mode answer: `tool_calls` (arguments as
+/// JSON text, ids made up) or content. Text that isn't the expected JSON
+/// (cut off by max_tokens) is passed on as content.
+const ToolMessage = struct {
+    role: []const u8 = "assistant",
+    content: ?[]const u8 = null,
+    tool_calls: ?[]const ToolCall = null,
+    const ToolCall = struct {
+        id: []const u8,
+        type: []const u8 = "function",
+        function: struct { name: []const u8, arguments: []const u8 },
+    };
+};
+
+fn toolMessage(arena: std.mem.Allocator, text: []const u8, id: []const u8) !ToolMessage {
+    const parsed = std.json.parseFromSliceLeaky(ToolAnswer, arena, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
+        return .{ .content = text };
+    if (parsed.tool_calls) |calls| if (calls.len > 0) {
+        const out = try arena.alloc(ToolMessage.ToolCall, calls.len);
+        for (calls, out, 0..) |call, *o, i| o.* = .{
+            .id = try std.fmt.allocPrint(arena, "call_{s}_{d}", .{ id["chatcmpl-".len..], i }),
+            .function = .{ .name = call.name, .arguments = try std.json.Stringify.valueAlloc(arena, call.arguments, .{}) },
+        };
+        return .{ .tool_calls = out };
+    };
+    return .{ .content = parsed.answer orelse "" };
+}
+
+/// Tools: the whole answer, then one reply (a stream gets it as one chunk:
+/// tool calls can't be shown before they're complete).
+fn toolReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request, req: ChatRequest, cfg: local_llm.Config, model: []const u8, id: []const u8, created: i64) !?Reply {
+    var diag: []const u8 = "";
+    const res = local_llm.chat(io, gpa, arena, cfg, req.chat, {}, struct {
+        fn f(_: void, _: []const u8) void {}
+    }.f, &diag) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        error.LocalFailed => return errorReply(.internal_server_error, diag, arena),
+    };
+    const msg = try toolMessage(arena, res.text, id);
+    const finish: []const u8 = if (msg.tool_calls != null) "tool_calls" else if (res.truncated) "length" else "stop";
+    if (msg.tool_calls) |calls| {
+        for (calls) |c| log.info("tool call: {s}", .{c.function.name});
+    } else log.info("tool turn answered without a call", .{});
+    if (!req.stream) return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
+        .id = id,
+        .object = "chat.completion",
+        .created = created,
+        .model = model,
+        .choices = .{.{ .index = 0, .message = msg, .finish_reason = finish }},
+        .usage = .{ .prompt_tokens = 0, .completion_tokens = 0, .total_tokens = 0 },
+    }, .{ .emit_null_optional_fields = false }) };
+
+    var sse_buf: [16 * 1024]u8 = undefined;
+    var bw = try request.respondStreaming(&sse_buf, .{ .respond_options = .{
+        .keep_alive = false,
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "text/event-stream" },
+            .{ .name = "cache-control", .value = "no-cache" },
+        },
+    } });
+    // Streamed tool calls carry an index each.
+    const Indexed = struct { index: usize, id: []const u8, type: []const u8 = "function", function: struct { name: []const u8, arguments: []const u8 } };
+    var indexed: []Indexed = &.{};
+    if (msg.tool_calls) |calls| {
+        indexed = try arena.alloc(Indexed, calls.len);
+        for (calls, indexed, 0..) |cl, *o, i| o.* = .{ .index = i, .id = cl.id, .function = .{ .name = cl.function.name, .arguments = cl.function.arguments } };
+    }
+    const Delta = struct { role: []const u8 = "assistant", content: ?[]const u8 = null, tool_calls: ?[]const Indexed = null };
+    const chunk = try std.json.Stringify.valueAlloc(arena, .{
+        .id = id,
+        .object = "chat.completion.chunk",
+        .created = created,
+        .model = model,
+        .choices = .{.{ .index = 0, .delta = Delta{ .content = msg.content, .tool_calls = if (msg.tool_calls != null) indexed else null }, .finish_reason = finish }},
+    }, .{ .emit_null_optional_fields = false });
+    bw.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{chunk}) catch {};
+    bw.end() catch {};
+    return null;
+}
+
 // ---- discovery ------------------------------------------------------------------------
 
 /// Where other apps look for a running model service (one per user, whatever
@@ -518,6 +710,37 @@ test parseDuration {
     try std.testing.expectEqual(@as(?u64, null), parseDuration("soon"));
 }
 
+test "tools: schema, guide, transcript and the answer as tool_calls" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var err: []const u8 = "";
+    const req = (try parseChat(arena,
+        \\{"tools":[{"type":"function","function":{"name":"search_moments","description":"Search the footage",
+        \\  "parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}],
+        \\ "messages":[{"role":"system","content":"You write scripts."},
+        \\  {"role":"user","content":"Find a dog"},
+        \\  {"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"search_moments","arguments":"{\"query\":\"dog\"}"}}]},
+        \\  {"role":"tool","tool_call_id":"c1","content":"2 moments found"}]}
+    , &err)).?;
+    try std.testing.expect(req.tools);
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.system, "search_moments: Search the footage") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "User: Find a dog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "Assistant called tools: [{\"name\":\"search_moments\",\"arguments\":{\"query\":\"dog\"}}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "Tool result (search_moments):\n2 moments found") != null);
+    // The schema converts to a grammar.
+    const g = try oriel.llama.jsonSchemaToGrammar(arena, req.chat.schema, null);
+    try std.testing.expect(std.mem.indexOf(u8, g, "search_moments") != null);
+
+    const calls = try toolMessage(arena, "{\"tool_calls\":[{\"name\":\"search_moments\",\"arguments\":{\"query\":\"cat\"}}]}", "chatcmpl-abc");
+    try std.testing.expectEqualStrings("search_moments", calls.tool_calls.?[0].function.name);
+    try std.testing.expectEqualStrings("{\"query\":\"cat\"}", calls.tool_calls.?[0].function.arguments);
+    try std.testing.expectEqualStrings("call_abc_0", calls.tool_calls.?[0].id);
+    const answer = try toolMessage(arena, "{\"answer\":\"Here it is.\"}", "chatcmpl-abc");
+    try std.testing.expectEqualStrings("Here it is.", answer.content.?);
+    try std.testing.expect(answer.tool_calls == null);
+}
+
 test "parseChat: system, history folded, image, thinking and schema" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -536,7 +759,7 @@ test "parseChat: system, history folded, image, thinking and schema" {
     try std.testing.expectEqualStrings("Be brief.", req.chat.system);
     try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "User: Hi") != null);
     try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "Assistant: Hello!") != null);
-    try std.testing.expect(std.mem.endsWith(u8, req.chat.user, "What is this?"));
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "User: What is this?\n\nContinue as the assistant.") != null);
     try std.testing.expectEqualStrings("hello", req.chat.image.?);
     try std.testing.expect(!req.chat.think);
     try std.testing.expectEqual(@as(u32, 300), req.chat.max_tokens);
