@@ -23,10 +23,8 @@ var session: ?*Session = null;
 var translate_live: std.atomic.Value(bool) = .init(false);
 
 pub fn init() void {
-    // Loading the GPU backend can take seconds (Metal compiles its shaders
-    // on a new build's first launch): off the main thread, so the tray and
-    // windows come up at once. Captions and dictation load models later.
-    if (std.Thread.spawn(.{}, models.init, .{main.io})) |t| t.detach() else |_| models.init(main.io);
+    // Whisper and its GPU backend run in the runner (models.zig), started on
+    // the first transcription: nothing to load here.
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     if (main.shared.get(main.io, arena.allocator())) |s| translate_live.store(s.captions.aiTranslate, .release) else |_| {}

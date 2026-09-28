@@ -881,8 +881,12 @@ pub fn main(init: std.process.Init) !u8 {
     // The built-in model runner (started by local_llm.zig): no GUI.
     if (args.len > 1 and std.mem.eql(u8, args[1], "--llm-helper"))
         return @import("llm_helper.zig").main(io, gpa, args[2..]);
+    // The whisper runner (started by models.zig): no GUI.
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--whisper-helper"))
+        return @import("whisper_helper.zig").main(io, gpa, args[2..]);
     environ_map = init.environ_map;
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
+    @import("models.zig").helper_exe = self_exe;
     ai.local_resolver = &resolveLocal;
     // Whisper models other apps (GhostReel) downloaded are reused.
     if (llmDirs(init.arena.allocator())) |d| {

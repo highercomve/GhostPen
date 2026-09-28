@@ -6,38 +6,23 @@
 const std = @import("std");
 const oriel = @import("oriel");
 const whisper = oriel.whisper;
+const builtin = @import("builtin");
 const llm_models = @import("llm_models.zig");
+const whisper_helper = @import("whisper_helper.zig");
 
 const log = std.log.scoped(.models);
 
 pub const sample_rate = whisper.sample_rate;
 
+/// Serializes the runner's use: one request at a time, and no start or stop
+/// in between.
 var mutex: std.Io.Mutex = .init;
-var loaded_name: ?[]u8 = null;
-var loaded: ?whisper.Context = null;
-var gpu: ?[:0]const u8 = null;
 
-/// Load the GPU backend (libggml-cuda.so next to the executable) once.
-pub fn init(io: std.Io) void {
-    // Held while the backend loads (it runs off the main thread): a model
-    // loaded meanwhile waits for the GPU instead of falling back to the CPU.
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    initLocked(io);
-}
-
-var gpu_ready = false;
-
-/// The GPU backend, once; caller holds `mutex`. Also called before a load,
-/// so a load that wins the race against `init` (the transcription server
-/// starts on its own thread) still gets the GPU.
-fn initLocked(io: std.Io) void {
-    if (gpu_ready) return;
-    gpu_ready = true;
-    whisper.silenceLogs();
-    if (oriel.ggml_gpu.load(io) > 0) gpu = oriel.ggml_gpu.gpuName();
-    log.info("whisper backend: {s}", .{gpu orelse "CPU"});
-}
+/// The executable started as the runner (`--whisper-helper`); set at startup.
+pub var helper_exe: ?[]const u8 = null;
+/// Stop the runner (freeing the GPU backend and the model) after this long
+/// without a request. Captions keep it busy every few seconds.
+pub var idle_minutes: u32 = 5;
 
 pub const Entry = struct {
     id: []const u8,
@@ -121,31 +106,16 @@ pub fn isDownloaded(io: std.Io, gpa: std.mem.Allocator, id: []const u8) bool {
     return true;
 }
 
-/// Load `id` unless it's already the resident model. Caller holds `mutex`.
-fn ensureLocked(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !whisper.Context {
-    initLocked(io);
-    if (loaded) |ctx| if (loaded_name) |n| if (std.mem.eql(u8, n, id)) return ctx;
-    const p = (try resolve(io, gpa, id)) orelse return error.ModelNotFound;
-    defer gpa.free(p);
-    const pz = try gpa.dupeZ(u8, p);
-    defer gpa.free(pz);
-    const ctx = whisper.loadModel(pz, whisper.contextDefaultParams()) catch return error.ModelLoadFailed;
-    errdefer ctx.deinit();
-    const name = try gpa.dupe(u8, id);
-    // Swap: one model resident at a time (GPU memory).
-    if (loaded) |old| old.deinit();
-    if (loaded_name) |old| gpa.free(old);
-    loaded = ctx;
-    loaded_name = name;
-    log.info("loaded whisper model {s}", .{id});
-    return ctx;
-}
-
-/// Load `id` now (so a session starts without the load delay).
+/// Load `id` now (so a session starts without the load delay), starting the
+/// runner if needed.
 pub fn ensure(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !void {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
-    _ = try ensureLocked(io, gpa, id);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const p = (try resolve(io, gpa, id)) orelse return error.ModelNotFound;
+    defer gpa.free(p);
+    _ = try request(io, gpa, arena.allocator(), .{ .cmd = "load", .model = p }, &.{});
 }
 
 /// Oriel's voice activity detection model, written once to `<models>/vad`
@@ -171,18 +141,22 @@ fn vadLocked(io: std.Io, gpa: std.mem.Allocator) ?[:0]const u8 {
     return vad_path;
 }
 
-fn threads() c_int {
-    return @intCast(@min(std.Thread.getCpuCount() catch 4, 8));
-}
-
 /// Transcribe mono 16 kHz samples with model `id`. Caller frees the text.
 pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, id: []const u8, samples: []const f32, language: []const u8, translate: bool) ![]u8 {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
-    const ctx = try ensureLocked(io, gpa, id);
-    const lang = try gpa.dupeZ(u8, if (language.len == 0) "auto" else language);
-    defer gpa.free(lang);
-    return ctx.transcribe(gpa, samples, .{ .language = lang, .translate = translate, .threads = threads(), .vad_model = vadLocked(io, gpa) });
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const p = (try resolve(io, gpa, id)) orelse return error.ModelNotFound;
+    defer gpa.free(p);
+    const r = try request(io, gpa, arena.allocator(), .{
+        .cmd = "transcribe",
+        .model = p,
+        .language = if (language.len == 0) "auto" else language,
+        .translate = translate,
+        .vad = vadLocked(io, gpa),
+    }, samples);
+    return gpa.dupe(u8, r.text);
 }
 
 pub const Segment = struct {
@@ -211,33 +185,261 @@ pub const Transcript = struct {
 };
 
 /// Transcribe with segment timestamps (the STT server's verbose_json, srt
-/// and vtt). Same model and lock as `transcribe`. Results point into `arena`.
+/// and vtt). Same runner and lock as `transcribe`. Results point into `arena`.
 pub fn transcribeSegments(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, id: []const u8, samples: []const f32, language: []const u8) !Transcript {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
-    const ctx = try ensureLocked(io, gpa, id);
-    const c = whisper.c;
-    const n_samples = std.math.cast(c_int, samples.len) orelse return error.AudioTooLong;
-    const lang = try arena.dupeZ(u8, if (language.len == 0) "auto" else language);
+    const p = (try resolve(io, gpa, id)) orelse return error.ModelNotFound;
+    defer gpa.free(p);
     // With VAD, whisper.cpp maps segment times back onto the original audio.
-    const p = whisper.fullParams(.{ .language = lang, .threads = threads(), .vad_model = vadLocked(io, gpa) });
-    if (c.whisper_full(ctx.handle, p, samples.ptr, n_samples) != 0) return error.TranscribeFailed;
+    const r = try request(io, gpa, arena, .{
+        .cmd = "transcribe",
+        .model = p,
+        .language = if (language.len == 0) "auto" else language,
+        .segments = true,
+        .vad = vadLocked(io, gpa),
+    }, samples);
+    const segments = try arena.alloc(Segment, r.segments.len);
+    for (segments, r.segments) |*out, seg| out.* = .{ .start = seg.start, .end = seg.end, .text = try cleanTranscript(arena, seg.text) };
+    return .{ .segments = segments, .language = if (r.language.len > 0) r.language else try arena.dupe(u8, language) };
+}
 
-    const n: usize = @intCast(@max(0, c.whisper_full_n_segments(ctx.handle)));
-    const segments = try arena.alloc(Segment, n);
-    for (segments, 0..) |*seg, i| {
-        const idx: c_int = @intCast(i);
-        const t: ?[*:0]const u8 = c.whisper_full_get_segment_text(ctx.handle, idx);
-        seg.* = .{
-            // whisper counts in 10 ms steps
-            .start = @as(f64, @floatFromInt(c.whisper_full_get_segment_t0(ctx.handle, idx))) / 100.0,
-            .end = @as(f64, @floatFromInt(c.whisper_full_get_segment_t1(ctx.handle, idx))) / 100.0,
-            .text = try cleanTranscript(arena, if (t) |x| std.mem.span(x) else ""),
-        };
+// ---- the runner (whisper_helper.zig) --------------------------------------------------
+
+const Runner = struct {
+    child: std.process.Child,
+    stdout_buf: []u8,
+    reader: std.Io.File.Reader,
+    stdin_buf: [64 * 1024]u8 = undefined,
+    stdin: std.Io.File.Writer,
+    stderr_thread: ?std.Thread = null,
+    cpu: bool,
+    next_id: u64 = 1,
+    last_used: std.Io.Clock.Timestamp,
+};
+
+/// Guarded by `mutex`.
+var runner: ?*Runner = null;
+var runner_gpa: std.mem.Allocator = undefined;
+var busy: std.atomic.Value(bool) = .init(false);
+var watchdog: ?std.Thread = null;
+/// Set once the GPU failed to load a model: runners start on the CPU.
+var cpu_only = false;
+
+/// The last lines whisper.cpp wrote to stderr, for the log.
+var tail_mutex: std.Io.Mutex = .init;
+var tail_buf: [2048]u8 = undefined;
+var tail_len: usize = 0;
+
+const Request = struct {
+    id: u64 = 0,
+    cmd: []const u8,
+    model: []const u8 = "",
+    language: []const u8 = "auto",
+    translate: bool = false,
+    segments: bool = false,
+    vad: ?[]const u8 = null,
+    samples: u64 = 0,
+};
+
+const Reply = struct {
+    id: u64 = 0,
+    @"error": ?[]const u8 = null,
+    text: []const u8 = "",
+    language: []const u8 = "",
+    segments: []const struct { start: f64 = 0, end: f64 = 0, text: []const u8 = "" } = &.{},
+};
+
+/// Send `req` (followed by `samples`) and wait for its answer, starting the
+/// runner if needed. A model the GPU can't load is retried once on the CPU.
+/// Caller holds `mutex`; the reply points into `arena`.
+fn request(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, samples: []const f32) !Reply {
+    busy.store(true, .release);
+    defer busy.store(false, .release);
+    return requestOnce(io, gpa, arena, req, samples) catch |err| switch (err) {
+        error.ModelLoadFailed => {
+            if (cpu_only) return err;
+            log.warn("the GPU could not load the whisper model; running it on the CPU", .{});
+            stop(io);
+            cpu_only = true;
+            return requestOnce(io, gpa, arena, req, samples);
+        },
+        else => err,
+    };
+}
+
+fn requestOnce(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, samples: []const f32) !Reply {
+    if (samples.len > whisper_helper.max_samples) return error.AudioTooLong;
+    const r = try ensureRunner(io, gpa, arena);
+    var line = req;
+    line.id = r.next_id;
+    r.next_id += 1;
+    line.samples = samples.len;
+    const w = &r.stdin.interface;
+    std.json.Stringify.value(line, .{}, w) catch return lost(io);
+    w.writeByte('\n') catch return lost(io);
+    w.writeAll(std.mem.sliceAsBytes(samples)) catch return lost(io);
+    w.flush() catch return lost(io);
+
+    while (true) {
+        const out = (r.reader.interface.takeDelimiter('\n') catch null) orelse return lost(io);
+        // alloc_always: the line is in the reader's buffer, reused by the next read.
+        const reply = std.json.parseFromSliceLeaky(Reply, arena, out, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
+        // Id 0: a request it couldn't read (it exits then).
+        if (reply.id != line.id and reply.id != 0) continue;
+        r.last_used = .now(io, .awake);
+        if (reply.@"error") |e| {
+            log.warn("whisper runner: {s}", .{e});
+            if (reply.id == 0) stop(io);
+            if (std.mem.startsWith(u8, e, "could not load the model")) return error.ModelLoadFailed;
+            return error.TranscribeFailed;
+        }
+        return reply;
     }
-    const lang_id = c.whisper_full_lang_id(ctx.handle);
-    const detected: []const u8 = if (lang_id >= 0) (if (c.whisper_lang_str(lang_id)) |l| std.mem.span(l) else "") else "";
-    return .{ .segments = segments, .language = try arena.dupe(u8, if (detected.len > 0) detected else language) };
+}
+
+/// The runner died or the pipe broke: stop it (the next request starts another).
+fn lost(io: std.Io) error{TranscribeFailed} {
+    var buf: [256]u8 = undefined;
+    log.warn("the whisper runner stopped (crash or out of memory): {s}", .{lastError(io, &buf)});
+    stop(io);
+    return error.TranscribeFailed;
+}
+
+/// The last line whisper.cpp wrote to stderr, copied into `buf`.
+fn lastError(io: std.Io, buf: []u8) []const u8 {
+    tail_mutex.lockUncancelable(io);
+    defer tail_mutex.unlock(io);
+    const t = std.mem.trim(u8, tail_buf[0..tail_len], " \t\r\n");
+    const last = if (std.mem.lastIndexOfScalar(u8, t, '\n')) |i| t[i + 1 ..] else t;
+    const n = @min(last.len, buf.len);
+    @memcpy(buf[0..n], last[0..n]);
+    return buf[0..n];
+}
+
+/// The runner, started (and its GPU backend loaded) if needed. Caller holds `mutex`.
+fn ensureRunner(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator) !*Runner {
+    if (runner) |r| return r;
+    const exe = helper_exe orelse return error.NoRunner;
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(arena, &.{ exe, "--whisper-helper" });
+    if (cpu_only) try argv.append(arena, "--cpu");
+    var child = std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .create_no_window = true,
+    }) catch |err| {
+        log.warn("could not start the whisper runner: {s}", .{@errorName(err)});
+        return error.NoRunner;
+    };
+    const r = gpa.create(Runner) catch {
+        child.kill(io);
+        return error.OutOfMemory;
+    };
+    // A reply is one line: the segments of up to three hours of speech
+    // (`whisper_helper.max_samples`) fit; pages are only touched as used.
+    const buf = gpa.alloc(u8, 8 * 1024 * 1024) catch {
+        gpa.destroy(r);
+        child.kill(io);
+        return error.OutOfMemory;
+    };
+    r.* = .{
+        .child = child,
+        .stdout_buf = buf,
+        .reader = undefined,
+        .stdin = undefined,
+        .cpu = cpu_only,
+        .last_used = .now(io, .awake),
+    };
+    r.reader = r.child.stdout.?.readerStreaming(io, r.stdout_buf);
+    r.stdin = r.child.stdin.?.writerStreaming(io, &r.stdin_buf);
+    runner_gpa = gpa;
+    {
+        tail_mutex.lockUncancelable(io);
+        defer tail_mutex.unlock(io);
+        tail_len = 0;
+    }
+    runner = r;
+    r.stderr_thread = std.Thread.spawn(.{}, drainStderr, .{ io, r.child.stderr.? }) catch {
+        // Nothing would drain stderr: the runner could block on it.
+        stop(io);
+        return error.NoRunner;
+    };
+
+    // The ready line, once the GPU backend is loaded; anything else a GPU
+    // backend prints on stdout first is skipped.
+    const Ready = struct { ready: bool = false, gpu: ?[]const u8 = null };
+    const ready: Ready = while (true) {
+        const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse {
+            var why: [256]u8 = undefined;
+            log.warn("the whisper runner exited at startup: {s}", .{lastError(io, &why)});
+            stop(io);
+            return error.NoRunner;
+        };
+        const parsed = std.json.parseFromSliceLeaky(Ready, arena, line, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
+        if (parsed.ready) break parsed;
+    };
+    log.info("whisper backend: {s}", .{ready.gpu orelse "CPU"});
+    if (watchdog == null) watchdog = std.Thread.spawn(.{}, idleWatch, .{io}) catch null;
+    return r;
+}
+
+/// Kill the runner and free it. Caller holds `mutex`.
+fn stop(io: std.Io) void {
+    const r = runner orelse return;
+    runner = null;
+    // Kill, let the stderr drain see EOF and end, then reap (which closes the
+    // pipes): never close a pipe another thread still reads.
+    if (r.child.id) |id| switch (builtin.os.tag) {
+        .windows => _ = std.os.windows.ntdll.NtTerminateProcess(id, @enumFromInt(1)),
+        else => std.posix.kill(id, std.posix.SIG.KILL) catch {},
+    };
+    if (r.stderr_thread) |t| t.join();
+    r.child.kill(io);
+    runner_gpa.free(r.stdout_buf);
+    runner_gpa.destroy(r);
+    log.info("whisper runner stopped", .{});
+}
+
+fn drainStderr(io: std.Io, file: std.Io.File) void {
+    var buf: [4096]u8 = undefined;
+    var reader = file.readerStreaming(io, &buf);
+    while (true) {
+        const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => {
+                reader.interface.toss(reader.interface.buffered().len);
+                continue;
+            },
+            else => return,
+        } orelse return;
+        log.debug("whisper runner: {s}", .{line});
+        tail_mutex.lockUncancelable(io);
+        defer tail_mutex.unlock(io);
+        const keep = @min(line.len + 1, tail_buf.len);
+        if (tail_len + keep > tail_buf.len) {
+            const drop = tail_len + keep - tail_buf.len;
+            std.mem.copyForwards(u8, tail_buf[0 .. tail_len - drop], tail_buf[drop..tail_len]);
+            tail_len -= drop;
+        }
+        @memcpy(tail_buf[tail_len..][0 .. keep - 1], line[line.len - (keep - 1) ..]);
+        tail_buf[tail_len + keep - 1] = '\n';
+        tail_len += keep;
+    }
+}
+
+/// Stop the runner after `idle_minutes` without a request.
+fn idleWatch(io: std.Io) void {
+    while (true) {
+        io.sleep(.fromSeconds(30), .awake) catch return;
+        if (busy.load(.acquire) or idle_minutes == 0) continue;
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        const r = runner orelse continue;
+        const idle = r.last_used.durationTo(.now(io, .awake));
+        if (idle.raw.toSeconds() >= @as(i64, idle_minutes) * 60) stop(io);
+    }
 }
 
 pub const ModelState = struct {
@@ -352,16 +554,11 @@ pub fn remove(io: std.Io, gpa: std.mem.Allocator, id: []const u8) !void {
     const p = try path(gpa, id);
     defer gpa.free(p);
     {
-        // Held through the delete: no load of this file in between.
+        // Held through the delete: no load of this file in between. The
+        // runner may have it loaded: stopping it lets the file go.
         mutex.lockUncancelable(io);
         defer mutex.unlock(io);
-        const resident = if (loaded_name) |n| std.mem.eql(u8, n, id) else false;
-        if (resident) {
-            if (loaded) |ctx| ctx.deinit();
-            gpa.free(loaded_name.?);
-            loaded = null;
-            loaded_name = null;
-        }
+        stop(io);
         std.Io.Dir.cwd().deleteFile(io, p) catch |err| if (err != error.FileNotFound) return err;
     }
     const part = try std.fmt.allocPrint(gpa, "{s}.part", .{p});
