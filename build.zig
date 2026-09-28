@@ -92,7 +92,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ghostpen_build", .module = build_info_mod },
         },
         .update_public_key = update_public_key,
-        .frontend = .{ .dir = "frontend" },
+        // TypeScript bindings from the command declarations alone: a build
+        // after an edit compiles the app once, not twice.
+        .frontend = .{ .dir = "frontend", .types_from = .root_decls },
         .package = .{
             .id = "dev.ghostpen.Oriel",
             .name = "GhostPen",

@@ -418,7 +418,7 @@ test isText {
 
 /// Show (and focus) a window by label, centering the menu.
 pub fn showWindow(label: []const u8, center: bool) void {
-    const w = App.getWindow(label) orelse return;
+    const w = App.ensureWindow(label) catch |err| return log.err("window {s}: {s}", .{ label, @errorName(err) });
     if (center) w.center();
     w.show();
     w.focus();
@@ -812,14 +812,16 @@ fn setup() !void {
     defer arena.deinit();
     const s = try shared.get(io, arena.allocator());
 
-    // The other windows: created hidden, hidden again when closed.
+    // The other windows: declared now, created hidden the first time they're
+    // shown (each is a web view: a WebKit process and a page load), hidden
+    // again when closed.
     const windows = [_]App.WindowOptions{
         .{ .label = "settings", .title = "GhostPen Settings", .url = "index.html#/settings", .width = 540, .height = 680, .visible = false, .hide_on_close = true },
         .{ .label = "playground", .title = "GhostPen Playground", .url = "index.html#/playground", .width = 640, .height = 620, .visible = false, .hide_on_close = true },
         .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 520, .height = 200, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true },
         .{ .label = "captions", .title = "GhostPen Captions", .url = "index.html#/captions", .width = 900, .height = 170, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
     };
-    for (windows) |w| _ = App.openWindow(w) catch |err| log.err("window {s}: {s}", .{ w.label, @errorName(err) });
+    for (windows) |w| App.registerWindow(w) catch |err| log.err("window {s}: {s}", .{ w.label, @errorName(err) });
 
     tray = oriel.tray.Tray.create(gpa, .{
         .id = settings_mod.app_id,
@@ -879,8 +881,12 @@ pub fn main(init: std.process.Init) !u8 {
     // The built-in model runner (started by local_llm.zig): no GUI.
     if (args.len > 1 and std.mem.eql(u8, args[1], "--llm-helper"))
         return @import("llm_helper.zig").main(io, gpa, args[2..]);
+    // The whisper runner (started by models.zig): no GUI.
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--whisper-helper"))
+        return @import("whisper_helper.zig").main(io, gpa, args[2..]);
     environ_map = init.environ_map;
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
+    @import("models.zig").helper_exe = self_exe;
     ai.local_resolver = &resolveLocal;
     // Whisper models other apps (GhostReel) downloaded are reused.
     if (llmDirs(init.arena.allocator())) |d| {
