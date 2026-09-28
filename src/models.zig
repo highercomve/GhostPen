@@ -223,7 +223,9 @@ var runner: ?*Runner = null;
 var runner_gpa: std.mem.Allocator = undefined;
 var busy: std.atomic.Value(bool) = .init(false);
 var watchdog: ?std.Thread = null;
-/// Set once the GPU failed to load a model: runners start on the CPU.
+/// Set when the GPU couldn't hold the model (another app, e.g. a local LLM
+/// server, has its memory): runners start on the CPU until one stops for
+/// being idle, then the GPU is tried again.
 var cpu_only = false;
 
 /// The last lines whisper.cpp wrote to stderr, for the log.
@@ -251,18 +253,22 @@ const Reply = struct {
 };
 
 /// Send `req` (followed by `samples`) and wait for its answer, starting the
-/// runner if needed. A model the GPU can't load is retried once on the CPU.
+/// runner if needed. When the GPU can't hold the model (the load fails, or
+/// ggml aborts the runner on a GPU allocation) it's retried once on the CPU.
 /// Caller holds `mutex`; the reply points into `arena`.
 fn request(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, samples: []const f32) !Reply {
     busy.store(true, .release);
     defer busy.store(false, .release);
     return requestOnce(io, gpa, arena, req, samples) catch |err| switch (err) {
-        error.ModelLoadFailed => {
-            if (cpu_only) return err;
-            log.warn("the GPU could not load the whisper model; running it on the CPU", .{});
+        error.ModelLoadFailed, error.GpuFailed => {
+            if (cpu_only) return error.TranscribeFailed;
+            log.warn("not enough GPU memory for the whisper model; running it on the CPU", .{});
             stop(io);
             cpu_only = true;
-            return requestOnce(io, gpa, arena, req, samples);
+            return requestOnce(io, gpa, arena, req, samples) catch |e| switch (e) {
+                error.GpuFailed => error.TranscribeFailed,
+                else => e,
+            };
         },
         else => err,
     };
@@ -298,12 +304,26 @@ fn requestOnce(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req
     }
 }
 
-/// The runner died or the pipe broke: stop it (the next request starts another).
-fn lost(io: std.Io) error{TranscribeFailed} {
+/// The runner died or the pipe broke: stop it (the next request starts
+/// another). GpuFailed when a GPU runner died of a GPU allocation.
+fn lost(io: std.Io) error{ TranscribeFailed, GpuFailed } {
+    const on_gpu = if (runner) |r| !r.cpu else false;
+    // After stop: it waits for the stderr drain, so the runner's last words are in.
+    stop(io);
     var buf: [256]u8 = undefined;
     log.warn("the whisper runner stopped (crash or out of memory): {s}", .{lastError(io, &buf)});
-    stop(io);
-    return error.TranscribeFailed;
+    return if (on_gpu and diedOfGpuMemory(io)) error.GpuFailed else error.TranscribeFailed;
+}
+
+/// whisper.cpp/ggml's stderr says a GPU allocation failed (ggml aborts then).
+fn diedOfGpuMemory(io: std.Io) bool {
+    tail_mutex.lockUncancelable(io);
+    defer tail_mutex.unlock(io);
+    const t = tail_buf[0..tail_len];
+    for ([_][]const u8{ "GGML_ASSERT(buffer)", "out of memory", "cudaMalloc", "CUDA error", "failed to allocate", "ErrorOutOfDeviceMemory" }) |needle| {
+        if (std.mem.indexOf(u8, t, needle) != null) return true;
+    }
+    return false;
 }
 
 /// The last line whisper.cpp wrote to stderr, copied into `buf`.
@@ -438,7 +458,11 @@ fn idleWatch(io: std.Io) void {
         defer mutex.unlock(io);
         const r = runner orelse continue;
         const idle = r.last_used.durationTo(.now(io, .awake));
-        if (idle.raw.toSeconds() >= @as(i64, idle_minutes) * 60) stop(io);
+        if (idle.raw.toSeconds() >= @as(i64, idle_minutes) * 60) {
+            stop(io);
+            // The GPU's memory may be free again: the next runner tries it.
+            cpu_only = false;
+        }
     }
 }
 
