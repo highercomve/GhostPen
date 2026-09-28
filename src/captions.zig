@@ -3,6 +3,7 @@
 //! the screen. Port of GhostPen's captions/mod.rs.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const oriel = @import("oriel");
 const main = @import("main.zig");
 const models = @import("models.zig");
@@ -24,10 +25,36 @@ var translate_live: std.atomic.Value(bool) = .init(false);
 
 pub fn init() void {
     // Whisper and its GPU backend run in the runner (models.zig), started on
-    // the first transcription: nothing to load here.
+    // the first transcription: nothing to load here, except on macOS after
+    // an update (warmUpMetal).
+    if (builtin.os.tag == .macos) if (std.Thread.spawn(.{}, warmUpMetal, .{})) |t| t.detach() else |_| {};
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     if (main.shared.get(main.io, arena.allocator())) |s| translate_live.store(s.captions.aiTranslate, .release) else |_| {}
+}
+
+/// macOS: Metal compiles whisper's GPU code the first time a new build of
+/// GhostPen uses it (~20 s). Once per version, a few seconds after startup,
+/// the runner loads the captions/dictation model in the background, so the
+/// first dictation after an update doesn't wait; it stops again when idle.
+fn warmUpMetal() void {
+    main.io.sleep(.fromSeconds(5), .awake) catch return;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const version = @import("ghostpen_build").version;
+    const base = oriel.store.dataDir(arena, "GhostPen") catch return;
+    const marker = std.fs.path.join(arena, &.{ base, "whisper-warm-version" }) catch return;
+    const cwd = std.Io.Dir.cwd();
+    if (cwd.readFileAlloc(main.io, marker, arena, .limited(64))) |seen| {
+        if (std.mem.eql(u8, std.mem.trim(u8, seen, " \t\r\n"), version)) return;
+    } else |_| {}
+    const s = main.shared.get(main.io, arena) catch return;
+    if (!models.isDownloaded(main.io, gpa, s.captions.model)) return;
+    const began = std.Io.Clock.awake.now(main.io);
+    models.ensure(main.io, gpa, s.captions.model) catch |err| return log.warn("whisper warm-up: {s}", .{@errorName(err)});
+    log.info("whisper warm-up for {s} took {d} ms", .{ version, began.durationTo(std.Io.Clock.awake.now(main.io)).toMilliseconds() });
+    cwd.writeFile(main.io, .{ .sub_path = marker, .data = version }) catch {};
 }
 
 pub fn settingsChanged() void {
