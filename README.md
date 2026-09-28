@@ -127,9 +127,9 @@ Vulkan's first transcription after start also compiles its pipelines
 ## Compared with the Rust (Tauri) GhostPen
 
 The same app on both stacks: GhostPen's React frontend, the same commands,
-settings and prompts. Measured on 2026-09-27 on one Linux machine (Ryzen 7
+settings and prompts. Measured on 2026-09-28 on one Linux machine (Ryzen 7
 7800X3D, 16 threads, RTX 4070; Arch Linux, Hyprland) with Zig 0.16.0 and
-Rust 1.98.1: GhostPen 0.2.9 on Oriel 0.6.13, and the Tauri version at
+Rust 1.98.1: GhostPen 0.2.10 on Oriel 0.6.14, and the Tauri version at
 `ab0c1c4` (0.1.3), both built for release with whisper on the GPU (CUDA).
 
 ![The menu in both versions, on Wayland](docs/screenshots/menu-rust-vs-oriel.png)
@@ -139,69 +139,79 @@ Ctrl+C, so the menu asks you to copy first; in this test it didn't pick up a
 manual copy either, and its Playground stopped responding). The Oriel
 version copies the selection and pastes the result itself.
 
-**Building**
+**Running** ¹
 
 | | Rust / Tauri 2 | Zig / Oriel |
 | --- | --- | --- |
-| Code (app + frontend, generated files excluded) | 8,086 lines (4,851 Rust, 2,227 TS, 1,008 CSS) | 10,191 lines (6,151 Zig, 3,108 TS, 932 CSS), with Built-in models, voice activity detection, draggable overlays |
-| Dependencies | 627 crates (Cargo.lock) | 2 packages (Oriel, zigimg); Oriel itself has 9 |
-| Clean build, app and CLI, CUDA ¹ | 298 s | 333 s |
-| Clean build, app and CLI, CPU only ¹ | 167 s | 258 s |
-| Rebuild, nothing changed ² | 49 s | 0.9 s |
-| Rebuild after a one-line edit ³ | 48 s | 93 s |
-| Packages (deb, rpm, AppImage), after a build | 149 s | 25 s |
-| Build cache (CUDA build) | 4.4 GB `target/` + 1.8 GB `~/.cargo/registry` (shared by all Rust projects) | 1.4 GB (`.zig-cache` 1.2 GB + global 164 MB) + 259 MB sources (`zig-pkg/`) |
+| Start → Settings window shown ² | 214 ms | 265 ms |
+| Idle memory, 20 s after start (PSS, app + WebKit processes) | 659 MB (app 266 MB) | **297 MB** (app 142 MB) |
+| Memory with the whisper model loaded ³ | 962 MB (app 554 MB) | **805 MB** (app 153 MB + whisper runner) |
+| Idle CPU over 30 s | 0.06 s | 0.00 s |
+| Transcribing a 6.1 s clip (large-v3-turbo q5_0, CUDA) ⁴ | 0.38 s (first request 0.55 s) | **0.22 s** (first request 0.33 s) |
+| Web content sandboxed | no (WebKitGTK 4.1 default) | yes (bubblewrap, WebKitGTK 6.0) |
+| Synthetic copy/paste on Wayland | no (manual mode) | yes (virtual keyboard) |
+| Runs AI models itself | no (an endpoint: Ollama, LM Studio, …) | yes: [Built-in models](#built-in-models), or an endpoint |
+
+GhostPen on Oriel creates a window (a web process each) only when it's
+first shown, and runs whisper in a runner process started on the first
+transcription and stopped after five idle minutes: the CUDA runtime and the
+model aren't in the app, and their memory goes back when it's unused.
 
 **Shipping**
 
 | | Rust / Tauri 2 | Zig / Oriel |
 | --- | --- | --- |
-| App binary, stripped | 49.4 MB (whisper and its CUDA kernels inside) | 11.0 MB (whisper **and** llama.cpp) + 38.3 MB `libggml-cuda.so` |
+| App binary, stripped | 49.4 MB (whisper and its CUDA kernels inside) | 11.1 MB (whisper **and** llama.cpp) + 38.3 MB `libggml-cuda.so` |
 | CLI binary, stripped | 7.8 MB | 1.5 MB |
 | `.deb` / `.rpm` | 30.3 MB / 30.3 MB (app and CLI, unstripped: 62 + 11 MB) | 24.0 MB / 24.6 MB (app, CLI and `libggml-cuda.so`, stripped) |
 | AppImage | 546 MB (bundles GTK 3, WebKitGTK and 190 more libraries) | 25.1 MB (uses the system's WebKitGTK 6.0) |
 | Toolkit (Linux) | GTK 3, WebKitGTK 4.1 | GTK 4, WebKitGTK 6.0 |
 
-**Running** ⁴
+**Building** ⁵
 
 | | Rust / Tauri 2 | Zig / Oriel |
 | --- | --- | --- |
-| Start → Settings window shown ⁵ | 236 ms | 354 ms |
-| Idle memory, 20 s after start (PSS, app + WebKit processes) | 619 MB (app 236 MB) | 632 MB (app 279 MB) |
-| Memory with the whisper model loaded ⁶ | 913 MB (app 522 MB) | 925 MB (app 558 MB) |
-| Idle CPU over 30 s | 0.05 s | 0.01 s |
-| Transcribing a 6.1 s clip (large-v3-turbo q5_0, CUDA) ⁷ | 0.41 s (first request 0.62 s) | 0.24 s (first request 0.34 s) |
-| Web content sandboxed | no (WebKitGTK 4.1 default) | yes (bubblewrap, WebKitGTK 6.0) |
-| Synthetic copy/paste on Wayland | no (manual mode) | yes (virtual keyboard) |
-| Runs AI models itself | no (an endpoint: Ollama, LM Studio, …) | yes: [Built-in models](#built-in-models), or an endpoint |
+| Code (app + frontend, generated files excluded) | 8,086 lines (4,851 Rust, 2,227 TS, 1,008 CSS) | 10,191 lines (6,151 Zig, 3,108 TS, 932 CSS), with Built-in models, voice activity detection, draggable overlays |
+| Dependencies | 627 crates (Cargo.lock) | 2 packages (Oriel, zigimg); Oriel itself has 9 |
+| Clean release build, app and CLI | 289 s | 386 s |
+| Release rebuild, nothing changed ⁶ | 48 s | 0.7 s |
+| Release rebuild after a one-line edit ⁷ | 48 s | 50 s |
+| Packages (deb, rpm, AppImage), after a build | 148 s | 25 s |
+| Debug build (development), clean | 180 s | 46 s |
+| Debug rebuild after a one-line edit ⁸ | 3.4 s | 11.7 s (7.2 s with `-Ddev_debug_info=false`) |
+| Build cache, release and debug builds | 7.7 GB `target/` + 1.8 GB `~/.cargo/registry` (shared by all Rust projects) | 1.9 GB (`.zig-cache` 1.7 GB + global 218 MB) + 256 MB sources (`zig-pkg/`) |
 
-¹ Fresh clones and empty build caches (Zig's global cache too), dependency
-sources downloaded beforehand (npm, the Cargo registry, `zig-pkg/`). Rust:
-`tauri build --no-bundle` with `captions-cuda` (or `captions`), then
-`cargo build --release --features cli --bin ghostpen-cli`; Oriel:
-`oriel build -Dcuda` (or plain `oriel build`). Both include the frontend and
-whisper.cpp; the Oriel build also compiles llama.cpp for Built-in models,
-and a debug build that refreshes the frontend's TypeScript bindings. The
-CUDA kernels add 131 s to the Rust build and 75 s to the Oriel one.
-² The same command again. `tauri build` rebuilds the frontend, which makes
-the app crate recompile, and the CLI (another feature set) recompiles it
-once more; `cargo build` alone after that still took 29 s. Zig caches by
-content, so nothing is recompiled.
-³ A string in a log line of the app's main source file. Zig compiles the
-whole app as one unit, so an edit costs the full app compile; Rust
-recompiles only the app crate (twice, as in ²).
-⁴ On a private X display (Xvfb) with a private D-Bus session, the same for
-both. Both create their five web views at startup.
-⁵ From exec until the "GhostPen Settings" window is mapped (`--settings`),
-median of 5 runs after a warm-up. Of Oriel's extra ~120 ms, about 40 ms is
-WebKitGTK 6.0's process sandbox and about 40 ms is loading the CUDA backend
-at startup (the Rust version initializes CUDA with the first model load).
-⁶ With the transcription server (`GHOSTPEN_STT_SERVER=1`) after four
-requests.
-⁷ `tests/speech.wav` through the transcription server, the same model and
+Rust's cache grows with every configuration built: GhostReel, a Tauri app
+with two model runners, has 9.3 GB in `target/` (7.5 GB of it debug
+builds) on this machine, besides the shared registry.
+
+¹ On a private X display (Xvfb) with a private D-Bus session, the same for
+both.
+² From exec until the "GhostPen Settings" window is mapped (`--settings`),
+median of 5 runs after a warm-up. About 40 ms of Oriel's difference is
+WebKitGTK 6.0's process sandbox.
+³ With the transcription server (`GHOSTPEN_STT_SERVER=1`) after four
+requests. On Oriel, "app" is the app process alone; the whisper runner
+holds the model and the CUDA runtime.
+⁴ `tests/speech.wav` through the transcription server, the same model and
 the same text back; the time is the HTTP round trip, median of the warm
 requests. Oriel's whisper.cpp (1.9.4) skips the clip's silence with its
-voice activity detection; the Rust version uses whisper-rs 0.15.
+voice activity detection; the Rust version uses whisper-rs 0.15. The first
+transcription after starting (or five idle minutes) also starts the runner,
+about 0.1 s.
+⁵ Fresh clones and empty build caches (Zig's global cache too), dependency
+sources downloaded beforehand (npm, the Cargo registry, `zig-pkg/`). Rust:
+`tauri build --no-bundle --features captions-cuda`, then
+`cargo build --release --features cli --bin ghostpen-cli`; Oriel:
+`oriel build -Dcuda`. Both include the frontend and whisper.cpp with its
+CUDA kernels; the Oriel build also compiles llama.cpp for Built-in models.
+⁶ The same command again. `tauri build` rebuilds the frontend, which makes
+the app crate recompile, and the CLI (another feature set) recompiles it
+once more. Zig caches by content, so nothing is recompiled.
+⁷ A string in a log line of the app's main source file.
+⁸ `cargo build` vs `zig build build-dev` (what `oriel dev` rebuilds). Rust
+recompiles one crate incrementally; Zig compiles the whole app as one unit
+through LLVM, and most of that time is debug info.
 
 ## Transcription server for other tools
 
