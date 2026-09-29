@@ -965,5 +965,12 @@ pub fn main(init: std.process.Init) !u8 {
         .permissions = app.permissions,
         .setup = &setup,
         .on_second_instance = &handleArgs,
+        .on_session_end = &sessionEnd,
     });
+}
+
+/// Windows logoff or shutdown: the process can be killed before `oriel.main`
+/// returns, so the deferred cleanup above runs here too.
+fn sessionEnd() void {
+    @import("model_server.zig").removeDiscovery(io, environ_map);
 }
