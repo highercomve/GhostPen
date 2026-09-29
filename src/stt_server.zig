@@ -155,6 +155,11 @@ const max_active = 2;
 const Reply = model_server.Reply;
 
 fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request) !void {
+    // A POST with neither Content-Length nor chunked encoding has no body,
+    // but std.http.Server's respond would read one until the client hangs up
+    // (`curl -X POST .../unload` never got an answer): answer and close.
+    if (request.head.method.requestHasBody() and request.head.content_length == null and request.head.transfer_encoding == .none)
+        request.head.keep_alive = false;
     const path = if (std.mem.indexOfScalar(u8, request.head.target, '?')) |q| request.head.target[0..q] else request.head.target;
     const reply: Reply = if (std.mem.eql(u8, path, "/health") and request.head.method == .GET)
         .{ .body = "ok", .content_type = "text/plain; charset=utf-8" }
