@@ -27,6 +27,21 @@ jobs:
           chmod +x /tmp/zine
           echo "/tmp" >> $GITHUB_PATH
 
+      # The download buttons read this snapshot instead of calling GitHub's
+      # API from every visitor's browser (60 requests/hour per IP). The
+      # Release workflow runs this workflow again after each release.
+      - name: Cache the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
+              --jq '{tag_name, assets:[.assets[]|{name,size,browser_download_url}]}' > /tmp/release.json; then
+            mv /tmp/release.json site/assets/release.json
+          else
+            echo "::warning::Could not read the latest release: keeping the committed site/assets/release.json."
+          fi
+          cat site/assets/release.json
+
       - name: Build site
         run: zine release
 

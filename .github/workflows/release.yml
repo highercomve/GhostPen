@@ -308,6 +308,21 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
 
+  # Rebuild the site so its cached release.json lists the new downloads. A
+  # release published with GITHUB_TOKEN doesn't trigger other workflows, but
+  # a workflow_dispatch does.
+  site:
+    needs: [release]
+    if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Rebuild the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+
   # WinGet (`winget install Highercomve.GhostPen`): a pull request to
   # microsoft/winget-pkgs with this release's manifests, once its setup.exe is
   # downloadable. Needs the WINGET_TOKEN secret (a GitHub token with
