@@ -26,6 +26,10 @@ pub const LocalLlm = struct {
     ctxTokens: u32 = 8192,
     /// Offload to the GPU when there is one.
     gpu: bool = true,
+    /// MoE models: the share of the expert weights kept in system RAM
+    /// (llama.cpp's --n-cpu-moe, as a percentage of the blocks); 0 = all
+    /// experts on the GPU, 100 = every expert in RAM, attention on the GPU.
+    moePct: u8 = 0,
     /// Unload the model after this many minutes without use (0 = never).
     idleMinutes: u32 = 10,
 };
@@ -42,6 +46,16 @@ pub const Ocr = struct {
     maxDimension: u32 = 1024,
     systemPrompt: []const u8 = "",
     modelOverride: []const u8 = "",
+};
+
+/// The model & speech service (stt_server.zig + model_server.zig): other
+/// local apps' OpenAI-compatible endpoint for the built-in chat models and
+/// the transcription models.
+pub const Server = struct {
+    /// The address it listens on. `0.0.0.0` = reachable from the network
+    /// (no authentication: a trusted network only).
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 8771,
 };
 
 pub const Captions = struct {
@@ -71,14 +85,16 @@ pub const Settings = struct {
     profiles: []const Profile = &.{default_profile},
     forceSynthetic: bool = false,
     restoreDelayMs: u64 = 300,
-/// After a menu action: "paste" (over the selection) or "show" (in the
-/// menu, with Copy: for text selected in something read-only).
-afterAction: []const u8 = "paste",
+    /// After a menu action: "paste" (over the selection) or "show" (in the
+    /// menu, with Copy: for text selected in something read-only).
+    afterAction: []const u8 = "paste",
     customActions: []const CustomAction = &.{},
     ocr: Ocr = .{},
     captions: Captions = .{},
     dictation: Dictation = .{},
     localLlm: LocalLlm = .{},
+    /// The model & speech service's address and port.
+    server: Server = .{},
     /// Check for updates in the background, and install them where
     /// GhostPen can (Settings → About & updates).
     autoUpdate: bool = true,

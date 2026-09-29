@@ -28,6 +28,9 @@ pub const Config = struct {
     embed_model: ?[]const u8 = null,
     ctx: u32 = 8192,
     gpu: bool = true,
+    /// MoE models: the percentage of blocks whose expert weights stay in
+    /// system RAM (100 = every expert; 0 = all on the GPU).
+    moe_pct: u8 = 0,
     /// KV cache precision: f16, q8_0 or q4_0.
     kv_type: []const u8 = "q8_0",
     /// auto, on or off.
@@ -64,8 +67,10 @@ pub const Error = error{ LocalFailed, OutOfMemory };
 /// The model load may read gigabytes from a cold disk.
 const load_timeout_ms = 10 * 60 * 1000;
 /// One answer, however slow the machine: then it's stopped (and the helper
-/// killed if it doesn't stop).
-const generate_timeout_ms = 5 * 60 * 1000;
+/// killed if it doesn't stop). Long enough for a 128k-token prompt to be read
+/// on a slow machine; when it fires, the request is cancelled first, which
+/// returns the text generated so far.
+const generate_timeout_ms = 15 * 60 * 1000;
 /// Text the helper accepts in one request.
 const max_request_bytes = 240 * 1024;
 /// A request line with an image in base64 (the helper's line buffer is 32 MiB).
@@ -139,7 +144,7 @@ fn keepAlive(io: std.Io, s: *Slot, r: *Runner, keep_ms: ?u64) void {
 /// What a runner was started with, except the context size (a runner with
 /// at least the context a request needs serves it: `ensure`).
 fn keyOf(arena: std.mem.Allocator, cfg: Config) ![]u8 {
-    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{s}\x00{}\x00{s}\x00{s}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.embed_model orelse "", cfg.gpu, cfg.kv_type, cfg.flash_attn });
+    return std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}\x00{s}\x00{}\x00{}\x00{s}\x00{s}", .{ cfg.exe, cfg.model, cfg.mmproj orelse "", cfg.embed_model orelse "", cfg.gpu, cfg.moe_pct, cfg.kv_type, cfg.flash_attn });
 }
 
 /// Run one chat request; `on_chunk(ctx, delta)` for each piece of visible text.
@@ -223,6 +228,10 @@ pub fn chat(
         @"error": ?[]const u8 = null,
         truncated: bool = false,
         cancelled: bool = false,
+        prompt_tokens: u64 = 0,
+        gen_tokens: u64 = 0,
+        prompt_ms: u64 = 0,
+        gen_ms: u64 = 0,
     };
     while (true) {
         const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse {
@@ -248,8 +257,15 @@ pub fn chat(
         }
         if (msg.done) {
             r.last_used = .now(io, .awake);
+            // The generation speed, for the log: what to blame when a big
+            // model crawls (GPU layers, expert offload, context size).
+            if (msg.gen_ms >= 100 and msg.gen_tokens > 0) {
+                log.info("built-in model: {d} tokens in {d} ms ({d:.1} tok/s); prompt {d} tokens in {d} ms", .{
+                    msg.gen_tokens, msg.gen_ms, @as(f64, @floatFromInt(msg.gen_tokens)) * 1000.0 / @as(f64, @floatFromInt(msg.gen_ms)), msg.prompt_tokens, msg.prompt_ms,
+                });
+            }
             if (msg.cancelled and deadline.timed_out.load(.acquire)) {
-                diag.* = "The built-in model took too long (over 5 minutes) and was stopped.";
+                diag.* = "The built-in model took too long (over 15 minutes) and was stopped.";
                 return error.LocalFailed;
             }
             deadline.finish(); // before a keep_alive of 0 kills the runner
@@ -393,14 +409,23 @@ fn ensure(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator
         return error.LocalFailed;
     };
     return start(io, s, gpa, arena, cfg, key, diag) catch |err| {
-        // The GPU ran out of memory mid-load (another app took it: llama.cpp
-        // aborts then): once more on the CPU. The key stays the requested one.
+        // The GPU ran out of memory mid-load (llama.cpp aborts then). Two
+        // strikes before the CPU: the first failure is often the previous
+        // runner's VRAM not released yet (a kill returns before the driver
+        // frees), so wait a moment and try the same plan once more.
         switch (err) {
             error.GpuFailed => {},
             error.LocalFailed => return error.LocalFailed,
             error.OutOfMemory => return error.OutOfMemory,
         }
-        log.warn("GPU load failed ({s}); loading on the CPU", .{diag.*});
+        log.warn("GPU load failed ({s}); retrying after the previous runner's memory release", .{diag.*});
+        std.Io.sleep(io, .fromSeconds(3), .awake) catch {};
+        if (start(io, s, gpa, arena, cfg, key, diag)) |r| return r else |again| switch (again) {
+            error.GpuFailed => {},
+            error.LocalFailed => return error.LocalFailed,
+            error.OutOfMemory => return error.OutOfMemory,
+        }
+        log.warn("GPU load failed again ({s}); loading on the CPU", .{diag.*});
         var cpu = cfg;
         cpu.gpu = false;
         return start(io, s, gpa, arena, cpu, key, diag) catch |e| switch (e) {
@@ -419,6 +444,7 @@ fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator,
     if (cfg.embed_model) |m| try argv.appendSlice(arena, &.{ "--embed-model", m });
     try argv.appendSlice(arena, &.{ "--kv-type", cfg.kv_type, "--flash-attn", cfg.flash_attn });
     if (!cfg.gpu) try argv.append(arena, "--cpu");
+    if (cfg.moe_pct > 0) try argv.appendSlice(arena, &.{ "--moe-pct", try std.fmt.allocPrint(arena, "{d}", .{cfg.moe_pct}) });
     var child = std.process.spawn(io, .{
         .argv = argv.items,
         .stdin = .pipe,
@@ -599,7 +625,10 @@ fn drainStderr(io: std.Io, s: *Slot, file: std.Io.File) void {
             },
             else => return,
         } orelse return;
-        log.debug("runner: {s}", .{line});
+        // Errors and the load's own notes (GPU split, expert offload): the
+        // only trace of a failed load, and low volume (the helper filters
+        // llama.cpp's chatter to errors).
+        log.info("runner: {s}", .{line});
         s.tail_mutex.lockUncancelable(io);
         defer s.tail_mutex.unlock(io);
         const keep = @min(line.len + 1, s.tail_buf.len);

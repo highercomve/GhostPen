@@ -19,6 +19,7 @@ const captions = @import("captions.zig");
 const dictation = @import("dictation.zig");
 const local_llm = @import("local_llm.zig");
 const llm_models = @import("llm_models.zig");
+const llm_helper = @import("llm_helper.zig");
 const updates = @import("updates.zig");
 
 const App = oriel.App;
@@ -167,7 +168,7 @@ var environ_map: *const std.process.Environ.Map = undefined;
 /// This executable (the runner is it, in helper mode).
 var self_exe: ?[]const u8 = null;
 
-fn llmDirs(arena: std.mem.Allocator) !llm_models.Dirs {
+pub fn llmDirs(arena: std.mem.Allocator) !llm_models.Dirs {
     const base = try oriel.store.dataDir(arena, "GhostPen");
     return llm_models.dirs(arena, try std.fs.path.join(arena, &.{ base, "models" }), environ_map);
 }
@@ -194,6 +195,7 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings_mod.Profile, diag: *
         .embed_model = llm_models.embeddingModel(io, arena, d),
         .ctx = s.localLlm.ctxTokens,
         .gpu = s.localLlm.gpu,
+        .moe_pct = s.localLlm.moePct,
         .idle_minutes = s.localLlm.idleMinutes,
     };
 }
@@ -205,6 +207,12 @@ pub fn builtinConfig(arena: std.mem.Allocator, diag: *ai.Diag) ai.Error!local_ll
     const s = shared.get(io, arena) catch Settings{};
     for (s.profiles) |p| if (p.isLocal()) return resolveLocal(arena, p, diag);
     return resolveLocal(arena, .{ .id = "this-computer", .name = "Built-in", .provider = "local", .model = llm_models.default_id }, diag);
+}
+
+/// The model service's configuration for a model selected by an API client.
+/// `llm_models.resolve` accepts catalog IDs and installed `file:` models.
+pub fn builtinConfigForModel(arena: std.mem.Allocator, model: []const u8, diag: *ai.Diag) ai.Error!local_llm.Config {
+    return resolveLocal(arena, .{ .id = "model-service", .name = "Model service", .provider = "local", .model = model }, diag);
 }
 
 /// A local model setting for display: the catalog name, or the file's name.
@@ -447,11 +455,11 @@ pub fn showWindow(label: []const u8, center: bool) void {
 
 pub const Commands = struct {
     pub const async_commands = .{
-        "get_selection",           "extract_image_text",  "process_ai_action",     "process_ai_custom",
-        "process_text",            "process_text_stream", "fetch_models",          "captions_start",
-        "captions_download_model", "dictation_start",     "captions_list_devices", "dictation_list_devices",
-        "llm_models_status",       "llm_download_model",  "llm_delete_model",      "llm_unload",
-        "menu_dismissed",          "update_check",        "update_install",        "whisper_models_status",
+        "get_selection",           "extract_image_text",   "process_ai_action",     "process_ai_custom",
+        "process_text",            "process_text_stream",  "fetch_models",          "captions_start",
+        "captions_download_model", "dictation_start",      "captions_list_devices", "dictation_list_devices",
+        "llm_models_status",       "llm_download_model",   "llm_delete_model",      "llm_unload",
+        "menu_dismissed",          "update_check",         "update_install",        "whisper_models_status",
         "whisper_download_model",  "whisper_delete_model",
     };
 
@@ -615,8 +623,17 @@ pub const Commands = struct {
 
     pub fn llm_models_status(arena: std.mem.Allocator) !LlmStatus {
         const d = try llmDirs(arena);
+        const st = try llm_models.status(io, arena, d);
+        // The context each model was trained for (metadata only): what the
+        // context window may be raised to.
+        for (st.models) |*m| if (m.path.len > 0) {
+            m.ctx_max = llm_helper.trainedCtx(arena, m.path);
+        };
+        for (st.others) |*o| {
+            o.ctx_max = llm_helper.trainedCtx(arena, o.path);
+        }
         return .{
-            .status = try llm_models.status(io, arena, d),
+            .status = st,
             .downloading = llm_models.isDownloading(),
             .loaded = local_llm.loaded(),
         };

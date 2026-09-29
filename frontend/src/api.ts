@@ -58,14 +58,25 @@ export interface Settings {
   captions: CaptionsSettings;
   dictation: DictationSettings;
   localLlm: LocalLlmSettings;
+  /** Where the model & speech service listens (other local apps). */
+  server?: ServerSettings;
   /** Check for updates in the background and install them where possible. */
   autoUpdate: boolean;
+}
+
+/** The model & speech service (built-in models and transcription, one endpoint). */
+export interface ServerSettings {
+  /** 127.0.0.1 = this machine only; 0.0.0.0 = reachable from the network. */
+  host: string;
+  port: number;
 }
 
 /** The built-in runner ("Built-in" profiles). */
 export interface LocalLlmSettings {
   ctxTokens: number;
   gpu: boolean;
+  /** MoE models: share of expert weights kept in system RAM, % of blocks (0 = all on the GPU). */
+  moePct: number;
   idleMinutes: number;
 }
 
@@ -295,6 +306,8 @@ export interface LlmModel {
   projector_size: number;
   /** The projector is there: it reads images (Extract Text). */
   vision: boolean;
+  /** The context the model was trained for (0 = unknown): the window's maximum. */
+  ctx_max: number;
 }
 
 /** A GGUF found on disk that isn't in the catalog (id = "file:<path>"). */
@@ -305,6 +318,8 @@ export interface LlmLocalFile {
   size: number;
   /** An mmproj next to it: it reads images. */
   vision: boolean;
+  /** The context the model was trained for (0 = unknown). */
+  ctx_max: number;
 }
 
 export interface LlmStatus {

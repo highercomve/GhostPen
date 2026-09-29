@@ -239,7 +239,7 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings.Profile, diag: *ai.D
         return error.AiFailed;
     };
     const exe = std.fs.path.join(arena, &.{ std.fs.path.dirname(self) orelse ".", if (builtin.os.tag == .windows) "ghostpen.exe" else "ghostpen" }) catch return error.OutOfMemory;
-    return .{ .exe = exe, .model = path, .mmproj = llm_models.projector(cli_io, arena, d, path), .ctx = cli_local.ctxTokens, .gpu = cli_local.gpu, .idle_minutes = 0 };
+    return .{ .exe = exe, .model = path, .mmproj = llm_models.projector(cli_io, arena, d, path), .ctx = cli_local.ctxTokens, .gpu = cli_local.gpu, .moe_pct = cli_local.moePct, .idle_minutes = 0 };
 }
 
 fn readStdin(io: std.Io, arena: std.mem.Allocator) ![]u8 {

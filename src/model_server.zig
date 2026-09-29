@@ -12,9 +12,12 @@
 //!   `stream`, `chat_template_kwargs.enable_thinking`, and `response_format`
 //!   `json_schema` (the answer matches the schema). The runner takes one
 //!   system and one user turn: earlier turns are folded into the user text.
-//!   The `model` field is ignored: the built-in model answers.
+//!   The `model` field selects any installed built-in model; an omitted model
+//!   uses the configured default. The runner loads on demand and switches models.
 //! - `POST /v1/embeddings`: `input` (a string or strings), 768-dim vectors
 //!   from embeddinggemma when it's on disk (GhostReel's or LM Studio's copy).
+//! - `GET /v1/models`: all installed chat models (configured model first),
+//!   plus transcription and embeddings. Chat models load on first request.
 //! - `GET /props`: `modalities.vision` and `total_slots` (1); `GET /slots`:
 //!   the context size.
 //! - `POST /unload` (`{"models":["chat","embeddings","stt"]}`, or no body
@@ -50,9 +53,9 @@ fn errorReply(status: std.http.Status, message: []const u8, arena: std.mem.Alloc
 
 /// The built-in model's runner configuration, or null (logged) when it
 /// isn't downloaded.
-fn config(arena: std.mem.Allocator, why: *[]const u8) ?local_llm.Config {
+fn config(arena: std.mem.Allocator, selected: ?[]const u8, why: *[]const u8) ?local_llm.Config {
     var diag: ai.Diag = .{};
-    return main.builtinConfig(arena, &diag) catch {
+    return (if (selected) |model| main.builtinConfigForModel(arena, model, &diag) else main.builtinConfig(arena, &diag)) catch {
         why.* = if (diag.message.len > 0) diag.message else "the built-in model isn't available";
         return null;
     };
@@ -71,11 +74,30 @@ fn embedName(cfg: local_llm.Config) ?[]const u8 {
 
 /// The chat and embedding entries for `/v1/models` (after the whisper one).
 pub fn modelEntries(arena: std.mem.Allocator) ![]const ModelEntry {
+    const dirs = try main.llmDirs(arena);
+    const status = try llm_models.status(main.io, arena, dirs);
     var why: []const u8 = "";
-    const cfg = config(arena, &why) orelse return &.{};
+    const cfg = config(arena, null, &why);
     var list: std.ArrayList(ModelEntry) = .empty;
-    try list.append(arena, .{ .id = modelName(cfg), .capabilities = .{ .chat = true, .vision = cfg.mmproj != null } });
-    if (embedName(cfg)) |e| try list.append(arena, .{ .id = e, .capabilities = .{ .embeddings = true } });
+    // The configured model comes first, so clients using the default alias
+    // retain GhostPen's selected model.
+    if (cfg) |active| {
+        for (status.models) |m| if (m.path.len > 0 and std.mem.eql(u8, m.path, active.model)) {
+            try list.append(arena, .{ .id = m.id, .capabilities = .{ .chat = true, .vision = m.vision } });
+        };
+        for (status.others) |m| if (std.mem.eql(u8, m.path, active.model)) {
+            try list.append(arena, .{ .id = m.id, .capabilities = .{ .chat = true, .vision = m.vision } });
+        };
+    }
+    for (status.models) |m| {
+        if (m.path.len == 0 or (cfg != null and std.mem.eql(u8, m.path, cfg.?.model))) continue;
+        try list.append(arena, .{ .id = m.id, .capabilities = .{ .chat = true, .vision = m.vision } });
+    }
+    for (status.others) |m| {
+        if (cfg != null and std.mem.eql(u8, m.path, cfg.?.model)) continue;
+        try list.append(arena, .{ .id = m.id, .capabilities = .{ .chat = true, .vision = m.vision } });
+    }
+    if (cfg) |active| if (embedName(active)) |e| try list.append(arena, .{ .id = e, .capabilities = .{ .embeddings = true } });
     return list.items;
 }
 
@@ -88,7 +110,7 @@ pub const ModelEntry = struct {
 
 pub fn propsReply(arena: std.mem.Allocator) !Reply {
     var why: []const u8 = "";
-    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    const cfg = config(arena, null, &why) orelse return errorReply(.service_unavailable, why, arena);
     return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
         .model_path = cfg.model,
         .total_slots = 1,
@@ -99,7 +121,7 @@ pub fn propsReply(arena: std.mem.Allocator) !Reply {
 
 pub fn slotsReply(arena: std.mem.Allocator) !Reply {
     var why: []const u8 = "";
-    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    const cfg = config(arena, null, &why) orelse return errorReply(.service_unavailable, why, arena);
     return .{ .body = try std.json.Stringify.valueAlloc(arena, .{.{ .id = 0, .n_ctx = cfg.ctx }}, .{}) };
 }
 
@@ -192,7 +214,7 @@ pub fn embeddingsReply(io: std.Io, arena: std.mem.Allocator, body: []const u8) !
     if (texts.items.len == 0) return errorReply(.bad_request, "input is empty", arena);
 
     var why: []const u8 = "";
-    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    const cfg = config(arena, null, &why) orelse return errorReply(.service_unavailable, why, arena);
     if (cfg.embed_model == null) return errorReply(.service_unavailable, "no embedding model (embeddinggemma-300M-Q8_0.gguf) found in the model folders", arena);
     var model: []const u8 = "";
     var diag: []const u8 = "";
@@ -215,6 +237,7 @@ pub fn embeddingsReply(io: std.Io, arena: std.mem.Allocator, body: []const u8) !
 
 const ChatRequest = struct {
     chat: local_llm.Chat,
+    model: ?[]const u8 = null,
     stream: bool,
     /// Tools were offered: the answer is JSON (`ToolAnswer`), turned into
     /// OpenAI `tool_calls` or content.
@@ -342,7 +365,8 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     chat.keep_alive_ms = keepAliveMs(obj);
     chat.ctx = requestedCtx(obj);
     const stream = if (obj.get("stream")) |s| s == .bool and s.bool else false;
-    return .{ .chat = chat, .stream = stream, .tools = use_tools };
+    const requested = if (obj.get("model")) |m| (if (m == .string and m.string.len > 0) m.string else null) else null;
+    return .{ .chat = chat, .model = requested, .stream = stream, .tools = use_tools };
 }
 
 const ToolChoice = union(enum) { auto, none, required, function: []const u8 };
@@ -470,9 +494,9 @@ pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server
     var err: []const u8 = "";
     const req = (try parseChat(arena, body, &err)) orelse return errorReply(.bad_request, err, arena);
     var why: []const u8 = "";
-    const cfg = config(arena, &why) orelse return errorReply(.service_unavailable, why, arena);
+    const cfg = config(arena, req.model, &why) orelse return errorReply(.service_unavailable, why, arena);
     if (req.chat.image != null and cfg.mmproj == null) return errorReply(.bad_request, "the built-in model can't read images (no vision projector)", arena);
-    const model = modelName(cfg);
+    const model = req.model orelse modelName(cfg);
     var id_buf: [32]u8 = undefined;
     const id = completionId(&id_buf);
     const created = std.Io.Clock.real.now(io).toSeconds();
@@ -662,7 +686,7 @@ pub fn writeDiscovery(io: std.Io, env: *const std.process.Environ.Map, url: []co
     const arena = arena_state.allocator();
     const path = discoveryPath(arena, env) orelse return log.warn("no place for the discovery file", .{});
     var why: []const u8 = "";
-    const cfg = config(arena, &why);
+    const cfg = config(arena, null, &why);
     const stt_ready = models.isDownloaded(io, gpa, stt_model);
     const body = std.json.Stringify.valueAlloc(arena, .{
         .version = 1,
@@ -708,6 +732,14 @@ test parseDuration {
     try std.testing.expectEqual(@as(?u64, 0), parseDuration("0"));
     try std.testing.expectEqual(@as(?u64, null), parseDuration("-1"));
     try std.testing.expectEqual(@as(?u64, null), parseDuration("soon"));
+}
+
+test "chat request keeps the selected model" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    var err: []const u8 = "";
+    const req = (try parseChat(arena_state.allocator(), "{\"model\":\"qwen3.5-4b\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}", &err)).?;
+    try std.testing.expectEqualStrings("qwen3.5-4b", req.model.?);
 }
 
 test "tools: schema, guide, transcript and the answer as tool_calls" {

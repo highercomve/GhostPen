@@ -3,11 +3,11 @@
 # desktop), against a mock OpenAI-compatible endpoint:
 #   type text in the Playground, select it, `--trigger` (synthetic Ctrl+C),
 #   press 1 (Proofread) in the menu, and check the answer was pasted back.
-# Needs: Oriel's scripts/headless.sh (ORIEL_REPO or ../ziguri), xdotool, python3.
+# Needs: Oriel's scripts/headless.sh (ORIEL_REPO or ../oriel), xdotool, python3.
 # Build first: `oriel build`. Screenshots go to $OUT (default: a temp dir).
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-oriel_repo="${ORIEL_REPO:-$here/../ziguri}"
+oriel_repo="${ORIEL_REPO:-$here/../oriel}"
 if [ -z "${ORIEL_HEADLESS_INNER:-}" ]; then exec "$oriel_repo/scripts/headless.sh" "$0" "$@"; fi
 
 tmp=$(mktemp -d); trap 'kill $pid $mock 2>/dev/null; rm -rf "$tmp"' EXIT

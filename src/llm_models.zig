@@ -198,15 +198,20 @@ pub const ModelState = struct {
     projector_size: u64 = 0,
     /// The projector is there: it reads images.
     vision: bool = false,
+    /// The context length the model was trained for (0 = unknown): the
+    /// context window's maximum in the UI.
+    ctx_max: u32 = 0,
 };
 
 /// A GGUF found in another app's folder that isn't in the catalog.
-pub const LocalFile = struct { id: []const u8, name: []const u8, path: []const u8, size: u64, vision: bool = false };
+pub const LocalFile = struct { id: []const u8, name: []const u8, path: []const u8, size: u64, vision: bool = false, ctx_max: u32 = 0 };
 
 pub const Status = struct {
     dir: []const u8,
-    models: []const ModelState,
-    others: []const LocalFile,
+    /// Mutable so the app can fill `ctx_max` in (it needs llama, this file
+    /// doesn't use it).
+    models: []ModelState,
+    others: []LocalFile,
 };
 
 pub fn status(io: std.Io, arena: std.mem.Allocator, d: Dirs) !Status {
@@ -232,7 +237,7 @@ pub fn status(io: std.Io, arena: std.mem.Allocator, d: Dirs) !Status {
 
 /// Chat-model GGUFs in the other apps' folders that aren't catalog files
 /// (no projectors, speculative-decoding heads or embedding models).
-fn scanOthers(io: std.Io, arena: std.mem.Allocator, d: Dirs) ![]const LocalFile {
+fn scanOthers(io: std.Io, arena: std.mem.Allocator, d: Dirs) ![]LocalFile {
     var out: std.ArrayList(LocalFile) = .empty;
     for (d.others) |root| {
         var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch continue;

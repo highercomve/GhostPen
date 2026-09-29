@@ -13,9 +13,23 @@ import {
   scoreMeter,
 } from "./api";
 
-export const DEFAULT_LOCAL: LocalLlmSettings = { ctxTokens: 8192, gpu: true, idleMinutes: 10 };
+export const DEFAULT_LOCAL: LocalLlmSettings = { ctxTokens: 8192, gpu: true, moePct: 0, idleMinutes: 10 };
 
-const CONTEXT_SIZES = [2048, 4096, 8192, 16384, 32768];
+const CONTEXT_SIZES = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
+
+const ctxLabel = (n: number) => (n >= 1024 * 1024 ? `${n / (1024 * 1024)}M tokens` : `${n / 1024}k tokens`);
+
+/**
+ * Sizes to offer: the usual steps up to the model's trained maximum, which is
+ * always among them even when it isn't a round step; the current value stays
+ * listed even when it's above the maximum (the runner caps it).
+ */
+const contextChoices = (max: number, current: number): number[] => {
+  const out = (max > 0 ? CONTEXT_SIZES.filter((n) => n <= max) : [...CONTEXT_SIZES]).slice();
+  if (max > 0 && !out.includes(max)) out.push(max);
+  if (!out.includes(current)) out.push(current);
+  return out.sort((a, b) => a - b);
+};
 
 /**
  * Settings → Built-in models: download the catalog models (resumable, verified),
@@ -92,6 +106,10 @@ export default function LocalModels(props: {
   const models = status?.status.models ?? [];
   const others = status?.status.others ?? [];
   const busy = progress !== null || (status?.downloading ?? false);
+  const activeCtxMax =
+    models.find((m) => m.id === props.activeModel)?.ctx_max ||
+    others.find((o) => o.id === props.activeModel)?.ctx_max ||
+    0;
 
   return (
     <section className="card">
@@ -211,11 +229,36 @@ export default function LocalModels(props: {
       <label>
         Context window
         <select value={local.ctxTokens} onChange={(e) => props.onLocalChange({ ctxTokens: parseInt(e.target.value, 10) })}>
-          {CONTEXT_SIZES.map((n) => (
-            <option key={n} value={n}>{`${n / 1024}k tokens${n === 8192 ? " (recommended)" : ""}`}</option>
+          {contextChoices(activeCtxMax, local.ctxTokens).map((n) => (
+            <option key={n} value={n}>
+              {`${ctxLabel(n)}${n === 8192 ? " (recommended)" : ""}${n === activeCtxMax ? " — this model's maximum" : ""}`}
+            </option>
           ))}
         </select>
-        <span className="muted small">Room for the text and the answer. Larger uses more memory.</span>
+        <span className="muted small">
+          Room for the text and the answer. Larger uses more memory.
+          {activeCtxMax > 0
+            ? ` The model in use allows up to ${ctxLabel(activeCtxMax)}.`
+            : " With a model selected, its maximum appears here."}
+        </span>
+      </label>
+      <label>
+        MoE experts in system RAM:{" "}
+        {local.moePct === 0 ? "none" : local.moePct === 100 ? "all" : `${local.moePct}%`}
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={local.moePct}
+          onChange={(e) => props.onLocalChange({ moePct: parseInt(e.target.value, 10) })}
+        />
+        <span className="muted small">
+          For MoE models (Qwen3.5 and friends): that share of the model's expert weights stays in
+          system RAM instead of the GPU, so a model bigger than the GPU's memory still runs (the
+          attention stays on the GPU). Start around 50% and lower it while it fits. Only helps with
+          the GPU on; dense models ignore it.
+        </span>
       </label>
       <label className="checkbox">
         <input type="checkbox" checked={local.gpu} onChange={(e) => props.onLocalChange({ gpu: e.target.checked })} />

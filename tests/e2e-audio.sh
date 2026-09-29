@@ -5,7 +5,7 @@
 # GhostPen downloaded, ~/.local/share/GhostPen/models/ggml-tiny.bin).
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-oriel_repo="${ORIEL_REPO:-$here/../ziguri}"
+oriel_repo="${ORIEL_REPO:-$here/../oriel}"
 model="${WHISPER_MODEL:-$HOME/.local/share/GhostPen/models/ggml-tiny.bin}"
 if [ -z "${ORIEL_HEADLESS_INNER:-}" ]; then exec "$oriel_repo/scripts/headless.sh" "$0" "$@"; fi
 

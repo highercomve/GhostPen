@@ -1,6 +1,6 @@
 # GhostPen on Oriel: port plan
 
-A port of GhostPen (`~/Code/ghostpen`, Tauri v2 + Rust) to Oriel (Zig), built
+A port of GhostPen (`~/Code/ghostpen-tauri`, Tauri v2 + Rust) to Oriel (Zig), built
 the way any Oriel developer would: the released `oriel` CLI, `oriel init`,
 `oriel dev/build/package`, and only Oriel's public API. When GhostPen needs
 something Oriel lacks, the gap is fixed in Oriel itself (Milestone 10), not

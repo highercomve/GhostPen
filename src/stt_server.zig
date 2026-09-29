@@ -6,11 +6,10 @@
 //! It is also the model service (`model_server.zig`): chat, vision and
 //! embeddings from the built-in models, for other local apps (GhostReel).
 //!
-//! On by default, on `127.0.0.1:8771` (this machine only);
-//! `GHOSTPEN_MODEL_SERVER=0` turns it off. `GHOSTPEN_STT_SERVER=1` (as
-//! before) also loads the whisper model at startup and listens on
-//! `GHOSTPEN_STT_BIND` (default `0.0.0.0:8771`, reachable from the network).
-//! It serves:
+//! On by default, on what Settings → Model & speech service says
+//! (`127.0.0.1:8771`: this machine only); `GHOSTPEN_MODEL_SERVER=0` turns it
+//! off, `GHOSTPEN_STT_BIND` overrides the setting. `GHOSTPEN_STT_SERVER=1`
+//! (as before) also loads the whisper model at startup. It serves:
 //!
 //! - `POST /v1/audio/transcriptions`: the OpenAI Whisper API shape: a
 //!   multipart `file` (any format ffmpeg reads), optional `language` and
@@ -55,7 +54,16 @@ pub fn maybeStart(io: std.Io, env: *const std.process.Environ.Map) void {
     const off = if (env.get("GHOSTPEN_MODEL_SERVER")) |f| std.mem.eql(u8, f, "0") else false;
     if (off and !stt_flag) return;
     preload = stt_flag;
-    const bind = env.get("GHOSTPEN_STT_BIND") orelse if (stt_flag) "0.0.0.0:8771" else "127.0.0.1:8771";
+    // Where it listens: GHOSTPEN_STT_BIND overrides, else Settings →
+    // Model & speech service (host:port; this machine only by default).
+    const bind: []const u8 = if (env.get("GHOSTPEN_STT_BIND")) |b|
+        (gpa.dupe(u8, b) catch return)
+    else blk: {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const s = main.shared.get(io, arena.allocator()) catch break :blk "127.0.0.1:8771";
+        break :blk std.fmt.allocPrint(gpa, "{s}:{d}", .{ s.server.host, s.server.port }) catch return;
+    };
     config = .{
         .model_override = if (env.get("GHOSTPEN_STT_MODEL")) |m| (if (std.mem.trim(u8, m, " ").len > 0) gpa.dupe(u8, m) catch null else null) else null,
         .language = gpa.dupe(u8, env.get("GHOSTPEN_STT_LANGUAGE") orelse "auto") catch "auto",
@@ -193,9 +201,7 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
             error.OutOfMemory => return err,
             else => .{ .status = .internal_server_error, .body = @errorName(err), .content_type = "text/plain; charset=utf-8" },
         };
-    }
-    else
-        .{ .status = .not_found, .body = "not found", .content_type = "text/plain; charset=utf-8" };
+    } else .{ .status = .not_found, .body = "not found", .content_type = "text/plain; charset=utf-8" };
     try request.respond(reply.body, .{
         .status = reply.status,
         .keep_alive = request.head.keep_alive,

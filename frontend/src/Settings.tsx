@@ -22,6 +22,7 @@ import {
   CAPTION_LANGUAGES,
   TRANSLATE_LANGUAGES,
   LocalLlmSettings,
+  ServerSettings,
   isLocal,
   llmModelsStatus,
   LlmStatus,
@@ -151,8 +152,12 @@ export default function Settings() {
   };
 
   // ---- built-in models (GhostPen runs them) ----
-  const local = settings.localLlm ?? DEFAULT_LOCAL;
+  // Defaults fill in what older saved settings don't have (moeCpu).
+  const local = { ...DEFAULT_LOCAL, ...settings.localLlm };
   const updateLocal = (patch: Partial<LocalLlmSettings>) => update({ localLlm: { ...local, ...patch } });
+  // ---- model & speech service ----
+  const server: ServerSettings = settings.server ?? { host: "127.0.0.1", port: 8771 };
+  const updateServer = (patch: Partial<ServerSettings>) => update({ server: { ...server, ...patch } });
   // The active profile when it's a built-in one, else the first built-in one.
   const localProfile = isLocal(active) ? active : settings.profiles.find((p) => isLocal(p));
   /** Installed built-in models, for the profile's model picker. */
@@ -609,6 +614,45 @@ export default function Settings() {
           <input type="checkbox" checked={dictation.paste ?? true}
             onChange={(e) => updateDictation({ paste: e.target.checked })} />
           Paste at the cursor when finished <span className="muted">(off = copy only, to review first)</span>
+        </label>
+      </section>
+
+      {/* Model & speech service (what other local apps connect to) */}
+      <section className="card">
+        <h2>
+          Model &amp; speech service{" "}
+          <span className="muted small">built-in and speech models, served to other apps</span>
+        </h2>
+        <p className="muted small">
+          GhostPen serves its <b>Built-in</b> chat models and the speech models (transcription,
+          OpenAI-compatible API) on <code>http://{server.host}:{server.port}</code>. Apps like
+          GhostReel or <code>ghostpen-cli</code> use it; the address is advertised as{" "}
+          <code>http://127.0.0.1:{server.port}</code> on this machine whatever the setting.
+        </p>
+        <label>
+          Reachable from
+          <select value={server.host} onChange={(e) => updateServer({ host: e.target.value })}>
+            <option value="127.0.0.1">This computer only — 127.0.0.1 (recommended)</option>
+            <option value="0.0.0.0">All networks — 0.0.0.0 (other machines can use your models)</option>
+          </select>
+          <span className="muted small">
+            All networks is open to your LAN with no password — anyone could use your models and
+            GPU. Only for a trusted network.
+          </span>
+        </label>
+        <label>
+          Port
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            value={server.port}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              if (n >= 1024 && n <= 65535) updateServer({ port: n });
+            }}
+          />
+          <span className="muted small">Takes effect the next time GhostPen starts.</span>
         </label>
       </section>
 
