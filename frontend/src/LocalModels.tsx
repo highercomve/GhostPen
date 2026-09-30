@@ -113,13 +113,11 @@ export default function LocalModels(props: {
 
   return (
     <section className="card">
-      <h2>Built-in models <span className="muted small">run by GhostPen itself</span></h2>
+      <h2>Available models</h2>
       <p className="muted small">
-        GhostPen runs these models itself, with its embedded llama.cpp: no server, no
-        Ollama or LM Studio needed, nothing sent over the network. Use one with a profile set to
-        {" "}<b>Built-in</b> (the <b>Use</b> button creates one).
-        Models LM Studio or GhostReel already downloaded are found and reused.
-        Models that <b>read images</b> (with their image projector) also do Extract Text.
+        Download a model to run AI on this computer. Choose <b>Use</b> to make it your active
+        profile. Models already installed by LM Studio or GhostReel appear here too.
+        Models marked <b>reads images</b> can also extract text from screenshots.
       </p>
 
       <div className="llm-list">

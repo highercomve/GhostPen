@@ -85,11 +85,11 @@ export default function WhisperModels(props: {
 
   return (
     <section className="card">
-      <h2>Speech models <span className="muted small">Whisper, for captions and dictation</span></h2>
+      <h2>Available speech models</h2>
       <p className="muted small">
-        Live Captions and Dictation transcribe on this computer with the model you pick here.
-        Larger models hear accents and uncommon words better, at the cost of speed and memory.
-        Models GhostReel already downloaded are found and reused.
+        Download one for captions and dictation. Larger models can recognize accents and
+        uncommon words more accurately, but use more memory and run more slowly.
+        Models already installed by GhostReel appear here too.
       </p>
 
       <div className="llm-list">

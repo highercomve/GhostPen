@@ -31,6 +31,17 @@ import WhisperModels from "./WhisperModels";
 import LocalModels, { DEFAULT_LOCAL } from "./LocalModels";
 import AboutUpdates from "./AboutUpdates";
 
+type SettingsSection = "ai" | "models" | "actions" | "speech" | "service" | "about";
+
+const SECTIONS: { id: SettingsSection; label: string; hint: string; description: string }[] = [
+  { id: "ai", label: "AI profile", hint: "Choose your provider", description: "Choose the model GhostPen uses for writing, proofreading, and optional translation." },
+  { id: "models", label: "Built-in models", hint: "Download and tune", description: "Download models that run on this computer and adjust how they use memory." },
+  { id: "actions", label: "Actions", hint: "Shortcuts and results", description: "Choose how actions start, where results go, and add your own instructions." },
+  { id: "speech", label: "Speech", hint: "Captions and dictation", description: "Choose a speech model and set up captions and dictation." },
+  { id: "service", label: "Connections", hint: "Sharing and diagnostics", description: "Choose whether other apps can use your models and check system status." },
+  { id: "about", label: "About", hint: "Updates and version", description: "Check for updates and see which GhostPen version is installed." },
+];
+
 function newProfile(): Profile {
   return {
     id: `profile-${Date.now()}`,
@@ -65,6 +76,9 @@ export default function Settings() {
   const [modelMsg, setModelMsg] = useState<string>("");
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [section, setSection] = useState<SettingsSection>("ai");
   const [capStatus, setCapStatus] = useState<CaptionsStatus | null>(null);
   const [capDevices, setCapDevices] = useState<AudioDevice[]>([]);
   const [dictDevices, setDictDevices] = useState<AudioDevice[]>([]);
@@ -97,6 +111,7 @@ export default function Settings() {
 
   const update = (patch: Partial<SettingsType>) => {
     setSettings({ ...settings, ...patch });
+    setDirty(true);
     setSaved(false);
     setSaveError("");
   };
@@ -231,71 +246,117 @@ export default function Settings() {
 
   // The backend can reject after saving (e.g. a hotkey that didn't register): show why.
   const save = async () => {
+    if (!dirty || saving) return;
+    setSaving(true);
     try {
       await saveSettings(settings);
+      setDirty(false);
       setSaved(true);
       setSaveError("");
     } catch (e) {
       setSaved(false);
       setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
     }
     getStatus().then(setStatus).catch(() => {});
   };
 
+  const closeSettings = async () => {
+    if (dirty) {
+      try {
+        setSettings(await getSettings());
+        setDirty(false);
+        setSaved(false);
+        setSaveError("");
+      } catch (e) {
+        setSaveError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
+    await hideWindow();
+  };
+
+  const currentSection = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0];
+
   return (
     <div className="settings">
-      <h1>GhostPen Settings</h1>
-      <div className="settings-cards">
-
-      {/* Diagnostics */}
-      {status && (
-        <section className="card diag">
-          <h2>Diagnostics</h2>
-          <div className="diag-grid">
-            <span>Session</span><b>{status.session}</b>
-            <span>Clipboard</span><b>{status.clipboard_backend}</b>
-            <span>Input synthesis</span><b>{status.input_available ? "available" : "unavailable"}</b>
-            <span>Mode</span><b>{status.manual_mode ? "manual-copy" : "auto (synthetic)"}</b>
+      <div className="settings-shell">
+        <header className="settings-header">
+          <div>
+            <span className="settings-eyebrow">GhostPen</span>
+            <h1>Settings</h1>
           </div>
-        </section>
-      )}
+          {active && (
+            <button className="settings-profile-summary" type="button" title="Edit AI profile" onClick={() => { setSection("ai"); window.scrollTo(0, 0); }}>
+              <span>AI profile in use</span>
+              <strong>{active.name}</strong>
+            </button>
+          )}
+        </header>
+
+        <div className="settings-layout">
+          <nav className="settings-nav" aria-label="Settings sections">
+            {SECTIONS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`settings-nav-item ${section === item.id ? "active" : ""}`}
+                aria-current={section === item.id ? "page" : undefined}
+                onClick={() => { setSection(item.id); window.scrollTo(0, 0); }}
+              >
+                <span>{item.label}</span>
+                <small>{item.hint}</small>
+              </button>
+            ))}
+          </nav>
+
+          <main className="settings-main">
+            <header className="settings-section-header">
+              <h2>{currentSection.label}</h2>
+              <p>{currentSection.description}</p>
+            </header>
+
+      <div className="settings-panel" hidden={section !== "ai"}>
 
       {/* Profiles */}
       <section className="card">
-        <h2>AI Profiles</h2>
+        <h2>Choose a profile</h2>
+        <p className="muted small">The active profile handles text actions, dictation proofreading, and optional caption translation. Save after changing profiles.</p>
         <div className="profile-tabs">
           {settings.profiles.map((p) => (
             <button
               key={p.id}
+              type="button"
               className={`tab ${p.id === settings.activeProfileId ? "active" : ""}`}
+              aria-pressed={p.id === settings.activeProfileId}
               onClick={() => update({ activeProfileId: p.id })}
             >
               {p.name}
             </button>
           ))}
-          <button className="tab add" onClick={addProfile}>+ Add</button>
+          <button className="tab add" type="button" onClick={addProfile}>+ New profile</button>
         </div>
 
         {active && (
           <div className="profile-form">
-            <label>
-              Runs on
-              <select
-                value={isLocal(active) ? "local" : "openai"}
-                onChange={(e) =>
-                  updateProfile(active.id, e.target.value === "local"
-                    ? { provider: "local", model: localChoices[0]?.id ?? "" }
-                    : { provider: "openai", baseUrl: active.baseUrl || "http://localhost:11434/v1", model: "" })
-                }
-              >
-                <option value="openai">An AI endpoint (Ollama, LM Studio, OpenAI, …)</option>
-                <option value="local">Built-in: GhostPen runs the model itself (no server)</option>
-              </select>
-            </label>
+            <div className="settings-field-title">Where should the AI run?</div>
+            <div className="settings-provider-options" role="group" aria-label="AI provider">
+              <label className={`settings-provider-option ${!isLocal(active) ? "selected" : ""}`}>
+                <input type="radio" name="ai-provider" checked={!isLocal(active)}
+                  onChange={() => updateProfile(active.id, { provider: "openai", baseUrl: active.baseUrl || "http://localhost:11434/v1", model: "" })} />
+                <span><strong>Connected service</strong><small>Use Ollama, LM Studio, or a cloud provider</small></span>
+              </label>
+              <label className={`settings-provider-option ${isLocal(active) ? "selected" : ""}`}>
+                <input type="radio" name="ai-provider" checked={isLocal(active)}
+                  onChange={() => updateProfile(active.id, { provider: "local", model: localChoices[0]?.id ?? "" })} />
+                <span><strong>Built-in model</strong><small>Run on this computer without another service</small></span>
+              </label>
+            </div>
             {isLocal(active) ? (
               <>
                 <label>
-                  Name
+                  Profile name
                   <input value={active.name} onChange={(e) => updateProfile(active.id, { name: e.target.value })} />
                 </label>
                 <label>
@@ -306,14 +367,18 @@ export default function Settings() {
                     )}
                     {localChoices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
-                  <span className="muted small">Download models in <b>Built-in models</b> below.</span>
+                  <span className="muted small">Only downloaded models appear here.</span>
                 </label>
+                <div className="settings-callout">
+                  <span>{localChoices.length === 0 ? "No built-in models are ready yet." : "Need a different model?"}</span>
+                  <button className="btn" type="button" onClick={() => { setSection("models"); window.scrollTo(0, 0); }}>Browse built-in models</button>
+                </div>
               </>
             ) : (
             <>
             <label>
-              Preset
-              <select defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
+              Start from a preset
+              <select key={active.id} defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
                 <option value="" disabled>Choose a preset…</option>
                 {PRESETS.map((p) => (
                   <option key={p.name} value={p.name}>{p.name}</option>
@@ -321,11 +386,11 @@ export default function Settings() {
               </select>
             </label>
             <label>
-              Name
+              Profile name
               <input value={active.name} onChange={(e) => updateProfile(active.id, { name: e.target.value })} />
             </label>
             <label>
-              Base URL
+              Service URL
               <input value={active.baseUrl} onChange={(e) => updateProfile(active.id, { baseUrl: e.target.value })} placeholder="http://localhost:11434/v1" />
             </label>
             <label>
@@ -336,7 +401,7 @@ export default function Settings() {
               Model
               <div className="row">
                 <input value={active.model} onChange={(e) => updateProfile(active.id, { model: e.target.value })} placeholder="gemma4:e4b" />
-                <button className="btn" type="button" onClick={doFetchModels}>Fetch models</button>
+                <button className="btn" type="button" onClick={doFetchModels}>Find models</button>
               </div>
               {models.length > 0 && (
                 <select
@@ -347,7 +412,7 @@ export default function Settings() {
                   {models.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               )}
-              {modelMsg && <span className="muted small">{modelMsg}</span>}
+              {modelMsg && <span className="muted small" role="status">{modelMsg}</span>}
             </label>
             </>
             )}
@@ -355,14 +420,19 @@ export default function Settings() {
               Temperature: {active.temperature.toFixed(2)}
               <input type="range" min={0} max={1} step={0.05} value={active.temperature}
                 onChange={(e) => updateProfile(active.id, { temperature: parseFloat(e.target.value) })} />
+              <span className="muted small">Lower is more predictable; higher allows more variation.</span>
             </label>
             {settings.profiles.length > 1 && (
-              <button className="btn danger" onClick={() => deleteProfile(active.id)}>Delete profile</button>
+              <button className="btn danger" type="button" onClick={() => deleteProfile(active.id)}>Delete profile</button>
             )}
           </div>
         )}
       </section>
 
+      </div>
+
+      <div className="settings-panel" hidden={section !== "models"}>
+      <p className="settings-panel-note">Downloading a model does not change your AI profile. Choose <b>Use</b> to switch to it immediately.</p>
       <LocalModels
         local={local}
         onLocalChange={updateLocal}
@@ -370,12 +440,13 @@ export default function Settings() {
         onUse={(id) => useLocalModel(id)}
         onChanged={() => llmModelsStatus().then(setLlm).catch(() => {})}
       />
+      </div>
 
-      {/* Behaviour */}
+      <div className="settings-panel" hidden={section !== "actions"}>
+
+      {/* Shortcuts */}
       <section className="card">
-        <h2>Behaviour</h2>
-
-        <h3>Keyboard shortcuts</h3>
+        <h2>Keyboard shortcuts</h2>
         {onWayland ? (
           <div className="kbd-note">
             On Wayland an app can’t grab global keys — <b>bind these in your compositor</b> to the
@@ -402,12 +473,10 @@ export default function Settings() {
           Live captions <span className="muted">(ghostpen --captions)</span>
           <input value={settings.captionsHotkey} onChange={(e) => update({ captionsHotkey: e.target.value })} placeholder="Ctrl+Shift+L" />
         </label>
+      </section>
 
-        <label className="checkbox">
-          <input type="checkbox" checked={settings.forceSynthetic}
-            onChange={(e) => update({ forceSynthetic: e.target.checked })} />
-          Force synthetic copy/paste on Wayland (needs libei; off = manual-copy mode)
-        </label>
+      <section className="card">
+        <h2>Action results</h2>
         <label>
           After an action
           <select value={settings.afterAction ?? "paste"}
@@ -417,47 +486,69 @@ export default function Settings() {
           </select>
         </label>
         <p className="muted small">Hold <kbd>Shift</kbd> when you pick an action to get the other one, e.g. to translate text you can't edit (a web page, a chat).</p>
-        <label>
-          Clipboard restore delay (ms)
-          <input type="number" min={0} max={2000} value={settings.restoreDelayMs}
-            onChange={(e) => update({ restoreDelayMs: parseInt(e.target.value || "0", 10) })} />
-        </label>
+        <details className="settings-advanced">
+          <summary>Advanced copy and paste</summary>
+          <div className="settings-advanced-body">
+            <label className="checkbox">
+              <input type="checkbox" checked={settings.forceSynthetic}
+                onChange={(e) => update({ forceSynthetic: e.target.checked })} />
+              Force synthetic copy/paste on Wayland (needs libei; off = manual copy)
+            </label>
+            <label>
+              Clipboard restore delay (ms)
+              <input type="number" min={0} max={2000} value={settings.restoreDelayMs}
+                onChange={(e) => update({ restoreDelayMs: parseInt(e.target.value || "0", 10) })} />
+            </label>
+          </div>
+        </details>
       </section>
 
       {/* Custom actions */}
       <section className="card">
-        <h2>Custom Actions</h2>
+        <h2>Custom actions</h2>
         {customActions.length === 0 && (
           <p className="muted small">None yet. Add one to define your own prompt — it appears in the menu and Playground.</p>
         )}
-        {customActions.map((a) => (
+        {customActions.map((a, index) => (
           <div key={a.id} className="custom-action">
-            <input
-              value={a.label}
-              placeholder="Label (e.g. Bullet points)"
-              onChange={(e) => updateCustomAction(a.id, { label: e.target.value })}
-            />
-            <textarea
-              value={a.prompt}
-              placeholder="System prompt — e.g. 'Convert the text into concise bullet points. Return ONLY the bullets.'"
-              onChange={(e) => updateCustomAction(a.id, { prompt: e.target.value })}
-            />
-            <div className="row">
+            <h3>Action {index + 1}</h3>
+            <label>
+              Name
+              <input
+                value={a.label}
+                placeholder="e.g. Bullet points"
+                onChange={(e) => updateCustomAction(a.id, { label: e.target.value })}
+              />
+            </label>
+            <label>
+              Instruction
+              <textarea
+                value={a.prompt}
+                placeholder="e.g. Convert the text into concise bullet points. Return only the bullets."
+                onChange={(e) => updateCustomAction(a.id, { prompt: e.target.value })}
+              />
+            </label>
+            <label>
+              Model override <span className="muted">(optional)</span>
               <input
                 value={a.model}
-                placeholder="Model override (optional — blank uses the active profile's model)"
+                placeholder="Blank uses the selected profile's model"
                 onChange={(e) => updateCustomAction(a.id, { model: e.target.value })}
               />
-              <button className="btn danger" onClick={() => deleteCustomAction(a.id)}>Delete</button>
-            </div>
+            </label>
+            <button className="btn danger" onClick={() => deleteCustomAction(a.id)}>Delete action</button>
           </div>
         ))}
         <button className="btn" onClick={addCustomAction}>+ Add custom action</button>
       </section>
 
       {/* Image Text Extraction (OCR) */}
-      <section className="card">
-        <h2>Image Text Extraction (OCR)</h2>
+      <details className="card settings-disclosure">
+        <summary>
+          <span>Extract text from images</span>
+          <small>Optional settings for vision models</small>
+        </summary>
+        <div className="settings-disclosure-body">
         <p className="muted small">
           When the clipboard contains an image, GhostPen can extract its text through your
           active AI profile. The image is sent to the configured endpoint, which may be a cloud
@@ -498,8 +589,13 @@ export default function Settings() {
             onChange={(e) => updateOcr({ modelOverride: e.target.value })}
           />
         </label>
-      </section>
+        </div>
+      </details>
 
+      </div>
+
+      <div className="settings-panel" hidden={section !== "speech"}>
+      <p className="settings-panel-note">Captions and dictation share one speech model. Choosing <b>Use</b> applies it immediately; save the options below when you change them.</p>
       <WhisperModels activeModel={captions.model} onUse={useWhisperModel} />
 
       {/* Live captions (system audio) */}
@@ -507,8 +603,7 @@ export default function Settings() {
         <h2>Live Captions <span className="muted small">system audio → subtitles</span></h2>
         {capStatus && !capStatus.available && (
           <p className="muted small">
-            This build was compiled without captions support. Rebuild with
-            {" "}<code>--features captions</code> to enable on-device transcription.
+            This build does not include live captions.
           </p>
         )}
         <p className="muted small">
@@ -579,11 +674,10 @@ export default function Settings() {
 
       {/* Voice dictation (microphone) */}
       <section className="card">
-        <h2>Dictation <span className="muted small">microphone → proofread text on the clipboard</span></h2>
+        <h2>Dictation <span className="muted small">speak to type</span></h2>
         <p className="muted small">
-          Speak (<code>ghostpen --voice-input</code>, e.g. Ctrl+Shift+D), stop, and the transcript
-          is proofread by your active AI profile and copied to the clipboard. Uses the same
-          speech model as Live Captions (Speech models above).
+          Start dictation with your shortcut or <code>ghostpen --voice-input</code>, then stop to
+          copy or paste the transcript. You can have your active AI profile proofread it first.
         </p>
 
         <label>
@@ -617,6 +711,9 @@ export default function Settings() {
         </label>
       </section>
 
+      </div>
+
+      <div className="settings-panel" hidden={section !== "service"}>
       {/* Model & speech service (what other local apps connect to) */}
       <section className="card">
         <h2>
@@ -656,14 +753,40 @@ export default function Settings() {
         </label>
       </section>
 
-      <AboutUpdates autoUpdate={settings.autoUpdate ?? true} onAutoUpdate={(on) => update({ autoUpdate: on })} />
+      {status && (
+        <section className="card diag">
+          <h2>System diagnostics</h2>
+          <p className="muted small">Useful when shortcuts, copy and paste, or input control do not work as expected.</p>
+          <div className="diag-grid">
+            <span>Session</span><b>{status.session}</b>
+            <span>Clipboard</span><b>{status.clipboard_backend}</b>
+            <span>Input synthesis</span><b>{status.input_available ? "available" : "unavailable"}</b>
+            <span>Mode</span><b>{status.manual_mode ? "manual copy" : "automatic"}</b>
+          </div>
+        </section>
+      )}
       </div>
 
-      <div className="footer">
-        {saveError && <span className="save-error">⚠ {saveError}</span>}
-        {saved && <span className="muted">Saved ✓</span>}
-        <button className="btn" onClick={() => hideWindow()}>Close</button>
-        <button className="btn primary" onClick={save}>Save</button>
+      <div className="settings-panel" hidden={section !== "about"}>
+      <AboutUpdates autoUpdate={settings.autoUpdate ?? true} onAutoUpdate={(on) => update({ autoUpdate: on })} />
+      </div>
+          </main>
+        </div>
+
+        <div className="footer settings-footer">
+          <div className="settings-save-feedback" role="status" aria-live="polite">
+            {saveError ? <span className="save-error">⚠ {saveError}</span>
+              : saved ? <span className="save-ok">Saved ✓</span>
+              : dirty ? <span className="settings-unsaved">Unsaved changes</span>
+              : <span className="muted">All changes saved</span>}
+          </div>
+          <button className="btn" type="button" onClick={closeSettings} disabled={saving}>
+            {dirty ? "Discard & close" : "Close"}
+          </button>
+          <button className="btn primary" type="button" onClick={save} disabled={!dirty || saving}>
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+        </div>
       </div>
     </div>
   );

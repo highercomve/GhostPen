@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build GhostPen's AppImage with CUDA and Vulkan (like the release's
-# -cuda AppImage) and install it for this user, replacing the running copy:
+# Build GhostPen's AppImage with CUDA and, by default, Vulkan (like the
+# release's -cuda AppImage) and install it for this user, replacing the running copy:
 #   ~/.local/bin/ghostpen                 the AppImage
 #   ~/.local/lib/ghostpen/ghostpen-cli    the CLI (~/.local/bin/ghostpen-cli links to it)
 #
@@ -9,6 +9,7 @@
 #   CUDA_PREBUILT=/path/libggml-cuda.so   reuse this libggml-cuda.so (built by the
 #                                         same Oriel version) instead of the cache
 #   CUDA_REBUILD=1                        run nvcc even when the cache has one
+#   NO_VULKAN=1                           skip Vulkan when its shader build stalls
 #   ORIEL_FORK=~/Code/oriel               build against a local Oriel checkout
 #
 # libggml-cuda.so takes minutes of nvcc, so it's cached per Oriel version in
@@ -24,7 +25,8 @@ cd "$here"
 
 export CUDA_PATH="${CUDA_PATH:-/opt/cuda}"
 export PATH="$CUDA_PATH/bin:$PATH"
-args=(-Dvulkan -Dupdate_target=x86_64-linux-cuda)
+args=(-Dupdate_target=x86_64-linux-cuda)
+[ -z "${NO_VULKAN:-}" ] && args=(-Dvulkan "${args[@]}")
 [ -n "${ORIEL_FORK:-}" ] && args+=(--fork="$(realpath "$ORIEL_FORK")")
 
 # The CUDA library's cache: one per Oriel version (the pinned package hash, or

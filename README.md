@@ -1,6 +1,6 @@
 # GhostPen on Oriel
 
-**[Website and downloads](https://highercomve.github.io/GhostPen/)** · [Releases](https://github.com/highercomve/GhostPen/releases) · The earlier Rust/Tauri version: [ghostpen-tauri](https://github.com/highercomve/ghostpen-tauri)
+**[Website and downloads](https://highercomve.github.io/GhostPen/)** · [Releases](https://github.com/highercomve/GhostPen/releases) · [Changelog](CHANGELOG.md) · The earlier Rust/Tauri version: [ghostpen-tauri](https://github.com/highercomve/ghostpen-tauri)
 
 GhostPen, AI-driven text editing anywhere on your desktop, ported from Tauri
 (Rust) to [Oriel](https://github.com/highercomve/Oriel) (Zig): the first full
