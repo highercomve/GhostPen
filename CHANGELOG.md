@@ -4,6 +4,14 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ## [Unreleased]
 
+### Added
+
+- `-Dnative_ui` (experimental, Linux): the windows drawn with native GTK widgets instead of a WebView, through Oriel's native renderer; `NATIVE_UI=1 scripts/install-local.sh` builds it. Needs an Oriel with the native renderer's fixes (main after v0.7.0).
+
+### Fixed
+
+- The menu window is transparent: only its rounded panel is drawn, so the corners show what's behind it.
+
 ## [0.2.19] - 2026-10-01
 
 ### Added

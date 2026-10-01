@@ -48,6 +48,9 @@ pub fn build(b: *std.Build) void {
         // (always on top, anchored) where the compositor supports them.
         .layer_shell = target.result.os.tag == .linux and
             (b.option(bool, "layer_shell", "Wayland overlays via gtk4-layer-shell (default on)") orelse true),
+        // Experimental (Linux): the windows drawn with native widgets, no
+        // WebView (Oriel's docs/native-renderer.md).
+        .native_ui = b.option(bool, "native_ui", "Experimental: draw the windows with native widgets instead of a WebView (Linux)") orelse false,
         .menu = false,
         .dialog = false,
         // Updates (Settings → About & updates; src/updates.zig).
