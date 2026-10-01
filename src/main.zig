@@ -984,6 +984,9 @@ pub fn main(init: std.process.Init) !u8 {
         .always_on_top = true,
         .skip_taskbar = true,
         .placement = .{},
+        // The page paints only its rounded panel (.menu): the corners show
+        // what's behind the window.
+        .transparent = true,
         .show_main_window = false,
         .on_close = .hide,
         .assets = app.assets,

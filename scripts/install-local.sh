@@ -10,6 +10,7 @@
 #                                         same Oriel version) instead of the cache
 #   CUDA_REBUILD=1                        run nvcc even when the cache has one
 #   NO_VULKAN=1                           skip Vulkan when its shader build stalls
+#   NATIVE_UI=1                           experimental: native widgets, no WebView
 #   ORIEL_FORK=~/Code/oriel               build against a local Oriel checkout
 #
 # libggml-cuda.so takes minutes of nvcc, so it's cached per Oriel version in
@@ -28,6 +29,7 @@ export PATH="$CUDA_PATH/bin:$PATH"
 args=(-Dupdate_target=x86_64-linux-cuda)
 [ -z "${NO_VULKAN:-}" ] && args=(-Dvulkan "${args[@]}")
 [ -n "${ORIEL_FORK:-}" ] && args+=(--fork="$(realpath "$ORIEL_FORK")")
+[ -n "${NATIVE_UI:-}" ] && args+=(-Dnative_ui)
 
 # The CUDA library's cache: one per Oriel version (the pinned package hash, or
 # the fork's commit; a dirty fork isn't cached).
