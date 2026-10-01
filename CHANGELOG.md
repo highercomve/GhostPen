@@ -2,6 +2,16 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [Unreleased]
+
+### Added
+
+- Settings → Model & speech service: a context window for other apps' chat requests, or the same as the built-in models (the default). Apps can still ask for more per request, up to the model's maximum.
+
+### Build
+
+- Oriel v0.7.0.
+
 ## [0.2.18] - 2026-09-30
 
 ### Changed

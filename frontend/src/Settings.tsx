@@ -28,7 +28,7 @@ import {
   LlmStatus,
 } from "./api";
 import WhisperModels from "./WhisperModels";
-import LocalModels, { DEFAULT_LOCAL } from "./LocalModels";
+import LocalModels, { CONTEXT_SIZES, DEFAULT_LOCAL, ctxLabel } from "./LocalModels";
 import AboutUpdates from "./AboutUpdates";
 
 type SettingsSection = "ai" | "models" | "actions" | "speech" | "service" | "about";
@@ -750,6 +750,24 @@ export default function Settings() {
             }}
           />
           <span className="muted small">Takes effect the next time GhostPen starts.</span>
+        </label>
+        <label>
+          Context window for other apps
+          <select
+            value={server.ctxTokens ?? 0}
+            onChange={(e) => updateServer({ ctxTokens: parseInt(e.target.value, 10) })}
+          >
+            <option value={0}>Same as Built-in models ({ctxLabel(local.ctxTokens)})</option>
+            {CONTEXT_SIZES.map((n) => (
+              <option key={n} value={n}>
+                {ctxLabel(n)}
+              </option>
+            ))}
+          </select>
+          <span className="muted small">
+            Room for the prompt and the answer in chat requests from other apps. Larger uses more
+            memory. An app can still ask for more per request; the model's maximum is the limit.
+          </span>
         </label>
       </section>
 

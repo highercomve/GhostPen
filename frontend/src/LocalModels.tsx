@@ -15,9 +15,9 @@ import {
 
 export const DEFAULT_LOCAL: LocalLlmSettings = { ctxTokens: 8192, gpu: true, moePct: 0, idleMinutes: 10 };
 
-const CONTEXT_SIZES = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
+export const CONTEXT_SIZES = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
 
-const ctxLabel = (n: number) => (n >= 1024 * 1024 ? `${n / (1024 * 1024)}M tokens` : `${n / 1024}k tokens`);
+export const ctxLabel = (n: number) => (n >= 1024 * 1024 ? `${n / (1024 * 1024)}M tokens` : `${n / 1024}k tokens`);
 
 /**
  * Sizes to offer: the usual steps up to the model's trained maximum, which is

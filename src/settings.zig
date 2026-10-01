@@ -56,6 +56,11 @@ pub const Server = struct {
     /// (no authentication: a trusted network only).
     host: []const u8 = "127.0.0.1",
     port: u16 = 8771,
+    /// Context window (tokens) for chat requests from other apps; 0 = the
+    /// built-in model's setting (`LocalLlm.ctxTokens`). A request can still
+    /// ask for more (`options.num_ctx`); the runner caps it at the model's
+    /// trained maximum.
+    ctxTokens: u32 = 0,
 };
 
 pub const Captions = struct {
