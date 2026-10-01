@@ -4,9 +4,17 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-10-01
+
 ### Added
 
 - Settings → Model & speech service: a context window for other apps' chat requests, or the same as the built-in models (the default). Apps can still ask for more per request, up to the model's maximum.
+- The log records which action each menu request ran.
+
+### Fixed
+
+- Built-in models no longer answer a request with the previous one in mind. With hybrid models such as Qwen3.5, the state of the last request carried over: Casual after Translate rewrote the text in the translation's language and added a note about translating it.
+- Translate no longer adds notes of its own ("Nota: …"); notes that are part of the text are translated with the rest.
 
 ### Build
 
