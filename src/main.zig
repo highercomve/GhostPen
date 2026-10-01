@@ -579,6 +579,7 @@ pub const Commands = struct {
         defer busy.store(false, .release);
         const s = try shared.get(io, arena);
         const text = try selectionText(arena);
+        log.info("action {s}{s}{s} ({s}) on {d} chars", .{ args.action, if (args.targetLang != null) " → " else "", args.targetLang orelse "", args.level orelse "balanced", text.len });
         const r = try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
         const output = try complete(arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = text } });
         if (args.show or s.showResults()) return showResult(output);

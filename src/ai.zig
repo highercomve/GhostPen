@@ -55,7 +55,7 @@ pub fn builtinPrompt(arena: std.mem.Allocator, action: []const u8, lang: ?[]cons
         .balanced => "Expand the text with more detail, elaboration, and supporting context while preserving its original meaning and tone. Return ONLY the expanded text, with no explanations or filler.",
     };
     if (eq(u8, action, "translate"))
-        return try std.fmt.allocPrint(arena, "Auto-detect the source language. Translate the text into natural, fluent {s}, preserving formatting and tone. Return ONLY the translated text \u{2014} no filler, explanations, or quotes.", .{lang orelse "English"});
+        return try std.fmt.allocPrint(arena, "Auto-detect the source language. Translate the text into natural, fluent {s}, preserving formatting and tone. Translate all of it, including any notes that are part of the text. Return ONLY the translated text \u{2014} never add notes, comments, explanations, or quotes of your own.", .{lang orelse "English"});
     return null;
 }
 
