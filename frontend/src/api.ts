@@ -69,6 +69,8 @@ export interface ServerSettings {
   /** 127.0.0.1 = this machine only; 0.0.0.0 = reachable from the network. */
   host: string;
   port: number;
+  /** Context window (tokens) for other apps' chat requests; 0 = the built-in model's setting. */
+  ctxTokens?: number;
 }
 
 /** The built-in runner ("Built-in" profiles). */

@@ -205,14 +205,23 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings_mod.Profile, diag: *
 /// service shares with other apps.
 pub fn builtinConfig(arena: std.mem.Allocator, diag: *ai.Diag) ai.Error!local_llm.Config {
     const s = shared.get(io, arena) catch Settings{};
-    for (s.profiles) |p| if (p.isLocal()) return resolveLocal(arena, p, diag);
-    return resolveLocal(arena, .{ .id = "this-computer", .name = "Built-in", .provider = "local", .model = llm_models.default_id }, diag);
+    for (s.profiles) |p| if (p.isLocal()) return serviceCtx(s, try resolveLocal(arena, p, diag));
+    return serviceCtx(s, try resolveLocal(arena, .{ .id = "this-computer", .name = "Built-in", .provider = "local", .model = llm_models.default_id }, diag));
+}
+
+/// The model service's own context setting (Settings → Model & speech
+/// service), when set, over the built-in model's.
+fn serviceCtx(s: Settings, cfg: local_llm.Config) local_llm.Config {
+    var out = cfg;
+    if (s.server.ctxTokens > 0) out.ctx = s.server.ctxTokens;
+    return out;
 }
 
 /// The model service's configuration for a model selected by an API client.
 /// `llm_models.resolve` accepts catalog IDs and installed `file:` models.
 pub fn builtinConfigForModel(arena: std.mem.Allocator, model: []const u8, diag: *ai.Diag) ai.Error!local_llm.Config {
-    return resolveLocal(arena, .{ .id = "model-service", .name = "Model service", .provider = "local", .model = model }, diag);
+    const s = shared.get(io, arena) catch Settings{};
+    return serviceCtx(s, try resolveLocal(arena, .{ .id = "model-service", .name = "Model service", .provider = "local", .model = model }, diag));
 }
 
 /// A local model setting for display: the catalog name, or the file's name.
