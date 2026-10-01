@@ -303,6 +303,9 @@ jobs:
       - name: Read annotated tag notes
         if: startsWith(github.ref, 'refs/tags/')
         run: |
+          # The container runs as root over a checkout owned by the runner:
+          # without this git refuses the repository ("dubious ownership").
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
           git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME" > release-notes.md
           test -s release-notes.md
