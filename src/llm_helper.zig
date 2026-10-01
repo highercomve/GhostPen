@@ -925,7 +925,16 @@ const Engine = struct {
         const limit = @min(tokens.len, self.cached.items.len);
         while (common < limit and self.cached.items[common] == tokens[common]) common += 1;
         if (common >= tokens.len) common = tokens.len - 1;
-        _ = c.llama_memory_seq_rm(c.llama_get_memory(self.ctx), 0, @intCast(common), -1);
+        // Recurrent and hybrid models (Qwen3.5, Mamba-style layers) can't
+        // drop the tail of their state: seq_rm refuses, and decoding on top
+        // would answer with the previous request still in the model's state
+        // (a "casual" rewrite that remembered the translation before it).
+        // Then start over from an empty memory.
+        const mem = c.llama_get_memory(self.ctx);
+        if (!c.llama_memory_seq_rm(mem, 0, @intCast(common), -1)) {
+            c.llama_memory_clear(mem, true);
+            common = 0;
+        }
         var pos: usize = common;
         while (pos < tokens.len) {
             const n = @min(tokens.len - pos, n_ubatch);
