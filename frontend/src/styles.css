@@ -346,6 +346,8 @@ kbd {
 }
 .state.result, .state.error { justify-content: flex-start; align-items: stretch; }
 .state-label { font-weight: 600; }
+.state-detail { color: var(--muted); font-size: 12px; max-width: 90%; }
+.state-time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; opacity: 0.8; }
 .state-label.ok { color: var(--ok); }
 .state-label.bad { color: var(--danger); }
 .hint { font-size: 12px; color: var(--muted); }

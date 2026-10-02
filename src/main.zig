@@ -154,6 +154,10 @@ pub const Events = struct {
     @"ghostpen://dictation": struct { text: []const u8, state: []const u8 },
     @"ghostpen://dictation-level": f32,
     @"ghostpen://dictation-show": struct {},
+    /// What a menu action is doing (to the menu): loading the built-in
+    /// model, reading the text, writing (tokens so far), or waiting for a
+    /// connected service.
+    @"ghostpen://ai-progress": AiProgress,
     /// Local model downloads (to the Settings window).
     @"ghostpen://llm-download": llm_models.Progress,
     /// Speech (whisper) model downloads (Settings).
@@ -248,6 +252,59 @@ fn resolveAction(arena: std.mem.Allocator, s: Settings, action: []const u8, lang
         return .{ .system = c.prompt, .profile = profile };
     };
     return oriel.ipc.fail("Unknown action: {s}", .{action});
+}
+
+pub const AiProgress = struct {
+    /// "loading" (the built-in model into memory), "reading" (the prompt),
+    /// "writing" (the answer) or "waiting" (a connected service).
+    stage: []const u8,
+    model: []const u8,
+    tokens: u32 = 0,
+    tok_s: f32 = 0,
+};
+
+/// A menu action's completion, telling the menu how it goes
+/// (ghostpen://ai-progress). The built-in model streams, so the tokens are
+/// counted as they come; a connected service is one request.
+fn completeWithProgress(arena: std.mem.Allocator, req: ai.Request) ![]const u8 {
+    const local = req.profile.isLocal();
+    const model = if (local) localModelName(req.profile.model) else req.profile.name;
+    const first: []const u8 = if (!local) "waiting" else if (local_llm.loaded()) "reading" else "loading";
+    App.emitTo("main", "ghostpen://ai-progress", AiProgress{ .stage = first, .model = model }) catch {};
+    if (!local) return complete(arena, req);
+
+    const Counter = struct {
+        model: []const u8,
+        start: std.Io.Timestamp,
+        first_token: ?std.Io.Timestamp = null,
+        tokens: u32 = 0,
+        last_ms: i64 = -1000,
+
+        fn chunk(c: *@This(), _: []const u8) void {
+            const now = std.Io.Clock.awake.now(io);
+            if (c.first_token == null) c.first_token = now;
+            c.tokens += 1;
+            const ms = c.start.durationTo(now).toMilliseconds();
+            if (ms - c.last_ms < 120) return; // a few updates a second
+            c.last_ms = ms;
+            const writing_ms = c.first_token.?.durationTo(now).toMilliseconds();
+            const tok_s: f32 = if (writing_ms > 0) @as(f32, @floatFromInt(c.tokens)) * 1000 / @as(f32, @floatFromInt(writing_ms)) else 0;
+            App.emitTo("main", "ghostpen://ai-progress", AiProgress{ .stage = "writing", .model = c.model, .tokens = c.tokens, .tok_s = tok_s }) catch {};
+        }
+    };
+    var counter: Counter = .{ .model = model, .start = std.Io.Clock.awake.now(io) };
+    var diag: ai.Diag = .{};
+    const out = ai.completeStream(io, gpa, arena, req, &counter, Counter.chunk, &diag) catch |err| {
+        log.warn("AI request ({s} {s}) failed: {s}", .{ req.profile.name, req.profile.model, if (err == error.AiFailed) diag.message else @errorName(err) });
+        return switch (err) {
+            error.AiFailed => oriel.ipc.fail("{s}", .{diag.message}),
+            else => err,
+        };
+    };
+    const ms = counter.start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    log.info("AI request ({s} {s}): {d} chars in {d} ms", .{ req.profile.name, req.profile.model, out.len, ms });
+    if (std.mem.trim(u8, out, " \t\r\n").len == 0) log.warn("AI request returned only whitespace", .{});
+    return out;
 }
 
 fn complete(arena: std.mem.Allocator, req: ai.Request) ![]const u8 {
@@ -581,7 +638,7 @@ pub const Commands = struct {
         const text = try selectionText(arena);
         log.info("action {s}{s}{s} ({s}) on {d} chars", .{ args.action, if (args.targetLang != null) " → " else "", args.targetLang orelse "", args.level orelse "balanced", text.len });
         const r = try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
-        const output = try complete(arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = text } });
+        const output = try completeWithProgress(arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = text } });
         if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }
@@ -592,7 +649,7 @@ pub const Commands = struct {
         const s = try shared.get(io, arena);
         const text = try selectionText(arena);
         const system = try ai.instructionPrompt(arena, args.instruction);
-        const output = try complete(arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } });
+        const output = try completeWithProgress(arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } });
         if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }

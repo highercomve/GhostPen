@@ -39,6 +39,28 @@ const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
   { id: "expand", label: "Expand", hint: "Add detail & elaborate", icon: "expand" },
 ];
 
+/** What a menu action is doing (ghostpen://ai-progress from the backend). */
+interface AiProgress {
+  stage: "loading" | "reading" | "writing" | "waiting";
+  model: string;
+  tokens: number;
+  tok_s: number;
+}
+
+function progressText(p: AiProgress | null): string {
+  if (!p) return "Starting…";
+  switch (p.stage) {
+    case "loading":
+      return `Loading ${p.model} into memory…`;
+    case "reading":
+      return `${p.model} is reading your text…`;
+    case "writing":
+      return `Writing · ${p.tokens} tokens${p.tok_s > 0 ? ` · ${p.tok_s.toFixed(0)} tok/s` : ""}`;
+    case "waiting":
+      return `Waiting for ${p.model}…`;
+  }
+}
+
 // Cycle the intensity level by `dir` (+1 / -1), clamped (no wrap).
 function shiftLevel(level: Level, dir: number): Level {
   const i = LEVELS.indexOf(level);
@@ -69,6 +91,24 @@ export default function Menu() {
   const [customActions, setCustomActions] = useState<CustomAction[]>([]);
   const [level, setLevel] = useState<Level>("balanced");
   const [view, setView] = useState<View>({ kind: "menu" });
+  // While an action runs: what the model is doing, and for how long.
+  const [progress, setProgress] = useState<AiProgress | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  // Listening all along: the first event can come before the loading view's
+  // effects run (it's reset when an action starts).
+  useEffect(() => {
+    const unlisten = listen<AiProgress>("ghostpen://ai-progress", (e) => setProgress(e.payload));
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+  useEffect(() => {
+    if (view.kind !== "loading") return;
+    setElapsedMs(0);
+    const start = performance.now();
+    const timer = window.setInterval(() => setElapsedMs(performance.now() - start), 100);
+    return () => window.clearInterval(timer);
+  }, [view.kind]);
   // Keyboard cursor: index into `menuItems` (menu view) and into the language grid (translate view).
   const [cursor, setCursor] = useState(0);
   const [langCursor, setLangCursor] = useState(0);
@@ -114,6 +154,7 @@ export default function Menu() {
 
   const run = useCallback(
     async (action: string, targetLang: string | null, label: string) => {
+      setProgress(null);
       setView({ kind: "loading", label });
       try {
         // Shift held (key or click): show the result here instead of pasting.
@@ -132,7 +173,8 @@ export default function Menu() {
   const runCustom = useCallback(async () => {
     const instruction = prompt.trim();
     if (!instruction || empty) return;
-    setView({ kind: "loading", label: instruction });
+    setProgress(null);
+      setView({ kind: "loading", label: instruction });
     try {
       const result = await processAiCustom(instruction, shiftHeld.current);
       setPrompt("");
@@ -144,7 +186,8 @@ export default function Menu() {
 
   const doExtractText = useCallback(async () => {
     if (!isImageSelection(selection)) return;
-    setView({ kind: "loading", label: "Extracting text" });
+    setProgress(null);
+      setView({ kind: "loading", label: "Extracting text" });
     try {
       const text = await extractImageText();
       setCopied(false);
@@ -521,6 +564,8 @@ export default function Menu() {
         <div className="state">
           <div className="spinner" />
           <div className="state-label">{view.label}…</div>
+          <div className="state-detail">{progressText(progress)}</div>
+          <div className="state-time">{(elapsedMs / 1000).toFixed(1)} s</div>
         </div>
       )}
 
