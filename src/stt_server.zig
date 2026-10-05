@@ -18,6 +18,9 @@
 //!   `segments: [{id, start, end, text}]`), `srt`, `vtt`.
 //! - `GET /v1/models`: the served model and these capabilities.
 //! - `GET /health`: `ok`.
+//! - `GET /metrics`: the built-in model's performance counters (tokens,
+//!   wall-clock and tok/s of the totals, the last request and the running
+//!   one; model_server.zig).
 //!
 //! The model is `GHOSTPEN_STT_MODEL`, else Settings → Captions (read per
 //! request); `GHOSTPEN_STT_LANGUAGE` is the default language (`auto`). It
@@ -177,6 +180,8 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
         try model_server.propsReply(arena)
     else if (std.mem.eql(u8, path, "/slots") and request.head.method == .GET)
         try model_server.slotsReply(arena)
+    else if (std.mem.eql(u8, path, "/metrics") and request.head.method == .GET)
+        try model_server.metricsReply(io, arena)
     else if (std.mem.eql(u8, path, "/unload") and request.head.method == .POST)
         try model_server.unloadReply(io, arena, try readJsonBody(arena, request) orelse "")
     else if (std.mem.eql(u8, path, "/v1/embeddings") and request.head.method == .POST)

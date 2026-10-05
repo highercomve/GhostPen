@@ -129,6 +129,27 @@ fn platformDataDir(arena: std.mem.Allocator, env: *const std.process.Environ.Map
     };
 }
 
+/// GhostPen's own config file (`~/.config/ghostpen/<name>` on Linux, what
+/// the user's own words call the settings home): where the model runner
+/// keeps its remembered plans (src/llm_helper.zig). Null come from nowhere:
+/// the helper then plans from scratch every time, as before.
+pub fn configFile(arena: std.mem.Allocator, env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
+    const base = switch (builtin.os.tag) {
+        .windows => env.get("LOCALAPPDATA"),
+        .macos => blk: {
+            if (env.get("HOME")) |h| break :blk std.fs.path.join(arena, &.{ h, "Library", "Application Support" }) catch null;
+            break :blk null;
+        },
+        else => blk: {
+            if (env.get("XDG_CONFIG_HOME")) |d| if (d.len > 0) break :blk d;
+            const h = env.get("HOME") orelse break :blk null;
+            break :blk std.fs.path.join(arena, &.{ h, ".config" }) catch null;
+        },
+    };
+    const dir = base orelse return null;
+    return std.fs.path.join(arena, &.{ dir, "ghostpen", name }) catch null;
+}
+
 /// The embedding model GhostReel uses (and GhostPen serves to it): 768-dim
 /// embeddinggemma. Not downloaded by GhostPen; found where GhostReel or LM
 /// Studio put it.

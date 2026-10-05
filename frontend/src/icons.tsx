@@ -12,6 +12,7 @@ export type IconName =
   | "send"
   | "copy"
   | "scan"
+  | "link"
   | "image";
 
 const PATHS: Record<IconName, ReactNode> = {
@@ -81,6 +82,14 @@ const PATHS: Record<IconName, ReactNode> = {
       <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
       <line x1="7" y1="10" x2="17" y2="10" />
       <line x1="7" y1="14" x2="13" y2="14" />
+    </>
+  ),
+  // chain links (a URL)
+  link: (
+    <>
+      <line x1="7" y1="11" x2="14" y2="11" />
+      <path d="M10 8a4 4 0 0 1 6-2l2 2a4 4 0 0 1-1 6" />
+      <path d="M14 16a4 4 0 0 1-6 2l-2-2a4 4 0 0 1 1-6" />
     </>
   ),
   // picture (image on clipboard)

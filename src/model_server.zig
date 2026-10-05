@@ -20,6 +20,9 @@
 //!   plus transcription and embeddings. Chat models load on first request.
 //! - `GET /props`: `modalities.vision` and `total_slots` (1); `GET /slots`:
 //!   the context size.
+//! - `GET /metrics`: the built-in model's performance counters (src/metrics.zig):
+//!   requests, tokens and wall-clock of prompt and generation, tokens/s of
+//!   the totals, the last request and the one running now.
 //! - `POST /unload` (`{"models":["chat","embeddings","stt"]}`, or no body
 //!   for all): stop those runners now, freeing their (GPU) memory, e.g. when
 //!   a job is over.
@@ -38,6 +41,7 @@ const oriel = @import("oriel");
 const main = @import("main.zig");
 const ai = @import("ai.zig");
 const local_llm = @import("local_llm.zig");
+const metrics = @import("metrics.zig");
 const models = @import("models.zig");
 const llm_models = @import("llm_models.zig");
 
@@ -123,6 +127,55 @@ pub fn slotsReply(arena: std.mem.Allocator) !Reply {
     var why: []const u8 = "";
     const cfg = config(arena, null, &why) orelse return errorReply(.service_unavailable, why, arena);
     return .{ .body = try std.json.Stringify.valueAlloc(arena, .{.{ .id = 0, .n_ctx = cfg.ctx }}, .{}) };
+}
+
+/// `GET /metrics`: the built-in model's counters (src/metrics.zig), what it
+/// runs on, and the speed of the last request and the one running now.
+pub fn metricsReply(io: std.Io, arena: std.mem.Allocator) !Reply {
+    var why: []const u8 = "";
+    const cfg = config(arena, null, &why);
+    return .{ .body = try metricsBody(arena, metrics.snapshot(io, arena), cfg) };
+}
+
+fn metricsBody(arena: std.mem.Allocator, snap: metrics.Snapshot, cfg: ?local_llm.Config) ![]const u8 {
+    const info: ?metrics.Info = snap.loaded;
+    return std.json.Stringify.valueAlloc(arena, .{
+        // The loaded model, else what a request would use.
+        .model = if (info) |i| i.model else if (cfg) |c| std.fs.path.basename(c.model) else "",
+        .loaded = local_llm.loaded(),
+        .gpu = if (info) |i| i.gpu else "",
+        .ctx = if (info) |i| i.ctx else if (cfg) |c| c.ctx else 0,
+        .load_ms = if (info) |i| i.load_ms else 0,
+        .requests = snap.requests,
+        .failed_requests = snap.failed_requests,
+        .prompt_tokens = snap.prompt_tokens,
+        .prompt_ms = snap.prompt_ms,
+        .prompt_tokens_second = perSecond(snap.prompt_tokens, snap.prompt_ms),
+        .gen_tokens = snap.gen_tokens,
+        .gen_ms = snap.gen_ms,
+        .gen_tokens_second = perSecond(snap.gen_tokens, snap.gen_ms),
+        .last = if (snap.last) |l| .{
+            .prompt_tokens = l.usage.prompt_tokens,
+            .prompt_ms = l.usage.prompt_ms,
+            .prompt_tokens_second = perSecond(l.usage.prompt_tokens, l.usage.prompt_ms),
+            .gen_tokens = l.usage.gen_tokens,
+            .gen_ms = l.usage.gen_ms,
+            .gen_tokens_second = perSecond(l.usage.gen_tokens, l.usage.gen_ms),
+            .finished = l.finished,
+        } else null,
+        .in_flight = if (snap.in_flight) |f| .{
+            .model = f.info.model,
+            .gpu = f.info.gpu,
+            .ctx = f.info.ctx,
+            .elapsed_ms = f.usage.prompt_ms + f.usage.gen_ms,
+            .prompt_tokens = f.usage.prompt_tokens,
+            .prompt_ms = f.usage.prompt_ms,
+            .prompt_tokens_second = perSecond(f.usage.prompt_tokens, f.usage.prompt_ms),
+            .gen_tokens = f.usage.gen_tokens,
+            .gen_ms = f.usage.gen_ms,
+            .gen_tokens_second = perSecond(f.usage.gen_tokens, f.usage.gen_ms),
+        } else null,
+    }, .{ .emit_null_optional_fields = false });
 }
 
 /// The context a request asks for: Ollama's `options.num_ctx`, or `n_ctx`
@@ -239,6 +292,9 @@ const ChatRequest = struct {
     chat: local_llm.Chat,
     model: ?[]const u8 = null,
     stream: bool,
+    /// `stream_options.include_usage`: a final chunk with `usage` (and empty
+    /// `choices`) before `[DONE]`.
+    include_usage: bool = false,
     /// Tools were offered: the answer is JSON (`ToolAnswer`), turned into
     /// OpenAI `tool_calls` or content.
     tools: bool = false,
@@ -365,8 +421,12 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     chat.keep_alive_ms = keepAliveMs(obj);
     chat.ctx = requestedCtx(obj);
     const stream = if (obj.get("stream")) |s| s == .bool and s.bool else false;
+    var include_usage = false;
+    if (obj.get("stream_options")) |so| if (so == .object) if (so.object.get("include_usage")) |iu| {
+        include_usage = iu == .bool and iu.bool;
+    };
     const requested = if (obj.get("model")) |m| (if (m == .string and m.string.len > 0) m.string else null) else null;
-    return .{ .chat = chat, .model = requested, .stream = stream, .tools = use_tools };
+    return .{ .chat = chat, .model = requested, .stream = stream, .include_usage = include_usage, .tools = use_tools };
 }
 
 const ToolChoice = union(enum) { auto, none, required, function: []const u8 };
@@ -488,6 +548,47 @@ fn completionId(buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "chatcmpl-{x}", .{std.mem.readInt(u64, &r, .little)}) catch "chatcmpl";
 }
 
+/// Tokens per second (the runner's wall-clock); 0 without a measurement.
+fn perSecond(tokens: u64, ms: u64) f64 {
+    if (tokens == 0 or ms == 0) return 0;
+    return @as(f64, @floatFromInt(tokens)) * 1000.0 / @as(f64, @floatFromInt(ms));
+}
+
+/// OpenAI's `usage` and llama-server's `timings` from a finished request.
+fn usageFields(res: local_llm.Result) struct {
+    usage: struct { prompt_tokens: u64, completion_tokens: u64, total_tokens: u64 },
+    timings: struct {
+        prompt_n: u64,
+        prompt_ms: u64,
+        prompt_per_second: f64,
+        predicted_n: u64,
+        predicted_ms: u64,
+        predicted_per_second: f64,
+    },
+} {
+    const u: metrics.Usage = .{
+        .prompt_tokens = res.prompt_tokens,
+        .gen_tokens = res.gen_tokens,
+        .prompt_ms = res.prompt_ms,
+        .gen_ms = res.gen_ms,
+    };
+    return .{
+        .usage = .{
+            .prompt_tokens = u.prompt_tokens,
+            .completion_tokens = u.gen_tokens,
+            .total_tokens = u.prompt_tokens + u.gen_tokens,
+        },
+        .timings = .{
+            .prompt_n = u.prompt_tokens,
+            .prompt_ms = u.prompt_ms,
+            .prompt_per_second = perSecond(u.prompt_tokens, u.prompt_ms),
+            .predicted_n = u.gen_tokens,
+            .predicted_ms = u.gen_ms,
+            .predicted_per_second = perSecond(u.gen_tokens, u.gen_ms),
+        },
+    };
+}
+
 /// A non-streaming answer as a Reply; a streaming one written to `request`
 /// (null returned: already answered).
 pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request, body: []const u8) !?Reply {
@@ -511,6 +612,7 @@ pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server
             error.OutOfMemory => return e,
             error.LocalFailed => return errorReply(.internal_server_error, diag, arena),
         };
+        const counted = usageFields(res);
         return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
             .id = id,
             .object = "chat.completion",
@@ -521,7 +623,8 @@ pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server
                 .message = .{ .role = "assistant", .content = res.text },
                 .finish_reason = if (res.truncated) "length" else "stop",
             }},
-            .usage = .{ .prompt_tokens = 0, .completion_tokens = 0, .total_tokens = 0 },
+            .usage = counted.usage,
+            .timings = counted.timings,
         }, .{}) };
     }
 
@@ -578,6 +681,18 @@ pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server
     // The last chunk's delta is an empty object (`.{}` would be `[]`).
     const Empty = struct {};
     sse.event(Empty{}, if (res.truncated) "length" else "stop");
+    if (req.include_usage) {
+        // OpenAI's shape: a chunk with no choices, only the usage.
+        const chunk = std.json.Stringify.valueAlloc(arena, .{
+            .id = id,
+            .object = "chat.completion.chunk",
+            .created = created,
+            .model = model,
+            .choices = @as([]const Empty, &.{}),
+            .usage = usageFields(res).usage,
+        }, .{}) catch "";
+        if (chunk.len > 0) bw.writer.print("data: {s}\n\n", .{chunk}) catch {};
+    }
     bw.writer.writeAll("data: [DONE]\n\n") catch {};
     bw.end() catch {};
     return null;
@@ -626,13 +741,15 @@ fn toolReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Req
     if (msg.tool_calls) |calls| {
         for (calls) |c| log.info("tool call: {s}", .{c.function.name});
     } else log.info("tool turn answered without a call", .{});
+    const counted = usageFields(res);
     if (!req.stream) return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
         .id = id,
         .object = "chat.completion",
         .created = created,
         .model = model,
         .choices = .{.{ .index = 0, .message = msg, .finish_reason = finish }},
-        .usage = .{ .prompt_tokens = 0, .completion_tokens = 0, .total_tokens = 0 },
+        .usage = counted.usage,
+        .timings = counted.timings,
     }, .{ .emit_null_optional_fields = false }) };
 
     var sse_buf: [16 * 1024]u8 = undefined;
@@ -723,6 +840,43 @@ pub fn removeDiscovery(io: std.Io, env: *const std.process.Environ.Map) void {
     const parsed = std.json.parseFromSliceLeaky(Pid, arena, data, .{ .ignore_unknown_fields = true }) catch return;
     const me: i64 = if (builtin.os.tag == .windows) std.os.windows.GetCurrentProcessId() else std.c.getpid();
     if (parsed.pid == me) std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+test "metrics: totals, rates, the last request" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const snap: metrics.Snapshot = .{
+        .requests = 3,
+        .failed_requests = 1,
+        .prompt_tokens = 300,
+        .prompt_ms = 600,
+        .gen_tokens = 450,
+        .gen_ms = 3000,
+        .last = .{ .usage = .{ .prompt_tokens = 100, .prompt_ms = 200, .gen_tokens = 150, .gen_ms = 1000 }, .finished = 1759620000 },
+    };
+    const body = try metricsBody(arena_state.allocator(), snap, null);
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena_state.allocator(), body, .{});
+    const o = v.object;
+    // A whole-number rate serializes as an integer ("500", not "5e2"): read
+    // either number form.
+    const asNum = struct {
+        fn f(x: std.json.Value) f64 {
+            return switch (x) {
+                .integer => |n| @floatFromInt(n),
+                .float => |fl| fl,
+                else => unreachable,
+            };
+        }
+    }.f;
+    try std.testing.expectEqual(@as(i64, 3), o.get("requests").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), o.get("failed_requests").?.integer);
+    try std.testing.expectEqual(@as(f64, 500), asNum(o.get("prompt_tokens_second").?));
+    try std.testing.expectEqual(@as(f64, 150), asNum(o.get("gen_tokens_second").?));
+    try std.testing.expect(!o.get("loaded").?.bool); // the runner isn't up in a test
+    const last = o.get("last").?.object;
+    try std.testing.expectEqual(@as(i64, 1759620000), last.get("finished").?.integer);
+    try std.testing.expectEqual(@as(f64, 150), asNum(last.get("gen_tokens_second").?));
+    try std.testing.expect(o.get("in_flight") == null); // nothing running: omitted
 }
 
 test parseDuration {
