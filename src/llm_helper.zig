@@ -26,8 +26,12 @@
 //! that token is rejected (checking every token of a 250k vocabulary at every
 //! step is ~2.5x slower).
 //!
-//! and answers each with deltas and one final line:
+//! and answers each with progress lines (the prompt's size after its eval,
+//! then the generation's count every 250 ms — what `metrics.zig` records for
+//! the model service's `/metrics`), deltas and one final line:
 //!
+//!     {"id":1,"prompt_tokens":52,"prompt_ms":8}
+//!     {"id":1,"gen_tokens":37,"gen_ms":250}
 //!     {"id":1,"delta":"Hel"}  {"id":1,"delta":"lo"}
 //!     {"id":1,"done":true,"prompt_tokens":52,"gen_tokens":9,"prompt_ms":8,"gen_ms":92,"truncated":false,"cancelled":false}
 //!     {"id":1,"error":"…"}
@@ -64,11 +68,21 @@ const Options = struct {
     moe_pct: u8 = 0,
 };
 
-/// Prompt batch and micro-batch (llama.cpp's -b / -ub 2048, as highllama):
-/// the batch also sizes the logits buffer; the micro-batch drives prompt
-/// eval speed (2048 is ~3x faster than 512) and the compute buffer's size.
-const n_batch = 2048;
-const n_ubatch = 2048;
+/// Prompt batch and micro-batch (llama.cpp's -b / -ub): the batch also
+/// sizes the logits buffer; the micro-batch drives prompt eval speed (2048
+/// is ~3x faster than 512) and the compute buffer's size. They shrink when
+/// that is what stands between the model and all its layers on the GPU:
+/// the prompt is paid once, but a split model pays the CPU/GPU boundary on
+/// every generated token.
+const Batches = struct {
+    batch: u32 = 2048,
+    ubatch: u32 = 2048,
+    /// llama.cpp's defaults (-b 2048 -ub 512): half the compute buffers.
+    const ub512: Batches = .{ .batch = 2048, .ubatch = 512 };
+    /// And a small logits buffer too (2048 entries of a 250k vocabulary
+    /// are ~2 GB on their own).
+    const small: Batches = .{ .batch = 512, .ubatch = 512 };
+};
 /// The expert tensors of one MoE block (`std::regex_search`ed against the
 /// tensor name; llama.cpp's LLM_FFN_EXPS_REGEX).
 const ffn_exps_regex = "\\.ffn_(up|down|gate|gate_up)_(ch|)exps";
@@ -111,6 +125,11 @@ var io: std.Io = undefined;
 var out_mutex: std.Io.Mutex = .init;
 var out_buf: [16 * 1024]u8 = undefined;
 var out_writer: std.Io.File.Writer = undefined;
+/// The remembered-plans file (`--plans`, GhostPen's ~/.config/ghostpen);
+/// null (e.g. a manual run): plan from scratch every time, as before.
+var plans_path: ?[:0]const u8 = null;
+/// The runner's allocator (main's): the plan cache's file reads and JSON.
+var plan_gpa: std.mem.Allocator = undefined;
 var cancel: std.atomic.Value(bool) = .init(false);
 /// A request is running. Cleared just before its last line goes out, so
 /// the client's next request (sent as soon as it reads that line) is never
@@ -131,6 +150,13 @@ fn sendError(id: u64, message: []const u8) void {
     send(.{ .id = id, .@"error" = message });
 }
 
+/// A progress line: the prompt's size after its eval, then the generation's
+/// count so far (the client records them; the request's line ids keep them
+/// apart from deltas and the final line).
+fn sendStat(id: u64, prompt_tokens: usize, prompt_ms: u64, gen_tokens: usize, gen_ms: u64) void {
+    send(.{ .id = id, .prompt_tokens = prompt_tokens, .prompt_ms = prompt_ms, .gen_tokens = gen_tokens, .gen_ms = gen_ms });
+}
+
 /// The last line of a request (`done` or `error`).
 fn sendFinal(value: anytype) void {
     busy.store(false, .release);
@@ -149,6 +175,7 @@ fn abortCallback(_: ?*anyopaque) callconv(.c) bool {
 
 pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
     io = process_io;
+    plan_gpa = gpa;
     out_writer = std.Io.File.stdout().writerStreaming(io, &out_buf);
 
     var opts: Options = .{ .model = "" };
@@ -159,6 +186,9 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
         if (std.mem.eql(u8, a, "--model") and has_value) {
             i += 1;
             opts.model = gpa.dupeZ(u8, args[i]) catch return 1;
+        } else if (std.mem.eql(u8, a, "--plans") and has_value) {
+            i += 1;
+            plans_path = gpa.dupeZ(u8, args[i]) catch null;
         } else if (std.mem.eql(u8, a, "--mmproj") and has_value) {
             i += 1;
             opts.mmproj = gpa.dupeZ(u8, args[i]) catch return 1;
@@ -234,7 +264,7 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
         .load_ms = load_ms,
     });
 
-    var engine: ?Engine = if (chat) |m| .{ .gpa = gpa, .model = m.model, .ctx = m.ctx, .vocab = c.llama_model_get_vocab(m.model).?, .format = m.format, .template = m.template, .vision = m.vision } else null;
+    var engine: ?Engine = if (chat) |m| .{ .gpa = gpa, .model = m.model, .ctx = m.ctx, .vocab = c.llama_model_get_vocab(m.model).?, .format = m.format, .template = m.template, .vision = m.vision, .n_ubatch = m.n_ubatch } else null;
 
     // Requests: the worker generates; this thread keeps reading so a cancel
     // gets through.
@@ -315,6 +345,9 @@ const ChatModel = struct {
     ctx: *c.llama_context,
     vision: ?*c.mtmd_context,
     ngl: i32,
+    /// The prompt micro-batch the plan chose (the prefill loop feeds
+    /// llama_decode this many tokens at a time).
+    n_ubatch: u32,
     template: ?[]const u8,
     format: chat_format.Format,
 
@@ -326,12 +359,40 @@ const ChatModel = struct {
         const max_moe_blocks = 128;
         var moe_patterns: [max_moe_blocks][96]u8 = undefined;
         var moe_overrides: [max_moe_blocks + 1]c.llama_model_tensor_buft_override = undefined;
-        const blocks: usize = @intCast(@max(layerCount(opts), 0));
+        const meta = modelMeta(opts);
+        const blocks: usize = @intCast(@max(meta.layers, 0));
         // The plan: GPU layers and experts held back, from the free memory
-        // right now. Recomputed on the first failure: a restart races the
-        // previous runner's VRAM release (the kill returns before the driver
-        // frees), so the first measurement can be far too pessimistic.
-        const plan = planSplit(opts, gpus, blocks, &moe_patterns, &moe_overrides);
+        // right now, at the fastest batches that leave the whole model (or
+        // as much of it as possible) on the GPU — smaller prompt batches
+        // shrink the compute buffers, and the prompt is paid once while a
+        // split model pays the CPU/GPU boundary on every generated token.
+        // A split this model loaded with before is remembered in GhostPen's
+        // config and takes the ladder's place; forgotten, then re-measured,
+        // when a load with it fails (the machine's memory changed under it).
+        var batches: Batches = .{};
+        var plan: Plan = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
+        var remembered = if (gpus > 0 and meta.layers > 0) planRemembered(opts, gpus) else null;
+        if (remembered) |r| {
+            plan = .{ .ngl = r.ngl, .n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, r.experts) };
+            batches = .{ .batch = r.batch, .ubatch = r.ubatch };
+            if (r.ngl >= 999) {
+                std.debug.print("ghostpen-llm: remembered: all layers on the GPU, {d} of {d} blocks' experts in system RAM, prompt batches {d}/{d}\n", .{ r.experts, blocks, r.batch, r.ubatch });
+            } else {
+                std.debug.print("ghostpen-llm: remembered: {d} layers on the GPU, prompt batches {d}/{d}\n", .{ r.ngl, r.batch, r.ubatch });
+            }
+        } else if (gpus > 0) for ([_]Batches{ Batches.ub512, Batches.small }) |try_batches| {
+            const alt = planSplit(opts, gpus, blocks, meta.experts != 0, try_batches, &moe_patterns, &moe_overrides);
+            const better = if (meta.experts != 0)
+                alt.n_overrides < plan.n_overrides // fewer experts paying the boundary
+            else
+                alt.ngl > plan.ngl; // more of the file on the GPU
+            if (better) {
+                plan = alt;
+                batches = try_batches;
+            }
+            // Everything that can be on the GPU is: nothing left to gain.
+            if (if (meta.experts != 0) plan.n_overrides == 0 else plan.ngl >= blocks) break;
+        };
         var ngl = plan.ngl;
         var n_overrides = plan.n_overrides;
         var attempts: usize = 0;
@@ -353,11 +414,16 @@ const ChatModel = struct {
             }
             // First failure: the previous runner's VRAM may still be freeing.
             // Wait, measure again, and retry the freshly planned split before
-            // giving anything up.
+            // giving anything up. The remembered split is gone now — the
+            // measurement leads from here on.
             if (attempts == 1 and gpus > 0) {
+                if (remembered != null) {
+                    planForget(opts, gpus);
+                    remembered = null;
+                }
                 std.debug.print("ghostpen-llm: load failed; the previous runner's GPU memory may still be freeing — retrying\n", .{});
                 std.Io.sleep(io, .fromSeconds(2), .awake) catch {};
-                const fresh = planSplit(opts, gpus, blocks, &moe_patterns, &moe_overrides);
+                const fresh = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
                 if (fresh.ngl != ngl or fresh.n_overrides != n_overrides) {
                     ngl = fresh.ngl;
                     n_overrides = fresh.n_overrides;
@@ -374,10 +440,14 @@ const ChatModel = struct {
                 n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, more);
                 continue;
             }
-            ngl = if (ngl >= 999) @max(@divTrunc(layerCount(opts) * 2, 3), 0) else @divTrunc(ngl, 2);
+            ngl = if (ngl >= 999) @max(@divTrunc(meta.layers * 2, 3), 0) else @divTrunc(ngl, 2);
             std.debug.print("ghostpen-llm: not enough GPU memory, retrying with {d} layers on the GPU\n", .{ngl});
         };
         errdefer c.llama_model_free(model);
+        // The split that just loaded is the one to remember (it measured
+        // itself; a split from the cache is already in the file).
+        if (remembered == null and gpus > 0)
+            planRemember(opts, gpus, .{ .ngl = ngl, .experts = n_overrides, .batch = batches.batch, .ubatch = batches.ubatch });
 
         // The context: as asked, capped at what the model was trained for; on
         // failure (out of memory) halved down to 2048.
@@ -386,12 +456,10 @@ const ChatModel = struct {
         const ctx = while (true) {
             var cparams = c.llama_context_default_params();
             cparams.n_ctx = n_ctx;
-            // llama.cpp's defaults (-b 2048 -ub 512): the whole prompt in a
-            // few large batches, without the huge compute buffers (a
-            // batch-sized logits buffer alone is 2 GB at 250k vocabulary)
-            // that would push an -ngl 99 split out of the GPU's memory.
-            cparams.n_batch = n_batch;
-            cparams.n_ubatch = n_ubatch;
+            // The prompt batches (chosen with the plan above): they size the
+            // logits and compute buffers, not the generation speed.
+            cparams.n_batch = batches.batch;
+            cparams.n_ubatch = batches.ubatch;
             cparams.n_threads = threads;
             cparams.n_threads_batch = threads;
             cparams.no_perf = true;
@@ -438,7 +506,7 @@ const ChatModel = struct {
         } else null;
 
         const template: ?[]const u8 = if (c.llama_model_chat_template(model, null)) |t| std.mem.span(t) else null;
-        return .{ .model = model, .ctx = ctx, .vision = vision, .ngl = ngl, .template = template, .format = chat_format.detect(template) };
+        return .{ .model = model, .ctx = ctx, .vision = vision, .ngl = ngl, .n_ubatch = batches.ubatch, .template = template, .format = chat_format.detect(template) };
     }
 
     fn deinit(self: *ChatModel) void {
@@ -545,6 +613,11 @@ const ModelMeta = struct {
     kv_per_token: u64 = 0,
     /// Vocabulary size: the logits buffer is n_batch entries of it.
     vocab: u32 = 0,
+    /// A MoE model (`{arch}.expert_count` in the metadata; its expert
+    /// tensors are the `.ffn_*_exps` ones the MoE overrides target). 0 when
+    /// dense: there is nothing to hold back, so the whole plan rests on the
+    /// layer count alone.
+    experts: i32 = 0,
 };
 
 /// Layer count and KV size from the file's metadata (a vocab-only load).
@@ -563,6 +636,11 @@ fn modelMeta(opts: Options) ModelMeta {
     if (c.llama_model_get_vocab(m)) |v| {
         out.vocab = @intCast(@max(c.llama_vocab_n_tokens(v), 0));
     }
+    // A MoE model (`{arch}.expert_count`; its expert tensors are the
+    // `.ffn_*_exps` ones the MoE hold-back targets). 0 when dense: no
+    // expert tensor exists, so a hold-back plan would be a no-op that
+    // still forces every layer onto the GPU.
+    out.experts = metaInt(m, "{s}.expert_count", arch[0..@intCast(n)]);
     const heads = metaInt(m, "{s}.attention.head_count_kv", arch[0..@intCast(n)]);
     if (heads <= 0) return out;
     var head_dim = metaInt(m, "{s}.attention.key_length", arch[0..@intCast(n)]);
@@ -573,7 +651,17 @@ fn modelMeta(opts: Options) ModelMeta {
         head_dim = @divTrunc(n_embd, n_heads);
     }
     const elem = @divTrunc(c.ggml_type_size(opts.kv_type), @as(usize, @intCast(c.ggml_blck_size(opts.kv_type))));
-    out.kv_per_token = 2 * @as(u64, @intCast(heads)) * @as(u64, @intCast(head_dim)) * @as(u64, @intCast(elem));
+    // Only the full-attention layers cache KV: the recurrent (SSM) blocks of
+    // a hybrid model (Qwen3.5 and friends) hold their state instead — one
+    // attention layer every `full_attention_interval` blocks (llama.cpp
+    // marks the rest recurrent). Without this, the reserve covers one
+    // layer's cache and a 131k-token context under-counts by gigabytes.
+    const interval: u64 = @intCast(@max(metaInt(m, "{s}.full_attention_interval", arch[0..@intCast(n)]), 1));
+    const kv_layers: u64 = if (out.layers > 0)
+        @divTrunc(@as(u64, @intCast(out.layers)) - 1, interval) + 1
+    else
+        1;
+    out.kv_per_token = kv_layers * 2 * @as(u64, @intCast(heads)) * @as(u64, @intCast(head_dim)) * @as(u64, @intCast(elem));
     return out;
 }
 
@@ -590,31 +678,29 @@ fn metaInt(m: *c.llama_model, comptime fmt: []const u8, arch: []const u8) i32 {
 /// The context length the model was trained for (metadata only, nothing
 /// loaded; 0 when the file can't be read): what the UI may offer as the
 /// context window's maximum.
-pub fn trainedCtx(arena: std.mem.Allocator, path: []const u8) u32 {
-    var p = c.llama_model_default_params();
-    p.vocab_only = true;
-    p.n_gpu_layers = 0;
-    const z = arena.dupeZ(u8, path) catch return 0;
-    const m = c.llama_model_load_from_file(z.ptr, p) orelse return 0;
-    defer c.llama_model_free(m);
-    const n = c.llama_model_n_ctx_train(m);
-    return if (n > 0) @intCast(n) else 0;
+pub fn trainedCtx(process_io: std.Io, path: []const u8) u32 {
+    return @import("gguf_context.zig").trainedCtx(process_io, path);
 }
 
 /// The split plan for the free memory right now: how many layers on the GPU
 /// (all of them when experts are held back) and how many blocks' expert
-/// weights in system RAM. Written into `patterns`/`overrides`.
-fn planSplit(opts: Options, gpus: usize, blocks: usize, patterns: *[128][96]u8, overrides: *[129]c.llama_model_tensor_buft_override) struct { ngl: i32, n_overrides: usize } {
+/// weights in system RAM. Written into `patterns`/`overrides`. `moe` is
+/// false for dense models: no expert tensor exists to hold back, so the
+/// split rests on the layer count alone (`ngl = 999` would put the whole
+/// file on the GPU and abort at the first compute, out of memory).
+const Plan = struct { ngl: i32, n_overrides: usize };
+
+fn planSplit(opts: Options, gpus: usize, blocks: usize, moe: bool, batches: Batches, patterns: *[128][96]u8, overrides: *[129]c.llama_model_tensor_buft_override) Plan {
     if (gpus == 0) return .{ .ngl = 0, .n_overrides = 0 };
-    var ngl: i32 = gpuLayers(opts);
+    var ngl: i32 = gpuLayers(opts, batches);
     var n_overrides: usize = 0;
-    if (opts.moe_pct > 0) {
+    if (moe and opts.moe_pct > 0) {
         // The user's share of the blocks whose experts go to RAM (rounded up,
         // so even a small percentage does something) — but never less than
         // what the GPU's free memory forces: with every block on the GPU, the
         // experts left on the GPU still have to fit (highllama's estimator).
         var n: usize = @min(@max(blocks * @as(usize, opts.moe_pct) / 100 + 1, 1), blocks);
-        const by_vram = moeCpuForVram(opts, blocks);
+        const by_vram = moeCpuForVram(opts, blocks, batches);
         if (by_vram > n) {
             n = by_vram;
             std.debug.print("ghostpen-llm: the GPU's memory needs more: {d} of {d} blocks' experts in system RAM\n", .{ n, blocks });
@@ -629,9 +715,137 @@ fn planSplit(opts: Options, gpus: usize, blocks: usize, patterns: *[128][96]u8, 
     return .{ .ngl = ngl, .n_overrides = n_overrides };
 }
 
+/// The last successful split, remembered in GhostPen's config (`--plans`,
+/// the app passes ~/.config/ghostpen/llm-plans.json): the model loaded
+/// fine with `ngl` layers on the GPU, `experts` blocks' experts in system
+/// RAM and prompt batches `batch`/`ubatch`. A swap between models (or a
+/// restart) starts here instead of re-running the plan ladder; ignored,
+/// then forgotten, when the machine's memory changed underneath (the load
+/// fails).
+const Remembered = struct {
+    ngl: i32,
+    experts: usize,
+    batch: u32,
+    ubatch: u32,
+};
+
+const max_plan_entries = 64;
+/// Separates the parts of a key (paths never contain one).
+const key_sep = "\x1f";
+
+/// A plan file entry as JSON.
+const PlanEntry = struct {
+    key: []const u8,
+    ngl: i32,
+    experts: usize,
+    batch: u32,
+    ubatch: u32,
+};
+const PlanFile = struct { plans: []PlanEntry = &.{} };
+
+/// What identifies a plan: the model file (path and size — a re-download
+/// invalidates), the context, the KV precision, flash attention, the MoE
+/// percentage and the GPU count. All of them change what the planner
+/// would decide, not just what fits.
+fn planKey(buffer: []u8, opts: Options, gpus: usize) ?[]u8 {
+    var w: std.Io.Writer = .fixed(buffer);
+    const file = std.Io.Dir.cwd().statFile(io, opts.model, .{}) catch return null;
+    const kv: u8 = switch (opts.kv_type) {
+        c.GGML_TYPE_F16 => 1,
+        c.GGML_TYPE_Q4_0 => 4,
+        else => 8,
+    };
+    w.print("{s}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}", .{
+        opts.model, file.size, opts.ctx, kv, @as(i32, opts.flash_attn), opts.moe_pct, gpus,
+    }) catch return null;
+    return w.buffered();
+}
+
+/// The remembered plan for `opts`, or null: nothing saved, no `--plans`,
+/// a malformed or unreadable file, or no entry for this key.
+fn planRemembered(opts: Options, gpus: usize) ?Remembered {
+    const path = plans_path orelse return null;
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, plan_gpa, .limited(64 * 1024)) catch return null;
+    defer plan_gpa.free(data);
+    var key_buf: [2048]u8 = undefined;
+    const want = planKey(&key_buf, opts, gpus) orelse return null;
+    const parsed = std.json.parseFromSliceLeaky(PlanFile, plan_gpa, data, .{ .ignore_unknown_fields = true }) catch return null;
+    for (parsed.plans) |e| {
+        if (!std.mem.eql(u8, e.key, want)) continue;
+        if (e.ngl <= 0 or e.experts > 0xffff) continue;
+        return .{ .ngl = e.ngl, .experts = e.experts, .batch = e.batch, .ubatch = e.ubatch };
+    }
+    return null;
+}
+
+/// Record the split that loaded (replacing this key's entry; the oldest
+/// drops past the cap). Best effort: a failure just means the next load
+/// plans again from scratch.
+fn planRemember(opts: Options, gpus: usize, saved: Remembered) void {
+    const path = plans_path orelse return;
+    var arena_state: std.heap.ArenaAllocator = .init(plan_gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var key_buf: [2048]u8 = undefined;
+    const key = arena.dupe(u8, planKey(&key_buf, opts, gpus) orelse return) catch return;
+
+    var entries: std.ArrayList(PlanEntry) = .empty;
+    defer entries.deinit(arena);
+    if (std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 * 1024))) |data| {
+        const parsed = std.json.parseFromSliceLeaky(PlanFile, arena, data, .{ .ignore_unknown_fields = true }) catch return;
+        for (parsed.plans) |e| {
+            if (std.mem.eql(u8, e.key, key)) continue; // ours replaces it
+            entries.append(arena, e) catch return;
+        }
+    } else |_| {} // a fresh (or malformed) file: just add ours
+    entries.append(arena, .{ .key = key, .ngl = saved.ngl, .experts = saved.experts, .batch = saved.batch, .ubatch = saved.ubatch }) catch return;
+    while (entries.items.len > max_plan_entries) _ = entries.orderedRemove(0);
+    const out = std.json.Stringify.valueAlloc(arena, PlanFile{ .plans = entries.items }, .{}) catch return;
+    savePlanFile(arena, path, out);
+}
+
+/// Forget `opts`' entry (its load just failed: the memory situation
+/// changed since it was saved, so measure everything anew).
+fn planForget(opts: Options, gpus: usize) void {
+    const path = plans_path orelse return;
+    var arena_state: std.heap.ArenaAllocator = .init(plan_gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 * 1024)) catch return;
+    var key_buf: [2048]u8 = undefined;
+    const want = planKey(&key_buf, opts, gpus) orelse return;
+    const parsed = std.json.parseFromSliceLeaky(PlanFile, arena, data, .{ .ignore_unknown_fields = true }) catch return;
+    var entries: std.ArrayList(PlanEntry) = .empty;
+    defer entries.deinit(arena);
+    var found = false;
+    for (parsed.plans) |e| {
+        if (std.mem.eql(u8, e.key, want)) {
+            found = true;
+            continue;
+        }
+        entries.append(arena, e) catch return;
+    }
+    if (!found) return;
+    const out = std.json.Stringify.valueAlloc(arena, PlanFile{ .plans = entries.items }, .{}) catch return;
+    savePlanFile(arena, path, out);
+}
+
+/// The plan file, atomically (a half-written file would read as absent).
+fn savePlanFile(arena: std.mem.Allocator, path: []const u8, body: []const u8) void {
+    const dir = std.fs.path.dirname(path) orelse return;
+    std.Io.Dir.cwd().createDirPath(io, dir) catch return;
+    const tmp = std.fmt.allocPrint(arena, "{s}.tmp", .{std.fs.path.basename(path)}) catch return;
+    var tmp_dir = std.Io.Dir.cwd().openDir(io, dir, .{}) catch return;
+    defer tmp_dir.close(io);
+    tmp_dir.writeFile(io, .{ .sub_path = tmp, .data = body }) catch return;
+    tmp_dir.rename(tmp, tmp_dir, std.fs.path.basename(path), io) catch return;
+}
+
 /// GPU layers for the free memory of the first GPU: all of them when the
-/// weights plus the context fit, else the share that does.
-fn gpuLayers(opts: Options) i32 {
+/// weights plus the context fit, else the share that does (both reserves
+/// sized by the prompt batches: the micro-batch drives the compute
+/// buffers, the batch the logits buffer).
+fn gpuLayers(opts: Options, batches: Batches) i32 {
     var free: usize = 0;
     var total: usize = 0;
     for (0..c.ggml_backend_dev_count()) |i| {
@@ -649,8 +863,8 @@ fn gpuLayers(opts: Options) i32 {
     // compute buffers.
     const meta = modelMeta(opts);
     const kv: u64 = @as(u64, opts.ctx) * meta.kv_per_token;
-    const logits: u64 = @as(u64, n_batch) * @as(u64, meta.vocab) * 4;
-    const compute: u64 = 650 * 1024 * 1024 + @as(u64, n_ubatch / 512) * 750 * 1024 * 1024;
+    const logits: u64 = @as(u64, batches.batch) * @as(u64, meta.vocab) * 4;
+    const compute: u64 = 650 * 1024 * 1024 + @as(u64, batches.ubatch / 512) * 750 * 1024 * 1024;
     const reserve: u64 = compute + kv + logits;
     if (file.size + reserve <= free) return 999;
     if (free <= reserve) return 0;
@@ -665,7 +879,7 @@ fn gpuLayers(opts: Options) i32 {
 /// first GPU's free memory (highllama's estimator): the attention and dense
 /// weights of every block go to the GPU (`-ngl 99`), the experts left there
 /// are the ones to fit. 0 when it all fits.
-fn moeCpuForVram(opts: Options, blocks: usize) usize {
+fn moeCpuForVram(opts: Options, blocks: usize, batches: Batches) usize {
     if (blocks == 0) return 0;
     var free: usize = 0;
     var total: usize = 0;
@@ -683,10 +897,10 @@ fn moeCpuForVram(opts: Options, blocks: usize) usize {
     // safety margin.
     const meta = modelMeta(opts);
     const kv_mib = @as(u64, opts.ctx) * meta.kv_per_token >> 20;
-    const logits_mib = @as(u64, n_batch) * @as(u64, meta.vocab) * 4 >> 20;
+    const logits_mib = @as(u64, batches.batch) * @as(u64, meta.vocab) * 4 >> 20;
     // Compute buffers: base + the activations, which scale with the
     // micro-batch size.
-    const overhead_mib = 650 + ((@as(u64, opts.ctx) * 8) >> 10) + (n_ubatch / 512) * 750 + logits_mib;
+    const overhead_mib = 650 + ((@as(u64, opts.ctx) * 8) >> 10) + (batches.ubatch / 512) * 750 + logits_mib;
     if (weights_mib + kv_mib + overhead_mib <= free >> 20) return 0; // all fits
     const budget_mib = (free >> 20) -| (kv_mib + overhead_mib);
     if (budget_mib == 0) return blocks;
@@ -720,6 +934,9 @@ const Engine = struct {
     format: chat_format.Format,
     template: ?[]const u8,
     vision: ?*c.mtmd_context,
+    /// The prompt micro-batch (the plan's choice): prefill feeds one decoder
+    /// call this many tokens.
+    n_ubatch: u32,
     /// The last text prompt's tokens: the KV cache still holds their shared
     /// prefix, so the next request only evaluates its new tail (what makes an
     /// agent's repeated 100k-token context cheap).
@@ -787,6 +1004,7 @@ const Engine = struct {
         }
         if (n_prompt == 0) return self.finish(req.id, 0, 0, 0, 0, false, true); // cancelled
         const prompt_ms: u64 = @intCast(@max(req_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
+        sendStat(req.id, n_prompt, prompt_ms, 0, 0);
         const gen_start = std.Io.Clock.awake.now(io);
         const budget = @min(@as(usize, req.max_tokens), n_ctx - n_prompt);
 
@@ -835,6 +1053,7 @@ const Engine = struct {
         var filter: chat_format.ReasoningFilter = .init(self.format, req.think);
         var sent: usize = 0;
         var generated: usize = 0;
+        var last_stat_ms: u64 = 0;
         var cancelled = false;
         // The grammar binds to the answer: from the start, or (thinking) once
         // the reasoning block is over.
@@ -871,6 +1090,12 @@ const Engine = struct {
                     break;
                 }
                 return fail(req.id, "The built-in model stopped generating (llama_decode {d}).", .{rc});
+            }
+            // The speed so far, while the client and the user wait for it.
+            const gen_ms: u64 = @intCast(@max(gen_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
+            if (gen_ms - last_stat_ms >= 250) {
+                last_stat_ms = gen_ms;
+                sendStat(req.id, n_prompt, prompt_ms, generated, gen_ms);
             }
         }
         if (filter.visible(out.items)) |vis| if (vis.len > sent) send(.{ .id = req.id, .delta = try chat_format.validUtf8(arena, vis[sent..]) });
@@ -937,7 +1162,7 @@ const Engine = struct {
         }
         var pos: usize = common;
         while (pos < tokens.len) {
-            const n = @min(tokens.len - pos, n_ubatch);
+            const n = @min(tokens.len - pos, self.n_ubatch);
             const rc = c.llama_decode(self.ctx, c.llama_batch_get_one(tokens[pos..].ptr, @intCast(n)));
             if (cancel.load(.acquire)) return 0;
             if (rc != 0) return fail(req.id, "The built-in model failed to read the prompt (llama_decode {d}).", .{rc});

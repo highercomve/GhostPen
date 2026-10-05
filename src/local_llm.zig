@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const metrics = @import("metrics.zig");
 
 const log = std.log.scoped(.local_llm);
 
@@ -60,9 +61,20 @@ pub const Result = struct {
     text: []const u8,
     truncated: bool,
     cancelled: bool,
+    /// The runner's report: tokens and wall-clock ms of the prompt and the
+    /// generation (src/metrics.zig keeps the totals; the model service's
+    /// `/metrics` serves them).
+    prompt_tokens: u64 = 0,
+    gen_tokens: u64 = 0,
+    prompt_ms: u64 = 0,
+    gen_ms: u64 = 0,
 };
 
 pub const Error = error{ LocalFailed, OutOfMemory };
+
+/// Where the model runner keeps its remembered split plans (the app sets
+/// it at startup from GhostPen's config dir; null: plan from scratch).
+pub var plan_path: ?[]const u8 = null;
 
 /// The model load may read gigabytes from a cold disk.
 const load_timeout_ms = 10 * 60 * 1000;
@@ -180,6 +192,7 @@ pub fn chat(
     var ccfg = chatConfig(cfg);
     if (req.ctx) |n| ccfg.ctx = @max(ccfg.ctx, n);
     const r = try ensure(io, s, gpa, arena, ccfg, diag);
+    metrics.requestStarted(io, std.fs.path.basename(ccfg.model), r.gpu, r.ctx);
     const id = r.next_id;
     r.next_id += 1;
     const image_b64: []const u8 = if (req.image) |img| blk: {
@@ -210,9 +223,18 @@ pub fn chat(
         s.stdin_mutex.lockUncancelable(io);
         defer s.stdin_mutex.unlock(io);
         const w = &r.stdin.interface;
-        w.writeAll(line_out) catch return lost(io, s, arena, diag);
-        w.writeByte('\n') catch return lost(io, s, arena, diag);
-        w.flush() catch return lost(io, s, arena, diag);
+        w.writeAll(line_out) catch {
+            metrics.requestFailed(io);
+            return lost(io, s, arena, diag);
+        };
+        w.writeByte('\n') catch {
+            metrics.requestFailed(io);
+            return lost(io, s, arena, diag);
+        };
+        w.flush() catch {
+            metrics.requestFailed(io);
+            return lost(io, s, arena, diag);
+        };
     }
 
     // Too slow: ask it to stop, then kill it.
@@ -236,6 +258,7 @@ pub fn chat(
     while (true) {
         const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse {
             deadline.finish();
+            metrics.requestFailed(io);
             if (deadline.timed_out.load(.acquire)) {
                 stop(io, s);
                 diag.* = "The built-in model took too long and was stopped.";
@@ -249,7 +272,19 @@ pub fn chat(
         if (msg.@"error") |e| {
             diag.* = try arena.dupe(u8, e);
             r.last_used = .now(io, .awake);
+            metrics.requestFailed(io);
             return error.LocalFailed;
+        }
+        if (!msg.done and msg.delta == null) {
+            // The runner's progress line (the prompt's size, then the speed
+            // while generating): only the in-flight stats change.
+            metrics.requestProgress(io, .{
+                .prompt_tokens = msg.prompt_tokens,
+                .prompt_ms = msg.prompt_ms,
+                .gen_tokens = msg.gen_tokens,
+                .gen_ms = msg.gen_ms,
+            });
+            continue;
         }
         if (msg.delta) |d| {
             try text.appendSlice(arena, d);
@@ -264,13 +299,27 @@ pub fn chat(
                     msg.gen_tokens, msg.gen_ms, @as(f64, @floatFromInt(msg.gen_tokens)) * 1000.0 / @as(f64, @floatFromInt(msg.gen_ms)), msg.prompt_tokens, msg.prompt_ms,
                 });
             }
+            metrics.requestDone(io, std.Io.Clock.real.now(io).toSeconds(), .{
+                .prompt_tokens = msg.prompt_tokens,
+                .gen_tokens = msg.gen_tokens,
+                .prompt_ms = msg.prompt_ms,
+                .gen_ms = msg.gen_ms,
+            });
             if (msg.cancelled and deadline.timed_out.load(.acquire)) {
                 diag.* = "The built-in model took too long (over 15 minutes) and was stopped.";
                 return error.LocalFailed;
             }
             deadline.finish(); // before a keep_alive of 0 kills the runner
             keepAlive(io, s, r, req.keep_alive_ms);
-            return .{ .text = text.items, .truncated = msg.truncated, .cancelled = msg.cancelled };
+            return .{
+                .text = text.items,
+                .truncated = msg.truncated,
+                .cancelled = msg.cancelled,
+                .prompt_tokens = msg.prompt_tokens,
+                .gen_tokens = msg.gen_tokens,
+                .prompt_ms = msg.prompt_ms,
+                .gen_ms = msg.gen_ms,
+            };
         }
     }
 }
@@ -444,6 +493,7 @@ fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator,
     if (cfg.embed_model) |m| try argv.appendSlice(arena, &.{ "--embed-model", m });
     try argv.appendSlice(arena, &.{ "--kv-type", cfg.kv_type, "--flash-attn", cfg.flash_attn });
     if (!cfg.gpu) try argv.append(arena, "--cpu");
+    if (cfg.gpu) if (plan_path) |p| try argv.appendSlice(arena, &.{ "--plans", p });
     if (cfg.moe_pct > 0) try argv.appendSlice(arena, &.{ "--moe-pct", try std.fmt.allocPrint(arena, "{d}", .{cfg.moe_pct}) });
     var child = std.process.spawn(io, .{
         .argv = argv.items,
@@ -506,7 +556,7 @@ fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator,
 
     // Wait for the ready line (the model loads in the helper); anything else
     // a GPU backend prints on stdout first is skipped.
-    const Ready = struct { ready: bool = false, ctx: u32 = 0, gpu: ?[]const u8 = null };
+    const Ready = struct { ready: bool = false, ctx: u32 = 0, gpu: ?[]const u8 = null, load_ms: u64 = 0 };
     var deadline: Deadline = .{ .child = &r.child, .kill_after_ms = load_timeout_ms };
     deadline.start(io);
     const ready: Ready = while (true) {
@@ -533,6 +583,7 @@ fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator,
     r.ctx = ready.ctx;
     r.gpu = gpa.dupe(u8, ready.gpu orelse "CPU") catch &.{};
     s.is_loaded.store(true, .release);
+    if (cfg.model.len > 0) metrics.modelLoaded(io, std.fs.path.basename(cfg.model), r.gpu, r.ctx, ready.load_ms);
     if (cfg.model.len > 0)
         log.info("built-in model loaded: {s} ({d}-token context, {s})", .{ std.fs.path.basename(cfg.model), r.ctx, if (r.gpu.len > 0) r.gpu else "CPU" })
     else

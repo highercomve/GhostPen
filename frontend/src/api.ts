@@ -142,6 +142,21 @@ export const processAiAction = (action: string, targetLang: string | null, level
 /** Freeform instruction (menu prompt bar) applied to the selection, pasted back like an action. */
 export const processAiCustom = (instruction: string, show = false) =>
   invoke<ProcessResult>("process_ai_custom", { instruction, show });
+/** Reads the URL, summarizes it and opens the summary window (the answer streams there).
+ *  `level` is the summary's depth (web_page.Level): "brief", "standard" or "detailed". */
+export const summarizeLink = (url: string, level?: string) => invoke<void>("summarize_link", { url, level });
+/** The summarize-link flow's state: for the summary window's page to pick up what
+ * it missed while loading (its listeners attach after the first events). */
+export interface SummaryState {
+  state: string;
+  title: string;
+  chars: number;
+  message: string;
+  markdown: string;
+}
+export const summaryState = () => invoke<SummaryState>("summary_state");
+/** The clipboard's text, when there is any (the summary window's prefill). */
+export const clipboardText = () => invoke<string>("clipboard_text");
 /** Playground: transform text directly, no clipboard involved. */
 export const processText = (action: string, targetLang: string | null, level: Level, text: string) =>
   invoke<string>("process_text", { action, targetLang, level, text });

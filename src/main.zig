@@ -20,6 +20,7 @@ const dictation = @import("dictation.zig");
 const local_llm = @import("local_llm.zig");
 const llm_models = @import("llm_models.zig");
 const llm_helper = @import("llm_helper.zig");
+const web_page = @import("web_page.zig");
 const updates = @import("updates.zig");
 
 const App = oriel.App;
@@ -154,6 +155,10 @@ pub const Events = struct {
     @"ghostpen://dictation": struct { text: []const u8, state: []const u8 },
     @"ghostpen://dictation-level": f32,
     @"ghostpen://dictation-show": struct {},
+    /// What a menu action is doing (to the menu): loading the built-in
+    /// model, reading the text, writing (tokens so far), or waiting for a
+    /// connected service.
+    @"ghostpen://ai-progress": AiProgress,
     /// Local model downloads (to the Settings window).
     @"ghostpen://llm-download": llm_models.Progress,
     /// Speech (whisper) model downloads (Settings).
@@ -231,6 +236,40 @@ fn localModelName(model: []const u8) []const u8 {
     return if (std.ascii.endsWithIgnoreCase(base, ".gguf")) base[0 .. base.len - ".gguf".len] else base;
 }
 
+// ---- the link summarizer ---------------------------------------------------------------
+
+/// The "Summarize link" flow (src/web_page.zig): what gets reported to the
+/// summary window. `markdown` is everything streamed so far — a page that
+/// (re)opens mid-flow reads it here instead of the events it missed.
+pub const SummaryState = struct {
+    /// "fetching", "reading", "writing", "ready" or "error".
+    state: []const u8 = "",
+    /// The link (before fetching) or the page's title (after).
+    title: []const u8 = "",
+    /// The page's readable size: what the summary works from.
+    chars: usize = 0,
+    /// The failure's phrase (state "error").
+    message: []const u8 = "",
+    markdown: []const u8 = "",
+};
+
+var summary_mutex: std.Io.Mutex = .init;
+var link_summary: SummaryState = .{};
+var summary_markdown: std.ArrayList(u8) = .empty;
+
+fn summarySet(state: []const u8, title: []const u8, chars: usize, message: []const u8) void {
+    summary_mutex.lockUncancelable(io);
+    defer summary_mutex.unlock(io);
+    link_summary = .{ .state = state, .title = title, .chars = chars, .message = message, .markdown = summary_markdown.items };
+    // The live update: the accumulating markdown travels separately.
+    App.emitTo("summary", "ghostpen://summary-status", .{
+        .state = link_summary.state,
+        .title = link_summary.title,
+        .chars = link_summary.chars,
+        .message = link_summary.message,
+    }) catch {};
+}
+
 // ---- AI helpers ------------------------------------------------------------------------
 
 fn parseLevel(level: ?[]const u8) ai.Level {
@@ -248,6 +287,59 @@ fn resolveAction(arena: std.mem.Allocator, s: Settings, action: []const u8, lang
         return .{ .system = c.prompt, .profile = profile };
     };
     return oriel.ipc.fail("Unknown action: {s}", .{action});
+}
+
+pub const AiProgress = struct {
+    /// "loading" (the built-in model into memory), "reading" (the prompt),
+    /// "writing" (the answer) or "waiting" (a connected service).
+    stage: []const u8,
+    model: []const u8,
+    tokens: u32 = 0,
+    tok_s: f32 = 0,
+};
+
+/// A menu action's completion, telling the menu how it goes
+/// (ghostpen://ai-progress). The built-in model streams, so the tokens are
+/// counted as they come; a connected service is one request.
+fn completeWithProgress(arena: std.mem.Allocator, req: ai.Request) ![]const u8 {
+    const local = req.profile.isLocal();
+    const model = if (local) localModelName(req.profile.model) else req.profile.name;
+    const first: []const u8 = if (!local) "waiting" else if (local_llm.loaded()) "reading" else "loading";
+    App.emitTo("main", "ghostpen://ai-progress", AiProgress{ .stage = first, .model = model }) catch {};
+    if (!local) return complete(arena, req);
+
+    const Counter = struct {
+        model: []const u8,
+        start: std.Io.Timestamp,
+        first_token: ?std.Io.Timestamp = null,
+        tokens: u32 = 0,
+        last_ms: i64 = -1000,
+
+        fn chunk(c: *@This(), _: []const u8) void {
+            const now = std.Io.Clock.awake.now(io);
+            if (c.first_token == null) c.first_token = now;
+            c.tokens += 1;
+            const ms = c.start.durationTo(now).toMilliseconds();
+            if (ms - c.last_ms < 120) return; // a few updates a second
+            c.last_ms = ms;
+            const writing_ms = c.first_token.?.durationTo(now).toMilliseconds();
+            const tok_s: f32 = if (writing_ms > 0) @as(f32, @floatFromInt(c.tokens)) * 1000 / @as(f32, @floatFromInt(writing_ms)) else 0;
+            App.emitTo("main", "ghostpen://ai-progress", AiProgress{ .stage = "writing", .model = c.model, .tokens = c.tokens, .tok_s = tok_s }) catch {};
+        }
+    };
+    var counter: Counter = .{ .model = model, .start = std.Io.Clock.awake.now(io) };
+    var diag: ai.Diag = .{};
+    const out = ai.completeStream(io, gpa, arena, req, &counter, Counter.chunk, &diag) catch |err| {
+        log.warn("AI request ({s} {s}) failed: {s}", .{ req.profile.name, req.profile.model, if (err == error.AiFailed) diag.message else @errorName(err) });
+        return switch (err) {
+            error.AiFailed => oriel.ipc.fail("{s}", .{diag.message}),
+            else => err,
+        };
+    };
+    const ms = counter.start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    log.info("AI request ({s} {s}): {d} chars in {d} ms", .{ req.profile.name, req.profile.model, out.len, ms });
+    if (std.mem.trim(u8, out, " \t\r\n").len == 0) log.warn("AI request returned only whitespace", .{});
+    return out;
 }
 
 fn complete(arena: std.mem.Allocator, req: ai.Request) ![]const u8 {
@@ -469,7 +561,7 @@ pub const Commands = struct {
         "captions_download_model", "dictation_start",      "captions_list_devices", "dictation_list_devices",
         "llm_models_status",       "llm_download_model",   "llm_delete_model",      "llm_unload",
         "menu_dismissed",          "update_check",         "update_install",        "whisper_models_status",
-        "whisper_download_model",  "whisper_delete_model",
+        "whisper_download_model",  "whisper_delete_model", "summarize_link",        "summary_state",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -496,6 +588,14 @@ pub const Commands = struct {
             error.AiFailed => oriel.ipc.fail("{s}", .{diag.message}),
             else => err,
         };
+    }
+
+    /// The clipboard's text, when there is any (the summary window's link
+    /// box prefills from it: the URL is usually just copied).
+    pub fn clipboard_text(arena: std.mem.Allocator) ![]const u8 {
+        const t = oriel.clipboard.readText(gpa) catch return "";
+        defer gpa.free(t);
+        return arena.dupe(u8, t);
     }
 
     pub fn get_status(arena: std.mem.Allocator) !Status {
@@ -581,7 +681,7 @@ pub const Commands = struct {
         const text = try selectionText(arena);
         log.info("action {s}{s}{s} ({s}) on {d} chars", .{ args.action, if (args.targetLang != null) " → " else "", args.targetLang orelse "", args.level orelse "balanced", text.len });
         const r = try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
-        const output = try complete(arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = text } });
+        const output = try completeWithProgress(arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = text } });
         if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }
@@ -592,7 +692,7 @@ pub const Commands = struct {
         const s = try shared.get(io, arena);
         const text = try selectionText(arena);
         const system = try ai.instructionPrompt(arena, args.instruction);
-        const output = try complete(arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } });
+        const output = try completeWithProgress(arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = text } });
         if (args.show or s.showResults()) return showResult(output);
         return deliver(output, s);
     }
@@ -623,6 +723,75 @@ pub const Commands = struct {
         App.emitTo("playground", "ghostpen://done", final) catch {};
     }
 
+    // ---- Summarize a link ----
+
+    /// The summary window's page asks for the flow's state when it loads:
+    /// its listeners attach after the first event was broadcast, so here is
+    /// what happened so far (the stage, the page title and the markdown).
+    pub fn summary_state(arena: std.mem.Allocator) !SummaryState {
+        summary_mutex.lockUncancelable(io);
+        defer summary_mutex.unlock(io);
+        var out = link_summary;
+        out.markdown = arena.dupe(u8, summary_markdown.items) catch "";
+        return out;
+    }
+
+    /// Read a URL (menu selection), summarize its document with the active
+    /// profile and stream the answer to the summary window as Markdown.
+    /// Failures of the page or the model report to the window, not the menu
+    /// (the menu is already behind the window the user is looking at).
+    pub fn summarize_link(arena: std.mem.Allocator, args: struct { url: []const u8, level: ?[]const u8 = null }) !void {
+        try acquireBusy();
+        defer busy.store(false, .release);
+        const url = std.mem.trim(u8, args.url, " \t\r\n");
+        if (url.len == 0) return oriel.ipc.fail("No link to summarize.", .{});
+
+        {
+            summary_mutex.lockUncancelable(io);
+            defer summary_mutex.unlock(io);
+            link_summary = .{ .state = "fetching", .title = url };
+            summary_markdown.clearRetainingCapacity();
+        }
+        showWindow("summary", true);
+
+        var diag: web_page.Diag = .{};
+        const page = web_page.read(io, gpa, arena, url, &diag) catch |err| blk: {
+            const msg: []const u8 = switch (err) {
+                error.AiFailed => diag.message,
+                error.OutOfMemory => "Out of memory reading the page.",
+            };
+            summarySet("error", url, 0, msg);
+            log.warn("summarize: {s}: {s}", .{ url, msg });
+            break :blk null;
+        };
+        const pd = page orelse return;
+        summarySet("reading", pd.title, pd.text.len, "");
+        log.info("summarize: {s}: {s} ({d} chars)", .{ url, pd.title, pd.text.len });
+
+        const Emit = struct {
+            fn chunk(_: void, delta: []const u8) void {
+                summary_mutex.lockUncancelable(io);
+                summary_markdown.appendSlice(gpa, delta) catch {};
+                link_summary.markdown = summary_markdown.items;
+                summary_mutex.unlock(io);
+                App.emitTo("summary", "ghostpen://summary-chunk", delta) catch {};
+            }
+        };
+        summarySet("writing", pd.title, pd.text.len, "");
+        var ai_diag: ai.Diag = .{};
+        _ = ai.completeStream(io, gpa, arena, .{
+            .profile = (try shared.get(io, arena)).activeProfile(),
+            .system = try web_page.summaryPrompt(arena, web_page.parseLevel(args.level)),
+            .user = .{ .text = try pd.prompt(arena) },
+        }, {}, Emit.chunk, &ai_diag) catch |err| {
+            const msg: []const u8 = if (err == error.AiFailed) ai_diag.message else @errorName(err);
+            summarySet("error", pd.title, pd.text.len, msg);
+            log.warn("summarize: the AI request failed: {s}", .{msg});
+            return;
+        };
+        summarySet("ready", pd.title, pd.text.len, "");
+    }
+
     // ---- built-in models (Settings → Built-in models) ----
 
     pub const LlmStatus = struct {
@@ -637,10 +806,10 @@ pub const Commands = struct {
         // The context each model was trained for (metadata only): what the
         // context window may be raised to.
         for (st.models) |*m| if (m.path.len > 0) {
-            m.ctx_max = llm_helper.trainedCtx(arena, m.path);
+            m.ctx_max = llm_helper.trainedCtx(io, m.path);
         };
         for (st.others) |*o| {
-            o.ctx_max = llm_helper.trainedCtx(arena, o.path);
+            o.ctx_max = llm_helper.trainedCtx(io, o.path);
         }
         return .{
             .status = st,
@@ -830,6 +999,8 @@ fn onTrayMenu(id: []const u8, _: ?bool) void {
         captions.open();
     } else if (eql(u8, id, "playground")) {
         showWindow("playground", false);
+    } else if (eql(u8, id, "summary")) {
+        showWindow("summary", false);
     } else if (eql(u8, id, "settings")) {
         showWindow("settings", false);
     } else if (eql(u8, id, "quit")) {
@@ -852,6 +1023,8 @@ fn handleArgs(args: []const []const u8) void {
             showWindow("settings", false);
         } else if (eql(u8, a, "--playground")) {
             showWindow("playground", false);
+        } else if (eql(u8, a, "--summary")) {
+            showWindow("summary", false);
         }
     }
 }
@@ -870,6 +1043,7 @@ fn setup() !void {
     const windows = [_]App.WindowOptions{
         .{ .label = "settings", .title = "GhostPen Settings", .url = "index.html#/settings", .width = 540, .height = 680, .visible = false, .hide_on_close = true },
         .{ .label = "playground", .title = "GhostPen Playground", .url = "index.html#/playground", .width = 640, .height = 620, .visible = false, .hide_on_close = true },
+        .{ .label = "summary", .title = "GhostPen Summary", .url = "index.html#/summary", .width = 780, .height = 850, .visible = false, .hide_on_close = true },
         .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 520, .height = 200, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true },
         .{ .label = "captions", .title = "GhostPen Captions", .url = "index.html#/captions", .width = 900, .height = 170, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
     };
@@ -884,6 +1058,7 @@ fn setup() !void {
             .{ .item = .{ .id = "show", .label = "Show menu" } },
             .{ .item = .{ .id = "dictate", .label = "Dictation" } },
             .{ .item = .{ .id = "captions", .label = "Captions" } },
+            .{ .item = .{ .id = "summary", .label = "Summarize a link" } },
             .{ .item = .{ .id = "playground", .label = "Playground" } },
             .{ .item = .{ .id = "settings", .label = "Settings" } },
             .separator,
@@ -938,6 +1113,10 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len > 1 and std.mem.eql(u8, args[1], "--whisper-helper"))
         return @import("whisper_helper.zig").main(io, gpa, args[2..]);
     environ_map = init.environ_map;
+    // The LLM runner remembers its last successful split per model+settings
+    // in GhostPen's config (~/.config/ghostpen/llm-plans.json): a model swap
+    // doesn't re-run the whole plan ladder on every load.
+    local_llm.plan_path = llm_models.configFile(init.arena.allocator(), init.environ_map, "llm-plans.json");
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
     @import("models.zig").helper_exe = self_exe;
     ai.local_resolver = &resolveLocal;

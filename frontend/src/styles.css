@@ -69,7 +69,14 @@ kbd {
   justify-content: space-between;
 }
 
-.brand { font-weight: 700; letter-spacing: 0.3px; }
+/* The wordmark never splits: WebKitGTK can hyphenate a squeezed flex item
+   (a break opportunity drops its min-content width), so pin the wrap. */
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  hyphens: none;
+}
 
 .icon-btn {
   background: transparent;
@@ -346,6 +353,8 @@ kbd {
 }
 .state.result, .state.error { justify-content: flex-start; align-items: stretch; }
 .state-label { font-weight: 600; }
+.state-detail { color: var(--muted); font-size: 12px; max-width: 90%; }
+.state-time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; opacity: 0.8; }
 .state-label.ok { color: var(--ok); }
 .state-label.bad { color: var(--danger); }
 .hint { font-size: 12px; color: var(--muted); }
@@ -662,7 +671,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   .settings .llm-actions { flex-wrap: wrap; width: 100%; }
 }
 
-.head-btns { display: flex; gap: 2px; }
+.head-btns { display: flex; gap: 2px; flex: none; }
 
 /* ---------- Intensity level segmented control ---------- */
 
@@ -1083,4 +1092,197 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .update-box {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
   margin: 12px 0; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-soft);
+}
+
+/* ---------- Summary (the link reader) ---------- */
+
+.summary {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: none;
+}
+
+/* The link box: type or paste a URL, hit Summarize (or Enter). */
+.summary-bar {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.summary-url {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 13px;
+}
+.summary-url:focus { outline: none; border-color: var(--accent); }
+.summary-url:disabled { opacity: 0.6; }
+.summary-go {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 9px 14px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.summary-go:hover:not(:disabled) { filter: brightness(1.08); }
+.summary-go:disabled { opacity: 0.45; cursor: default; }
+
+/* The depth picker: the app's segmented control, one row with the link box. */
+.summary-level { flex: none; }
+.summary-level .seg-btn { padding: 6px 10px; }
+.summary-go-icon { width: 14px; height: 14px; }
+.summary-go-spinner { width: 13px; height: 13px; border-width: 2px; }
+.summary-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  font-size: 14px;
+  hyphens: none;
+  white-space: nowrap;
+}
+.summary-brand-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+}
+.summary-head .icon-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.summary-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 22px 26px;
+  min-height: 0;
+}
+
+.summary-status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 2px 20px;
+}
+.summary-status .spinner {
+  width: 22px;
+  height: 22px;
+  border-width: 3px;
+  flex: none;
+}
+.summary-status-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.summary-stage { font-weight: 600; }
+.summary-title {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.summary-chars { color: var(--muted); font-size: 12px; }
+
+.summary-error {
+  border: 1px solid var(--danger);
+  background: var(--danger-soft, rgba(220, 38, 38, 0.08));
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-top: 14px;
+}
+.summary-error-title { font-weight: 600; margin: 0 0 6px; }
+
+/* The rendered summary: one centered readable column in the window's width. */
+.md {
+  line-height: 1.65;
+  font-size: 14px;
+  min-width: 0;
+  max-width: 62ch;
+  margin-inline: auto;
+}
+.md > :first-child { margin-top: 0; }
+.md h1, .md h2, .md h3, .md h4 {
+  line-height: 1.3;
+  margin: 26px 0 10px;
+}
+.md h1 { font-size: 1.5em; margin-top: 0.2em; }
+.md h2 {
+  font-size: 1.18em;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+.md h3 { font-size: 1.05em; }
+.md h4 { font-size: 1em; }
+.md p { margin: 10px 0; }
+.md ul, .md ol {
+  margin: 10px 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.md li::marker { color: var(--accent); }
+.md blockquote {
+  margin: 14px 0;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-soft);
+  border-radius: 0 10px 10px 0;
+  color: var(--text);
+  font-style: italic;
+}
+.md blockquote p { margin: 0; }
+.md > blockquote { margin-left: 2px; }
+.md code {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 5px;
+  font-size: 0.92em;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.md pre {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+.md pre code { background: none; border: none; padding: 0; }
+.md a { color: var(--accent); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md strong { font-weight: 700; }
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 20px 0;
 }
