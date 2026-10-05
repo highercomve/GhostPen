@@ -4,13 +4,26 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-10-05
+
 ### Added
 
+- The link summarizer: paste a URL in the summary window and GhostPen fetches the page, extracts the readable text (no headless browser) and streams the summary as Markdown with the active AI profile.
+- Three summary depths in the summary window's picker: Brief (a TL;DR paragraph plus a few key points), Standard, and Detailed (fuller sections, more quotes, the document's numbers kept).
+- The model service's `GET /metrics`: the built-in model's requests, tokens and wall-clock of prompt and generation, tokens/s of the totals, and the last request and the one running now. Chat completions honor `stream_options.include_usage`.
+- The built-in runner remembers the split that loaded (`~/.config/ghostpen/llm-plans.json`) and reuses it across restarts; forgotten when the machine's memory changed underneath (the load fails).
 - `-Dnative_ui` (experimental, Linux): the windows drawn with native GTK widgets instead of a WebView, through Oriel's native renderer; `NATIVE_UI=1 scripts/install-local.sh` builds it. Needs an Oriel with the native renderer's fixes (main after v0.7.0).
 
 ### Fixed
 
+- The built-in model loaded, then the runner died: saving the remembered plan crashed it on every successful GPU load ("integer does not fit in destination type"). Flash attention's "auto" is the enum's -1, which `@intCast` to an unsigned type refuses.
+- The summary's text column is centered in the window instead of hugging the left edge.
+- Settings → Built-in models reads the models' trained context from the GGUF header directly, without loading a model.
 - The menu window is transparent: only its rounded panel is drawn, so the corners show what's behind it.
+
+### Build
+
+- Oriel v0.9.2.
 
 ## [0.2.19] - 2026-10-01
 
@@ -151,6 +164,8 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 - Added built-in GGUF models with CPU fallback and the `ghostpen-cli` command-line tool.
 - Added Linux layer-shell overlays, platform permissions, the website, and release packages on Oriel v0.6.0.
 
+[0.2.20]: https://github.com/highercomve/GhostPen/compare/v0.2.19...v0.2.20
+[0.2.19]: https://github.com/highercomve/GhostPen/compare/v0.2.18...v0.2.19
 [0.2.18]: https://github.com/highercomve/GhostPen/compare/v0.2.17...v0.2.18
 [0.2.17]: https://github.com/highercomve/GhostPen/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/highercomve/GhostPen/compare/v0.2.15...v0.2.16
