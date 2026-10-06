@@ -282,7 +282,7 @@ export default function Settings() {
   return (
     <div className="settings">
       <div className="settings-shell">
-        <header className="settings-header">
+        <header className="settings-header" data-oriel-drag-region>
           <div>
             <span className="settings-eyebrow">GhostPen</span>
             <h1>Settings</h1>

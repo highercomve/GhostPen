@@ -81,7 +81,7 @@ export default function Playground() {
 
   return (
     <div className="playground">
-      <header className="pg-head">
+      <header className="pg-head" data-oriel-drag-region>
         <h1>Playground</h1>
         {status && (
           <span className="dest">

@@ -1031,7 +1031,23 @@ fn handleArgs(args: []const []const u8) void {
 
 var launch_args: []const []const u8 = &.{};
 
+/// Oriel currently maps focus_on_show to exclusive layer-shell focus. The main
+/// window has no config override, so opt it into on-demand focus before showing
+/// it: clicking another app must release the keyboard while the menu stays open.
+fn configureMenuFocus() void {
+    if (comptime builtin.os.tag != .linux) return;
+    const w = App.getWindow("main") orelse return;
+    var lib = std.DynLib.open("libgtk4-layer-shell.so.0") catch return;
+    defer lib.close();
+    const LayerWindow = *const fn (*anyopaque) callconv(.c) c_int;
+    const SetKeyboardMode = *const fn (*anyopaque, c_int) callconv(.c) void;
+    const is_layer = lib.lookup(LayerWindow, "gtk_layer_is_layer_window") orelse return;
+    const set_mode = lib.lookup(SetKeyboardMode, "gtk_layer_set_keyboard_mode") orelse return;
+    if (is_layer(w.handle.gtk_window) != 0) set_mode(w.handle.gtk_window, 2); // ON_DEMAND
+}
+
 fn setup() !void {
+    configureMenuFocus();
     shared.load(io, gpa);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1044,7 +1060,7 @@ fn setup() !void {
         .{ .label = "settings", .title = "GhostPen Settings", .url = "index.html#/settings", .width = 540, .height = 680, .visible = false, .hide_on_close = true },
         .{ .label = "playground", .title = "GhostPen Playground", .url = "index.html#/playground", .width = 640, .height = 620, .visible = false, .hide_on_close = true },
         .{ .label = "summary", .title = "GhostPen Summary", .url = "index.html#/summary", .width = 780, .height = 850, .visible = false, .hide_on_close = true },
-        .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 520, .height = 200, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true },
+        .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 520, .height = 200, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
         .{ .label = "captions", .title = "GhostPen Captions", .url = "index.html#/captions", .width = 900, .height = 170, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
     };
     for (windows) |w| App.registerWindow(w) catch |err| log.err("window {s}: {s}", .{ w.label, @errorName(err) });

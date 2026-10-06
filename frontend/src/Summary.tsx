@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "./icons";
 import { cancelAi, clipboardText, copyText, summarizeLink, summaryState } from "./api";
 import { listen } from "./events";
@@ -36,7 +36,32 @@ const LEVELS: [string, string][] = [
   ["detailed", "Detailed"],
 ];
 
+interface ReaderSettings {
+  size: number;
+  font: "serif" | "sans";
+  spacing: "comfortable" | "compact";
+}
+
+const READER_DEFAULTS: ReaderSettings = { size: 17, font: "serif", spacing: "comfortable" };
+
+function loadReaderSettings(): ReaderSettings {
+  try {
+    const saved = JSON.parse(localStorage.getItem("ghostpen-summary-reader") || "null");
+    return {
+      size: typeof saved?.size === "number" && Number.isFinite(saved.size) ? Math.max(14, Math.min(24, saved.size)) : 17,
+      font: saved?.font === "sans" ? "sans" : "serif",
+      spacing: saved?.spacing === "compact" ? "compact" : "comfortable",
+    };
+  } catch {
+    return READER_DEFAULTS;
+  }
+}
+
 export default function Summary() {
+  const [reader, setReader] = useState<ReaderSettings>(loadReaderSettings);
+  useEffect(() => {
+    try { localStorage.setItem("ghostpen-summary-reader", JSON.stringify(reader)); } catch { /* Storage may be unavailable. */ }
+  }, [reader]);
   const [url, setUrl] = useState("");
   // The summary's depth (web_page.Level): what the picker picks, the next
   // run summarizes with.
@@ -138,14 +163,19 @@ export default function Summary() {
   };
 
   return (
-    <div className="summary">
-      <header className="summary-head">
-        <span className="summary-brand">
-          <Icon name="link" className="summary-brand-icon" />
-          Summary
-        </span>
+    <div className={`summary ${html ? "has-content" : ""}`} style={{
+      "--reader-size": `${reader.size}px`,
+      "--reader-font": reader.font === "serif" ? 'Georgia, "Times New Roman", serif' : '"Trebuchet MS", sans-serif',
+      "--reader-leading": reader.spacing === "comfortable" ? 1.85 : 1.55,
+    } as CSSProperties}>
+      <header className="summary-head" data-oriel-drag-region>
+        <div className="summary-heading">
+          <span className="summary-eyebrow"><Icon name="link" /> GhostPen / Link reader</span>
+          <h1>Summary<span className="summary-heading-dot">.</span></h1>
+          <p>A little less reading. A lot more understanding.</p>
+        </div>
         <button
-          className={`icon-btn ${copied ? "done" : ""}`}
+          className={`summary-copy ${copied ? "done" : ""}`}
           title="Copy the whole summary (Markdown)"
           disabled={!markdown}
           onClick={async () => {
@@ -163,51 +193,90 @@ export default function Summary() {
         </button>
       </header>
 
-      <form
-        className="summary-bar"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void go();
-        }}
-      >
-        <input
-          className="summary-url"
-          type="url"
-          placeholder="https://…"
-          value={url}
-          disabled={running}
-          spellCheck={false}
-          onChange={(e) => setUrl(e.target.value)}
-        />
-        <div className="seg summary-level" role="group" aria-label="Summary depth">
-          {LEVELS.map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              className={`seg-btn ${level === id ? "active" : ""}`}
+      <details className="summary-source" open={!html}>
+        <summary hidden={!html}><Icon name="link" /> Summarize another link <span>+</span></summary>
+        <form
+          className="summary-bar"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void go();
+          }}
+        >
+          <label className="summary-label" htmlFor="summary-url">Start with a link</label>
+          <div className="summary-url-field">
+            <Icon name="link" />
+            <input
+              id="summary-url"
+              className="summary-url"
+              type="url"
+              placeholder="Paste an article or webpage URL…"
+              value={url}
               disabled={running}
-              onClick={() => setLevel(id)}
-            >
-              {label}
+              spellCheck={false}
+              onChange={(e) => setUrl(e.target.value)}
+            />
+          </div>
+          <div className="summary-options">
+            <div className="summary-depth">
+              <span className="summary-depth-label">How much detail?</span>
+              <div className="summary-level" role="group" aria-label="Summary depth">
+                {LEVELS.map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={`summary-level-btn ${level === id ? "active" : ""}`}
+                    aria-pressed={level === id}
+                    disabled={running}
+                    onClick={() => setLevel(id)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button className="summary-go" type="submit" disabled={!canGo}>
+              {running ? <span className="spinner summary-go-spinner" /> : <Icon name="send" className="summary-go-icon" />}
+              {running ? "Summarizing…" : "Summarize"}
             </button>
-          ))}
-        </div>
-        <button className="summary-go" type="submit" disabled={!canGo}>
-          {running ? <span className="spinner summary-go-spinner" /> : <Icon name="send" className="summary-go-icon" />}
-          Summarize
-        </button>
-      </form>
+          </div>
+        </form>
+      </details>
 
+      <div className="summary-reader-bar" aria-label="Reading preferences">
+        <details className="summary-reader-settings">
+          <summary><Icon name="concise" /> Reading settings</summary>
+          <div className="summary-reader-options">
+            <label>Typeface
+              <select value={reader.font} onChange={(e) => setReader((r) => ({ ...r, font: e.target.value as ReaderSettings["font"] }))}>
+                <option value="serif">Serif</option><option value="sans">Sans serif</option>
+              </select>
+            </label>
+            <label>Line spacing
+              <select value={reader.spacing} onChange={(e) => setReader((r) => ({ ...r, spacing: e.target.value as ReaderSettings["spacing"] }))}>
+                <option value="comfortable">Relaxed</option><option value="compact">Compact</option>
+              </select>
+            </label>
+            <button className="summary-reader-reset" onClick={() => setReader(READER_DEFAULTS)}>Reset</button>
+          </div>
+        </details>
+        <div className="summary-font-size" role="group" aria-label="Font size">
+          <button aria-label="Decrease font size" disabled={reader.size <= 14} onClick={() => setReader((r) => ({ ...r, size: Math.max(14, r.size - 1) }))}>A<span>−</span></button>
+          <output aria-live="polite" aria-label="Current font size">{reader.size}px</output>
+          <button aria-label="Increase font size" disabled={reader.size >= 24} onClick={() => setReader((r) => ({ ...r, size: Math.min(24, r.size + 1) }))}>A<span>+</span></button>
+        </div>
+      </div>
       <main className="summary-body" ref={bodyRef}>
         {state.state === "error" ? (
-          <div className="summary-error">
-            <p className="summary-error-title">{state.message || "The summary failed."}</p>
+          <div className="summary-error" role="alert">
+            <span className="summary-eyebrow">Let's try again</span>
+            <h2>We couldn't read this link.</h2>
+            <p className="summary-error-title">{state.message || "Check the URL and try summarizing again."}</p>
             {state.title ? <p className="hint">{state.title}</p> : null}
           </div>
         ) : (
           <>
             {running && (
-              <div className="summary-status">
+              <div className="summary-status" role="status" aria-live="polite">
                 <div className="spinner" />
                 <div className="summary-status-text">
                   <span className="summary-stage">{STAGE[state.state] || "Working…"}</span>
@@ -216,16 +285,37 @@ export default function Summary() {
                     <span className="summary-chars">{state.chars.toLocaleString()} characters read</span>
                   ) : null}
                 </div>
+                <button className="summary-stop" onClick={() => cancelAi().catch(() => {})}>Stop</button>
               </div>
             )}
             {html ? (
-              <article className="md" dangerouslySetInnerHTML={{ __html: html }} />
+              <div className="summary-paper">
+                <div className="summary-paper-meta">
+                  <span className="summary-eyebrow">The essentials</span>
+                  <span>{running ? "Writing…" : "Ready to read"}</span>
+                </div>
+                {state.title && <h2 className="summary-document-title">{state.title}</h2>}
+                <article className="md" dangerouslySetInnerHTML={{ __html: html }} />
+              </div>
             ) : running ? null : (
-              <p className="hint summary-empty">Paste a link above and hit Summarize: GhostPen reads the page and writes the summary here.</p>
+              <div className="summary-empty">
+                <div className="summary-illustration" aria-hidden="true">
+                  <div className="summary-mini-page"><span /><i /><i /><i /><b /><i /><i /></div>
+                  <span className="summary-illustration-badge"><Icon name="concise" /></span>
+                </div>
+                <span className="summary-eyebrow">From the page to the point</span>
+                <h2>Big ideas. Less noise.</h2>
+                <p>Drop in a link and we'll bring the key ideas,<br className="summary-empty-break" /> useful details, and takeaways into focus.</p>
+                <div className="summary-empty-note"><Icon name="link" /> Articles, essays, and webpages</div>
+              </div>
             )}
           </>
         )}
       </main>
+      <footer className="summary-footer">
+        <span><span className={`summary-status-dot ${running ? "busy" : ""}`} />{running ? "Making sense of your source" : markdown ? "Your reading, distilled" : "A fresh perspective starts here"}</span>
+        <span>{running ? "Esc to stop" : "Made with GhostPen"}</span>
+      </footer>
     </div>
   );
 }

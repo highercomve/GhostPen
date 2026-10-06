@@ -4,6 +4,20 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ## [Unreleased]
 
+## [0.2.21] - 2026-10-06
+
+### Changed
+
+- Redesigned Summary as a reader with warm paper and dark green themes, clearer typography, and a link form that collapses once the summary is ready.
+- Added saved reading preferences: 14–24px font sizes, serif or sans-serif text, relaxed or compact line spacing, and a reset control.
+- Refined the empty, loading, and error states and added a Stop button while summarizing.
+
+### Fixed
+
+- The menu, Settings, Playground, and Summary headers can be dragged to move their windows.
+- Wayland menu and dictation overlays use on-demand keyboard focus so other applications remain usable while the overlays are open.
+- Restored the Windows installer upload and updater payload in the release workflow.
+
 ## [0.2.20] - 2026-10-05
 
 ### Added
@@ -164,6 +178,7 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 - Added built-in GGUF models with CPU fallback and the `ghostpen-cli` command-line tool.
 - Added Linux layer-shell overlays, platform permissions, the website, and release packages on Oriel v0.6.0.
 
+[0.2.21]: https://github.com/highercomve/GhostPen/compare/v0.2.20...v0.2.21
 [0.2.20]: https://github.com/highercomve/GhostPen/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/highercomve/GhostPen/compare/v0.2.18...v0.2.19
 [0.2.18]: https://github.com/highercomve/GhostPen/compare/v0.2.17...v0.2.18

@@ -167,6 +167,16 @@ jobs:
           Add-Content $env:GITHUB_ENV "VULKAN_SDK=$root"
       - name: Package (setup.exe)
         run: oriel package -Dvulkan
+      # The raw executable is the in-app updater's Windows payload.
+      - name: Updater payload
+        shell: pwsh
+        run: |
+          oriel build -Dvulkan
+          Copy-Item zig-out/bin/ghostpen.exe zig-out/package/ghostpen-x86_64-windows.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          path: zig-out/package/*
 
   macos:
     runs-on: macos-latest

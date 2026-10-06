@@ -425,7 +425,7 @@ export default function Menu() {
 
   return (
     <div className="menu">
-      <header className="menu-head">
+      <header className="menu-head" data-oriel-drag-region>
         <span className="brand">GhostPen</span>
         <span className="head-btns">
           <button className="icon-btn" title="Playground" onClick={() => openPlayground()}>
