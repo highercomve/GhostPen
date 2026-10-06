@@ -165,36 +165,8 @@ jobs:
           }
           & "$root\Bin\glslc.exe" --version
           Add-Content $env:GITHUB_ENV "VULKAN_SDK=$root"
-      # On a tag, also the WinGet manifests for this setup.exe (the release
-      # URL it will have); the winget job submits them once it's published.
       - name: Package (setup.exe)
-        shell: bash
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then
-            oriel package -Dvulkan -Dwinget-url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          else
-            oriel package -Dvulkan
-          fi
-      # What the in-app updater installs on Windows: the exe itself (built
-      # the same way, or updates would replace the GPU build with a CPU one).
-      - name: Updater payload
-        shell: pwsh
-        run: |
-          oriel build -Dvulkan
-          Copy-Item zig-out/bin/ghostpen.exe zig-out/package/ghostpen-x86_64-windows.exe
-      - name: WinGet manifests
-        if: github.ref_type == 'tag'
-        uses: actions/upload-artifact@v4
-        with:
-          name: winget
-          path: zig-out/package/winget/*
-      - name: Remove the manifests from the release files
-        shell: bash
-        run: rm -rf zig-out/package/winget
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-windows
-          path: zig-out/package/*
+        run: oriel package -Dvulkan
 
   macos:
     runs-on: macos-latest
@@ -337,31 +309,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
-
-  # WinGet (`winget install Highercomve.GhostPen`): a pull request to
-  # microsoft/winget-pkgs with this release's manifests, once its setup.exe is
-  # downloadable. Needs the WINGET_TOKEN secret (a GitHub token with
-  # public_repo, for the fork and the pull request); skipped without it.
-  winget:
-    needs: [release]
-    if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
-    runs-on: windows-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: winget
-          path: winget
-      - name: Submit to winget-pkgs
-        shell: pwsh
-        env:
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
-        run: |
-          if (-not $env:WINGET_TOKEN) {
-            Write-Output "::warning::WINGET_TOKEN is not set: the WinGet manifests were not submitted."
-            exit 0
-          }
-          Get-ChildItem winget | ForEach-Object { Write-Output "== $($_.Name)"; Get-Content $_.FullName }
-          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          # The token through wingetcreate's environment variable, not argv.
-          $env:WINGET_CREATE_GITHUB_TOKEN = $env:WINGET_TOKEN
-          .\wingetcreate.exe submit --prtitle "GhostPen ${{ github.ref_name }}" winget
