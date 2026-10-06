@@ -306,6 +306,12 @@ jobs:
           # The container runs as root over a checkout owned by the runner:
           # without this git refuses the repository ("dubious ownership").
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # checkout fetches with --no-tags and maps the tag's commit into
+          # refs/tags/<tag> (+<sha>:refs/tags/<tag>): the annotated tag
+          # object itself is not in the clone, so the ref reads as "commit"
+          # and %(contents) would be the commit message. Fetch the tag
+          # ref's own object for the notes.
+          git fetch --no-tags --prune --depth=1 --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
           git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME" > release-notes.md
           test -s release-notes.md
