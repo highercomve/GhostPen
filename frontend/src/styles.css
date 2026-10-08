@@ -359,6 +359,8 @@ header[data-oriel-drag-region]:active { cursor: grabbing; }
   text-align: center;
 }
 .state.result, .state.error { justify-content: flex-start; align-items: stretch; }
+/* Left-aligned text reads well; the centered .state above is for loading. */
+.state.result { text-align: left; min-height: 0; }
 .state-label { font-weight: 600; }
 .state-detail { color: var(--muted); font-size: 12px; max-width: 90%; }
 .state-time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; opacity: 0.8; }
@@ -370,14 +372,26 @@ header[data-oriel-drag-region]:active { cursor: grabbing; }
   background: var(--bg-soft);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 200px;
+  /* Long results: fill the menu instead of the old fixed cap, and scroll.
+     min-height: 0 lets flexbox shrink the pre to the available room, so its
+     own overflow scrolls instead of pushing the box past the window. */
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
+  user-select: text;
+  cursor: text;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
   margin: 0;
 }
+/* Keep the buttons visible under long text: only the output scrolls. */
+.state.result .row { flex: none; }
 
 .row { display: flex; gap: 8px; align-items: center; }
 
@@ -1146,6 +1160,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .summary-heading-dot { color: var(--reader-accent); }
 .summary-heading p { margin: 0; color: var(--reader-muted); font-size: 12px; line-height: 1.5; }
 .summary-copy { display: flex; align-items: center; gap: 8px; flex: none; border: 1px solid var(--reader-line); background: transparent; color: var(--reader-ink); padding: 10px 13px; border-radius: 8px; font-size: 12px; cursor: pointer; }
+.summary-head-btns { display: flex; align-items: center; gap: 10px; flex: none; }
 .summary-copy:disabled { opacity: .4; cursor: default; }
 .summary-copy:hover:not(:disabled), .summary-copy.done { background: var(--reader-paper); border-color: var(--reader-accent); }
 .summary-bar { margin: 0 32px 18px; padding: 18px; background: var(--reader-paper); border: 1px solid var(--reader-line); border-radius: 12px; flex: none; }

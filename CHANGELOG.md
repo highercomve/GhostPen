@@ -4,6 +4,11 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ## [Unreleased]
 
+### Added
+
+- Shown results (Shift+action, or Settings → show) can now be pasted after reading: a Paste button (or Enter) sends the result to the clipboard and the app underneath; Copy keeps it on the clipboard only. Enter no longer needs Shift at run time — run an action with Shift to preview, decide later.
+- The result view reads better on long texts: the output fills the menu height with its own scrolling (the buttons stay visible), larger text and line height, selectable and with a thin scrollbar.
+
 ## [0.2.21] - 2026-10-06
 
 ### Changed

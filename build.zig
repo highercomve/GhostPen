@@ -29,8 +29,10 @@ pub fn build(b: *std.Build) void {
         .input = true,
         .clipboard = true,
         .whisper = true,
-        // The local model runner ("This computer" profiles; src/llm_helper.zig).
+        // Whisper and the local model runner ("This computer" profiles; src/llm_helper.zig).
         .llama = true,
+        // Text to speech (src/tts.zig, the built-in Kokoro voice).
+        .kokoro = true,
         // Images for vision models (their mmproj projector): Extract Text on Built-in profiles.
         .llama_mtmd = true,
         .audio_capture = true,
@@ -136,15 +138,16 @@ pub fn build(b: *std.Build) void {
     b.step("cli", "Run ghostpen-cli (pass arguments after --)").dependOn(&run_cli.step);
 
     // Unit tests of the app's own modules (AI client, settings, images).
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/tests.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "oriel", .module = dep.module("oriel") },
-            .{ .name = "zigimg", .module = zigimg },
-        },
-    }),
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "oriel", .module = dep.module("oriel") },
+                .{ .name = "zigimg", .module = zigimg },
+            },
+        }),
         // Recent glibc/GCC crt1.o needs LLD (Zig's own linker can't read its
         // .sframe); LLD can't link Mach-O, so macOS keeps Zig's linker.
         .use_llvm = true,

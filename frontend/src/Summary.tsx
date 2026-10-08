@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "./icons";
-import { cancelAi, clipboardText, copyText, summarizeLink, summaryState } from "./api";
+import { cancelAi, clipboardText, copyText, summarizeLink, summaryState, ttsSpeak, ttsStop, type TtsState } from "./api";
 import { listen } from "./events";
 import { renderMarkdown } from "./markdown";
 
@@ -14,6 +14,8 @@ interface SummaryState {
   chars: number;
   message: string;
   markdown: string;
+  /** The page's readable text (the read-aloud's whole-page source). */
+  page_text?: string;
 }
 
 const EMPTY: SummaryState = { state: "", title: "", chars: 0, message: "", markdown: "" };
@@ -75,14 +77,23 @@ export default function Summary() {
   const [html, setHtml] = useState("");
   const [copied, setCopied] = useState(false);
   const bodyRef = useRef<HTMLElement>(null);
+  // The built-in voice: the read-aloud controls below listen to its state.
+  const [voice, setVoice] = useState<TtsState>({ phase: "idle", message: "", progress: 0, voice: "" });
+  const pageTextRef = useRef("");
+  const voicePlaying = voice.phase === "playing" || voice.phase === "generating" || voice.phase === "downloading";
+  const speak = useCallback((text: string) => {
+    if (voicePlaying) ttsStop().catch(() => {});
+    else ttsSpeak(text, "", "", "").catch(() => {});
+  }, [voicePlaying]);
 
-  // The events, and the pickup for what the page missed while it loaded
+  // The events, and the pickup for what the page missedwhile it loaded
   // (listeners attach after the first status was broadcast).
   useEffect(() => {
     const ups: Promise<unknown>[] = [];
     ups.push(
       listen<SummaryState>("ghostpen://summary-status", (e) => {
         stateRef.current = e.payload;
+        if (e.payload.page_text !== undefined) pageTextRef.current = e.payload.page_text || "";
         setState(e.payload);
         // A fresh run resets the body (the picker-up never does: it only
         // fills a page that started empty).
@@ -94,8 +105,12 @@ export default function Summary() {
         setMarkdown((m) => m + e.payload);
       }),
     );
+    ups.push(
+      listen<TtsState>("ghostpen://tts-state", (e) => setVoice(e.payload)),
+    );
     summaryState()
       .then((s) => {
+        pageTextRef.current = s.page_text || "";
         if (!stateRef.current.state && s.state) {
           stateRef.current = s;
           setState(s);
@@ -174,23 +189,43 @@ export default function Summary() {
           <h1>Summary<span className="summary-heading-dot">.</span></h1>
           <p>A little less reading. A lot more understanding.</p>
         </div>
-        <button
-          className={`summary-copy ${copied ? "done" : ""}`}
-          title="Copy the whole summary (Markdown)"
-          disabled={!markdown}
-          onClick={async () => {
-            try {
-              await copyText(markdown);
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1600);
-            } catch {
-              /* ignore */
-            }
-          }}
-        >
-          <Icon name="copy" />
-          {copied ? "Copied" : "Copy"}
-        </button>
+        <div className="summary-head-btns">
+          <button
+            className={`summary-copy ${copied ? "done" : ""}`}
+            title="Copy the whole summary (Markdown)"
+            disabled={!markdown}
+            onClick={async () => {
+              try {
+                await copyText(markdown);
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1600);
+              } catch {
+                /* ignore */
+              }
+            }}
+          >
+            <Icon name="copy" />
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <button
+            className="summary-copy summary-speak"
+            title={voicePlaying ? "Stop the built-in voice" : "Read the summary through the built-in voice"}
+            disabled={!markdown && !voicePlaying}
+            onClick={() => speak(markdown)}
+          >
+            {voicePlaying ? "■ Stop" : "🔊 Read summary"}
+          </button>
+          {pageTextRef.current.trim().length > 0 && (
+            <button
+              className="summary-copy summary-speak"
+              title={voicePlaying ? "Stop the built-in voice" : "Read the whole page through the built-in voice"}
+              disabled={voicePlaying}
+              onClick={() => speak(pageTextRef.current.trim())}
+            >
+              {voicePlaying ? "■ Stop" : "🔊 Read page"}
+            </button>
+          )}
+        </div>
       </header>
 
       <details className="summary-source" open={!html}>

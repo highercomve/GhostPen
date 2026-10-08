@@ -14,6 +14,11 @@ import {
   getSelection,
   extractImageText,
   copyText,
+  pasteResult,
+  ttsSpeak,
+  ttsStop,
+  TtsState,
+  ttsState,
   processAiAction,
   processAiCustom,
   dismissMenu,
@@ -138,6 +143,8 @@ export default function Menu() {
 
   // Whether Shift is down (keys and clicks): Shift+action shows the result.
   const shiftHeld = useRef(false);
+  // The language the shown result came from (looks up the read-aloud's voice).
+  const resultVoiceLang = useRef<string>("");
   useEffect(() => {
     const track = (e: KeyboardEvent | MouseEvent) => {
       shiftHeld.current = e.shiftKey;
@@ -159,6 +166,7 @@ export default function Menu() {
       try {
         // Shift held (key or click): show the result here instead of pasting.
         const result = await processAiAction(action, targetLang, level, shiftHeld.current);
+        if (targetLang) resultVoiceLang.current = targetLang; else resultVoiceLang.current = "";
         setView({ kind: "result", result });
       } catch (e) {
         setView({ kind: "error", message: String(e) });
@@ -210,6 +218,61 @@ export default function Menu() {
       /* ignore */
     }
   }, [selection]);
+
+  // Paste a result that was shown (Shift+action, or the show setting): copy it to the
+  // clipboard and send Ctrl+V to the app underneath — the deliver flow a normal action runs.
+  const pasteShown = useCallback(async (output: string) => {
+    try {
+      await pasteResult(output);
+      setView({ kind: "menu" });
+    } catch (e) {
+      setView({ kind: "error", message: String(e) });
+    }
+  }, []);
+
+  // The built-in voice: its state lands here while the window is open.
+  const [voiceState, setVoiceState] = useState<TtsState>({ phase: "idle", message: "", progress: 0, voice: "" });
+  useEffect(() => {
+    ttsState().then(setVoiceState).catch(() => {});
+    const un = listen<TtsState>("ghostpen://tts-state", (e) => setVoiceState(e.payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+  // Read the shown result through the built-in voice; `s` toggles stop/start.
+  const speakResult = useCallback(async (output: string) => {
+    try {
+      if (voiceState.phase === "playing" || voiceState.phase === "generating" || voiceState.phase === "downloading") {
+        await ttsStop();
+      } else if (voiceState.phase === "idle") {
+        // A translated result reads in its language; everything else in the voice's default.
+        const lang = !!resultVoiceLang.current ? resultVoiceLang.current : "";
+        await ttsSpeak(output, lang, "", "");
+      } else {
+        await ttsStop();
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [voiceState.phase]);
+
+  // The latest speakResult for the key handler without re-binding it.
+  const speakResultRef = useRef<(output: string) => void>(() => {});
+  useEffect(() => {
+    speakResultRef.current = speakResult;
+  }, [speakResult]);
+
+  // Copy a shown result, with a transient "Copied ✓" on the button itself.
+  const [copiedResult, setCopiedResult] = useState(false);
+  const copyResult = useCallback(async (output: string) => {
+    try {
+      await copyText(output);
+      setCopiedResult(true);
+      window.setTimeout(() => setCopiedResult(false), 1600);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   // Flat, ordered list of selectable menu items — the single source of truth for both
   // rendering and keyboard navigation, so the cursor index always matches what's on screen.
@@ -423,6 +486,68 @@ export default function Menu() {
     cursorRef.current?.scrollIntoView({ block: "nearest" });
   }, [cursor, langCursor, view.kind]);
 
+  // Result view keyboard controls: ↑/↓ (j/k) scroll the output, Space/PgUp/PgDn page it,
+  // Home/End jump, C (or Ctrl/Cmd+C) copies, Enter pastes — activating a focused button
+  // instead when one has focus (Tab moves it), so native controls aren't hijacked.
+  // The global handler sends Escape back to the menu.
+  const outputRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (view.kind !== "result") return;
+    const output = view.result.output;
+    const canPaste = view.result.shown && !view.result.pasted;
+    const scrollBy = (dy: number) => outputRef.current?.scrollBy({ top: dy, behavior: "auto" });
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target)) return;
+      const focused = document.activeElement;
+      const onButton = focused instanceof HTMLElement && focused.tagName === "BUTTON";
+      if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C")) {
+        e.preventDefault();
+        copyResult(output);
+        return;
+      }
+      switch (e.key) {
+        case "ArrowDown":
+        case "j":
+          e.preventDefault();
+          scrollBy(30);
+          return;
+        case "ArrowUp":
+        case "k":
+          e.preventDefault();
+          scrollBy(-30);
+          return;
+        case "PageDown":
+          e.preventDefault();
+          scrollBy(outputRef.current ? outputRef.current.clientHeight - 40 : 300);
+          return;
+        case "PageUp":
+          e.preventDefault();
+          scrollBy(outputRef.current ? -(outputRef.current.clientHeight - 40) : -300);
+          return;
+        case "Home":
+          e.preventDefault();
+          outputRef.current?.scrollTo({ top: 0 });
+          return;
+        case "End":
+          e.preventDefault();
+          outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
+          return;
+      }
+      if (e.key === "Enter" && canPaste && !onButton) {
+        e.preventDefault();
+        pasteShown(output);
+      } else if (e.key.toLowerCase() === "c" && !(e.ctrlKey || e.metaKey || e.altKey) && !onButton) {
+        e.preventDefault();
+        copyResult(output);
+      } else if (e.key.toLowerCase() === "s" && !(e.ctrlKey || e.metaKey || e.altKey) && !onButton) {
+        e.preventDefault();
+        speakResultRef.current(output);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view.kind, view, copyResult, pasteShown, speakResult]);
+
   return (
     <div className="menu">
       <header className="menu-head" data-oriel-drag-region>
@@ -507,7 +632,7 @@ export default function Menu() {
                 className={`action ${i === cursor ? "selected" : ""}`}
                 disabled={empty}
                 onClick={() => a.activate()}
-                title="Shift+click (or Shift+number): show the result instead of pasting it"
+                title="Shift+click (or Shift+number): preview the result here, paste it after reading"
                 onMouseEnter={() => setCursor(i)}
               >
                 <Icon name={a.icon} className="action-icon" />
@@ -577,12 +702,38 @@ export default function Menu() {
           {!view.result.pasted && !view.result.shown && (
             <div className="hint">On the clipboard — press <kbd>{PASTE_KEYS}</kbd> to paste.</div>
           )}
-          <pre className="output">{view.result.output}</pre>
+          {view.result.shown && <div className="hint">Read it here; paste it into your app when you're done.</div>}
+          <pre ref={outputRef} className="output">{view.result.output}</pre>
           <div className="row">
             {view.result.shown && (
-              <button className="action small primary" onClick={() => { copyText(view.result.output); dismissMenu(); }}>
-                Copy
-              </button>
+              <>
+                <button
+                  className={`action small primary ${copiedResult ? "done" : ""}`}
+                  onClick={() => copyResult(view.result.output)}
+                  title="Copy to the clipboard (C)"
+                >
+                  {copiedResult ? "Copied ✓" : "Copy"}
+                </button>
+                <button
+                  className="action small primary"
+                  onClick={() => pasteShown(view.result.output)}
+                  title="Clipboard + paste into the app underneath (Enter)"
+                >
+                  Paste
+                </button>
+                <button
+                  className="action small"
+                  disabled={voiceState.phase === "downloading" && !view.result.shown}
+                  onClick={() => speakResult(view.result.output)}
+                  title="Read it through the built-in voice (S); again to stop"
+                >
+                  {voiceState.phase === "downloading"
+                    ? `Voice ${Math.round(voiceState.progress * 100)}%`
+                    : voiceState.phase === "playing" || voiceState.phase === "generating"
+                      ? "■ Stop"
+                      : "🔊 Speak"}
+                </button>
+              </>
             )}
             <button className="action small" onClick={() => setView({ kind: "menu" })}>
               Back

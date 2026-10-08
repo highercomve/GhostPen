@@ -134,6 +134,23 @@ export const getStatus = () => invoke<Status>("get_status");
 export const getSelection = () => invoke<SelectionInfo>("get_selection");
 export const extractImageText = () => invoke<string>("extract_image_text");
 export const copyText = (text: string) => invoke<void>("copy_text", { text });
+/** Paste a result that was shown (not pasted) in the menu: clipboard + Ctrl+V into the app underneath. */
+export const pasteResult = (text: string) => invoke<ProcessResult>("paste_result", { text });
+
+// ---- built-in voice (Kokoro) -----------------------------------------------------------
+
+export interface TtsState {
+  phase: "idle" | "downloading" | "generating" | "playing" | "error";
+  message: string;
+  progress: number;
+  voice: string;
+}
+export const ttsState = () => invoke<TtsState>("tts_state");
+/** Read text through the built-in voice (`lang`: an espeak language like "en-us"
+ *  or a translate target like "French"; a second call replaces the running one). */
+export const ttsSpeak = (text: string, lang = "", voice = "", model = "") =>
+  invoke<void>("tts_speak", { text, lang, voice, model });
+export const ttsStop = () => invoke<void>("tts_stop");
 export type Level = "subtle" | "balanced" | "strong";
 export const LEVELS: Level[] = ["subtle", "balanced", "strong"];
 
@@ -153,6 +170,8 @@ export interface SummaryState {
   chars: number;
   message: string;
   markdown: string;
+  /** The page's readable text: the read-aloud's whole-page source. */
+  page_text?: string;
 }
 export const summaryState = () => invoke<SummaryState>("summary_state");
 /** The clipboard's text, when there is any (the summary window's prefill). */
