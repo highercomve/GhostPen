@@ -106,6 +106,7 @@ pub fn guessLanguage(text: []const u8) []const u8 {
     var latin: usize = 0;
     var accented: usize = 0;
     var i: usize = 0;
+    var strong_es: usize = 0;
     while (i < text.len) {
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
             i += 1;
@@ -120,7 +121,13 @@ pub fn guessLanguage(text: []const u8) []const u8 {
             0x0400...0x04FF => return "ru", // cyrillic (espeak): say nothing and leave
             0x4E00...0x9FFF, 0x3400...0x4DBF => cjk += 1,
             0x3040...0x30FF => kana += 1,
-            0x00C0...0x00FF, // latin-1 supplement (á, é, ñ, ¿, ¡)
+            // Spanish tell-tales: ñ, ¿ and ¡ (English text never carries them).
+            0x00F1, 0x00BF, 0x00A1 => {
+                latin += 1;
+                accented += 1;
+                strong_es += 1;
+            },
+            0x00C0...0x00F0, 0x00F2...0x00FF, // latin-1 supplement (á, é, í, ó, ú, ü; ñ/¿/¡ above)
             0x0100...0x024F => {
                 latin += 1;
                 accented += 1;
@@ -130,6 +137,7 @@ pub fn guessLanguage(text: []const u8) []const u8 {
         }
         i += len;
     }
+    if (strong_es > 0) return "es";
     if (kana > cjk / 4) return "ja";
     if (cjk > 0 and kana == 0) return "zh";
     if (latin == 0) return "en-us";
@@ -155,9 +163,9 @@ pub fn guessLanguage(text: []const u8) []const u8 {
     }
     if (es_hits >= en_hits * 2 and es_hits > 1) return "es";
     if (en_hits > es_hits * 2 and en_hits > 1) return "en-us";
-    // Accent density above 25% says Spanish over plain English; otherwise the
+    // Accent density above 12% says Spanish over plain English; otherwise the
     // default voice stays (the UK/US voices read most Latin text passably).
-    if (accented * 100 > latin * 25) return "es";
+    if (accented * 100 / (1 + latin) > 12) return "es";
     return "en-us";
 }
 
@@ -755,4 +763,14 @@ pub fn deleteModelIo(env: *const std.process.Environ.Map, id: []const u8, arena:
             engine = null;
         }
     }
+}
+
+// ---- tests ----------------------------------------------------------------------------------
+
+test "guessLanguage: the obvious cases" {
+    try std.testing.expectEqualStrings("es", guessLanguage("El coche rojo avanza por la ciudad, y las campanas suenan a lejos."));
+    try std.testing.expectEqualStrings("en-us", guessLanguage("The committee reviews the design every quarter."));
+    try std.testing.expectEqualStrings("es", guessLanguage("¿Cómo está la señal?"));
+    try std.testing.expectEqualStrings("zh", guessLanguage("今天天气很好。"));
+    try std.testing.expectEqualStrings("ja", guessLanguage("今日はとても良い天気です"));
 }
