@@ -30,10 +30,11 @@
         <article class="feature-card"><div class="card-visual" data-visual="translate"></div><div><h3>Translate in any app</h3><p>Translate the selected text and keep your conversation going without switching windows.</p></div></article>
         <article class="feature-card"><div class="card-visual" data-visual="custom"></div><div><h3>Your own instructions</h3><p>Add custom actions or tell GhostPen exactly what you want it to do.</p></div></article>
       </div>
-      <div class="feature-subheading"><p class="eyebrow">Beyond the keyboard</p><h3>Speak, listen, and read images.</h3></div>
-      <div class="feature-board" aria-label="Voice, captions, and images">
+      <div class="feature-subheading"><p class="eyebrow">Beyond the keyboard</p><h3>Speak, listen, read aloud, and read images.</h3></div>
+      <div class="feature-board quad" aria-label="Voice, captions, read aloud, and images">
         <article class="feature-card"><div class="card-visual" data-visual="voice"></div><div><h3>Speak. Polish. Copy.</h3><p>Dictate, then polish the transcript using your built-in AI profile. The result is ready on your clipboard.</p></div></article>
         <article class="feature-card"><div class="card-visual" data-visual="captions"></div><div><h3>Follow every conversation</h3><p>Live captions for meetings, videos, and podcasts, transcribed on your computer with Whisper.</p></div></article>
+        <article class="feature-card"><div class="card-visual" data-visual="read"></div><div><h3>Hear it read aloud</h3><p>Select text, or a result, and GhostPen reads it in a natural voice that runs on your computer, in the language of the text.</p></div></article>
         <article class="feature-card"><div class="card-visual" data-visual="image"></div><div><h3>Turn images into words</h3><p>Copy an image, extract its text with a built-in vision model, then edit or translate it.</p></div></article>
       </div>
     </section><section class="model-showcase" id="models" aria-labelledby="models-heading">

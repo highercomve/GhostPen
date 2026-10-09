@@ -108,6 +108,40 @@ loopback device such as BlackHole to hear the system audio.
 `Enter`. The transcript is proofread by your AI profile (turn
 **Polish** off for the raw text) and copied to the clipboard.
 
+## Read aloud
+
+GhostPen reads text aloud with a natural voice ([Kokoro](https://huggingface.co/hexgrad/Kokoro-82M))
+that runs on your computer: nothing is sent anywhere.
+
+- **The Read action**: select text, open the menu and pick **Read**. It
+  reads the selection as it is, with no AI pass, in a voice for the
+  language of the text, which GhostPen works out from the text itself.
+- **🔊 Speak** on a result: when the menu shows a result, **Speak** (or the
+  `S` key) reads it. A translated result is read in the target language's
+  voice.
+- **The summary window**: **Read summary** and **Read page**.
+
+Press **■ Stop**, `S` again, or `Esc` to stop. Long texts are read in
+sentence chunks, so the voice starts after the first sentence instead of
+waiting for the whole text.
+
+The first time, GhostPen downloads the voice model (about 135 MB) and a
+voice for the language (about 0.5 MB each), checked against their SHA-256.
+**Settings → Voices** lists them, downloads or deletes them, and shows
+whether the voice runs on the CPU or the GPU (with a GPU build, through
+Vulkan or CUDA). Voices: English (US and UK), Spanish, French, Portuguese,
+Italian, Japanese, Chinese and Hindi. The pronunciation data ships with
+GhostPen, so no extra package is needed.
+
+From a terminal:
+
+```
+ghostpen --say "Good morning" --lang es --voice ef_dora
+```
+
+The binaries that read aloud include espeak-ng (GPL-3.0-or-later) for
+pronunciation; GhostPen's own code stays MIT.
+
 ## Text from images
 
 Copy an image (a screenshot) and trigger GhostPen: **Extract text** reads
@@ -154,6 +188,7 @@ ghostpen-cli models
 | --- | --- | --- | --- |
 | Settings | `~/.config/dev.ghostpen.Oriel/` | `%APPDATA%\dev.ghostpen.Oriel\` | `~/Library/Application Support/dev.ghostpen.Oriel/` |
 | Models (whisper, built-in) | `~/.local/share/GhostPen/models/` | `%LOCALAPPDATA%\GhostPen\models\` | `~/Library/Application Support/GhostPen/models/` |
+| Voices (read aloud) | `~/.local/share/GhostPen/tts/` | `%LOCALAPPDATA%\GhostPen\tts\` | `~/Library/Application Support/GhostPen/tts/` |
 
 Settings from the earlier Rust/Tauri GhostPen are imported on the first
 start, and its downloaded whisper models are reused.

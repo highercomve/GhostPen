@@ -120,7 +120,10 @@
     captions: `<div class="scene-top"><span><i class="scene-dot"></i> System audio</span><span>05 / CAPTIONS</span></div>
       <div class="scene-video"><div class="video-abstract"><span class="video-play" aria-hidden="true">▷</span><span class="video-sound" aria-hidden="true">▁▃▆▂▅▃▁</span></div><div class="subtitle">“Let’s bring that idea to life.”</div></div>
       <div class="scene-foot"><span class="scene-check">✓</span> Transcribed locally with Whisper</div>`,
-    image: `<div class="scene-top"><span><i class="scene-dot"></i> Copied image</span><span>06 / EXTRACT</span></div>
+    read: `<div class="scene-top"><span><i class="scene-dot"></i> Selected text</span><span>06 / READ ALOUD</span></div>
+      <div class="scene-voice"><div class="voice-ring" aria-hidden="true">🔊</div>${wave()}<div class="voice-transcript"><small>ENGLISH (US) · HEART</small><span>“Here are the three points from today’s meeting.”</span></div></div>
+      <div class="scene-foot"><span class="scene-check">✓</span> Read on your computer, offline</div>`,
+    image: `<div class="scene-top"><span><i class="scene-dot"></i> Copied image</span><span>07 / EXTRACT</span></div>
       <div class="scene-ocr"><div class="ocr-paper"><small>IMAGE</small><b>Meeting notes</b><span>Good ideas<br>start here.</span><i aria-hidden="true"></i></div><div class="ocr-moving" aria-hidden="true">→</div><div class="ocr-plain"><small>EDITABLE TEXT</small><span>Good ideas<br>start here.</span></div></div>
       <div class="scene-foot"><span class="scene-check">✓</span> Ready to rewrite or translate</div>`
   };
