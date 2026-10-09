@@ -8,6 +8,7 @@ export type IconName =
   | "concise"
   | "expand"
   | "translate"
+  | "read"
   | "custom"
   | "send"
   | "copy"
@@ -47,6 +48,14 @@ const PATHS: Record<IconName, ReactNode> = {
       <polyline points="9 21 3 21 3 15" />
       <line x1="21" y1="3" x2="14" y2="10" />
       <line x1="3" y1="21" x2="10" y2="14" />
+    </>
+  ),
+  // read: speaker with sound waves
+  read: (
+    <>
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+      <path d="M19 5.5a9.5 9.5 0 0 1 0 13" />
     </>
   ),
   // globe

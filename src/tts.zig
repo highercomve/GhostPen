@@ -96,6 +96,46 @@ pub fn voiceForLanguage(lang: []const u8) []const u8 {
     return "af_heart";
 }
 
+/// A cheap unicode-range guess over the text the user selected. None of the
+/// model's intelligence: ranges over the languages the catalog carries.
+pub fn guessLanguage(text: []const u8) []const u8 {
+    var cjk: usize = 0;
+    var kana: usize = 0;
+    var latin: usize = 0;
+    var i: usize = 0;
+    var accented: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + len > text.len) break;
+        const cp = std.unicode.utf8Decode(text[i .. i + len]) catch {
+            i += len;
+            continue;
+        };
+        switch (cp) {
+            0x4E00...0x9FFF, 0x3400...0x4DBF => cjk += 1,
+            0x3040...0x30FF => kana += 1,
+            0x00C0...0x024F => {
+                latin += 1;
+                accented += 1;
+            },
+            0x0041...0x007A => latin += 1,
+            else => {},
+        }
+        i += len;
+    }
+    if (kana > cjk / 4) return "ja";
+    if (cjk > 0) return "zh";
+    if (latin == 0) return "en-us";
+    // Accent density (á, é, ñ in Latin-1 supplement): Spaniards write plenty
+    // of them; English (and French/Italian) get denser ranges below, but the
+    // catalog's curated languages decide the best fit we can cheaply make.
+    if (accented * 100 > latin * 25) return "es";
+    return "en-us";
+}
+
 // ---- state -------------------------------------------------------------------------------
 
 pub const Phase = enum { idle, downloading, generating, playing, error_state };

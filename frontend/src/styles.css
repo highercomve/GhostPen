@@ -393,6 +393,13 @@ header[data-oriel-drag-region]:active { cursor: grabbing; }
 /* Keep the buttons visible under long text: only the output scrolls. */
 .state.result .row { flex: none; }
 
+/* The Read action's screen: a small breathing note while the voice runs. */
+.state.reading { justify-content: flex-start; align-items: stretch; text-align: left; min-height: 0; }
+.read-note { display: flex; flex-direction: column; gap: 8px; justify-content: center; align-items: center; flex: 1; color: var(--muted); font-size: 14px; }
+.read-note .ok { color: var(--ok); font-weight: 600; }
+.read-note.breathing { animation: read-breathe 2.2s ease-in-out infinite; }
+@keyframes read-breathe { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
+
 .row { display: flex; gap: 8px; align-items: center; }
 
 .spinner {

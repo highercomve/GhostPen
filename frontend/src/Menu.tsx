@@ -34,6 +34,7 @@ type View =
   | { kind: "translate" }
   | { kind: "loading"; label: string }
   | { kind: "result"; result: ProcessResult }
+  | { kind: "reading" }
   | { kind: "error"; message: string };
 
 const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
@@ -42,6 +43,7 @@ const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
   { id: "casual", label: "Casual", hint: "Friendly, conversational", icon: "casual" },
   { id: "concise", label: "Concise", hint: "Condense, keep meaning", icon: "concise" },
   { id: "expand", label: "Expand", hint: "Add detail & elaborate", icon: "expand" },
+  { id: "__read", label: "Read", hint: "This text, out loud", icon: "read" },
 ];
 
 /** What a menu action is doing (ghostpen://ai-progress from the backend). */
@@ -256,6 +258,16 @@ export default function Menu() {
     }
   }, [voiceState.phase]);
 
+  // The Read action: read the selection itself, no AI pass. The reading view
+  // below follows the voice's progress and offers the Stop.
+  const doRead = useCallback(() => {
+    if (!isTextSelection(selection) || selection.text.trim().length === 0) return;
+    setView({ kind: "reading" });
+    ttsSpeak(selection.text, "", "", "").catch((e) => {
+      setView({ kind: "error", message: String(e) });
+    });
+  }, [selection]);
+
   // The latest speakResult for the key handler without re-binding it.
   const speakResultRef = useRef<(output: string) => void>(() => {});
   useEffect(() => {
@@ -283,7 +295,8 @@ export default function Menu() {
         label: a.label,
         hint: a.hint,
         icon: a.icon,
-        activate: () => run(a.id, null, a.label),
+        // The read action speaks the selection; the rest run through the AI.
+        activate: a.id === "__read" ? doRead : () => run(a.id, null, a.label),
       }));
     items.push({
       id: "__translate",
@@ -302,7 +315,7 @@ export default function Menu() {
       });
     }
     return items;
-  }, [customActions, run]);
+  }, [customActions, run, doRead]);
 
   // Language grid items + a trailing "Back" entry, so the keyboard can reach Back too.
   const langItems = useMemo(() => {
@@ -348,6 +361,17 @@ export default function Menu() {
     if (view.kind === "translate") setLangCursor(0);
   }, [view.kind]);
 
+  // The reading view returns to the menu when the voice finished (or failed):
+  // the user read their text, GhostPen is idle again.
+  useEffect(() => {
+    if (view.kind !== "reading") return;
+    if (voiceState.phase === "idle" || voiceState.phase === "error") {
+      const failed = voiceState.phase === "error";
+      const message = voiceState.message;
+      setView(failed ? { kind: "error", message } : { kind: "menu" });
+    }
+  }, [view.kind, voiceState.phase]);
+
   // Keep the cursor in range if the item count changes (e.g. custom actions load in).
   useEffect(() => {
     setCursor((c) => Math.min(c, Math.max(0, menuItems.length - 1)));
@@ -364,6 +388,10 @@ export default function Menu() {
         return;
       }
       if (view.kind === "translate" || view.kind === "result" || view.kind === "error") {
+        setView({ kind: "menu" });
+      } else if (view.kind === "reading") {
+        // Esc stops the reading and goes back to the actions.
+        ttsStop().catch(() => {});
         setView({ kind: "menu" });
       } else if (view.kind === "loading") {
         // Stop the built-in model's answer instead of pasting it later.
@@ -691,6 +719,40 @@ export default function Menu() {
           <div className="state-label">{view.label}…</div>
           <div className="state-detail">{progressText(progress)}</div>
           <div className="state-time">{(elapsedMs / 1000).toFixed(1)} s</div>
+        </div>
+      )}
+
+      {view.kind === "reading" && (
+        <div className="state reading">
+          <div className={voiceState.phase === "playing" ? "read-note" : "read-note breathing"} aria-hidden>
+            {voiceState.phase === "downloading" && (
+              <>
+                <div className="llm-progress">
+                  <div className="llm-bar"><div style={{ width: `${Math.round(voiceState.progress * 100)}%` }} /></div>
+                  <span>{voiceState.message} {Math.round(voiceState.progress * 100)}%</span>
+                </div>
+              </>
+            )}
+            {voiceState.phase === "generating" && <span>{voiceState.message || "Warming the voice…"}</span>}
+            {voiceState.phase === "playing" && <span className="ok">🔊 Reading…</span>}
+            {voiceState.phase === "idle" && <span>Ready to read.</span>}
+            <div className="hint">{voiceState.voice ? `voice: ${voiceState.voice}` : ""}</div>
+          </div>
+          <div className="row">
+            <button
+              className="action small primary"
+              title="Stop the voice (Esc)"
+              onClick={async () => {
+                await ttsStop();
+                setView({ kind: "menu" });
+              }}
+            >
+              ■ Stop
+            </button>
+            <button className="action small" onClick={async () => { await ttsStop().catch(() => {}); setView({ kind: "menu" }); }}>
+              Close
+            </button>
+          </div>
         </div>
       )}
 

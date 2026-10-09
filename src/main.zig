@@ -719,13 +719,15 @@ pub const Commands = struct {
     /// at a time; a second `tts_speak` replaces the first.
     pub fn tts_speak(_: std.mem.Allocator, args: struct { text: []const u8, lang: []const u8 = "", voice: []const u8 = "", model: []const u8 = "" }) !void {
         var lang = args.lang;
-        if (tts.espeakLanguageFor(lang)) |l| lang = l;
+        if (lang.len == 0) {
+            lang = tts.guessLanguage(args.text);
+        } else if (tts.espeakLanguageFor(lang)) |l| {
+            lang = l;
+        }
         const voice = if (args.voice.len > 0)
             args.voice
-        else if (lang.len > 0)
-            tts.voiceForLanguage(lang)
         else
-            "af_heart";
+            tts.voiceForLanguage(lang);
         tts.speak(args.text, lang, voice, args.model);
     }
 
