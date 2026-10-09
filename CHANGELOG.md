@@ -4,14 +4,17 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ## [Unreleased]
 
+## [0.2.22] - 2026-10-09
+
 ### Added
 
-- The built-in voice (Kokoro-82M, offline): select text, read it aloud from the menu's result (**🔊 Speak**, or `S` while the result is shown; **■ Stop** the same ways), translated results read back in the target language's voice. The actions list gained **Read** — speaks the selection as is (no AI pass), in a language guessed from the text (function words, unicode ranges, part-of-speech accent density), with its own screen that shows the download/voice progress and a Stop; Esc stops it. In the summary window, **Read summary** and **Read page**. Where supported it runs on the GPU like the chat models (`-Dvulkan`/`-Dcuda` builds); snd: sound output comes with it in-process. First use downloads the voice model (~135 MB, verified, resumable in Settings → Voices) and a 511 KB voice pack per language (14 curated, one label each; the model catalog has two quantizations). `ghostpen --say "text" [--lang es] [--voice ef_dora]` speaks from a terminal.
-- Settings → Voices: download/resume/delete the voice model and voice packs, with progress bars, and the phoneme-data row telling where its pronunciation rules came from.
+- The built-in voice (Kokoro-82M, offline): select text, read it aloud from the menu's result (**🔊 Speak**, or `S` while the result is shown; **■ Stop** the same ways), translated results read back in the target language's voice. The actions list gained **Read** — speaks the selection as is (no AI pass), in a language guessed from the text (function words, unicode ranges, part-of-speech accent density), with its own screen that shows the download/voice progress and a Stop; Esc stops it. In the summary window, **Read summary** and **Read page**. Where supported it runs on the GPU like the chat models (`-Dvulkan`/`-Dcuda` builds); snd: sound output comes with it in-process. First use downloads the voice model (~135 MB, SHA-256 verified) and a 511 KB voice pack for the text's language (14 curated, one label each; the model catalog has two quantizations). `ghostpen --say "text" [--lang es] [--voice ef_dora]` speaks from a terminal.
+- Settings → Voices: download and delete the voice model and voice packs, with progress bars, where the voice runs (CPU or GPU), and the phoneme-data row telling where its pronunciation rules came from.
 - Oriel 0.9.5 carries the engine: `-Dkokoro` compiles [kokoro.cpp](https://github.com/simonfxr/kokoro.cpp) (vanilla ggml), espeak-ng for phonemization, Highway SIMD and an in-app miniaudio playback into the app, exposed as `oriel.kokoro` and `oriel.audio_play`; `AppOptions.include_paths` forwards C include dirs to an app's own root module.
 
 ### Changed
 
+- Built on Oriel 0.9.11. Text to speech now uses `oriel.tts`: synthesis on the GPU where available (`-Dvulkan`/`-Dcuda` builds), the espeak-ng phoneme data bundled with GhostPen so read-aloud works without a system espeak-ng, and faster first audio (the text streams in chunks sized to the device, `warmUp` loads the voice when the summary window or a result with Speak opens). Voices downloaded by earlier builds are kept.
 - Oriel 0.9.8: the framework's memory-safety release (use-after-free, out-of-bounds, overflow and leak fixes across the platform layers, modules and native UI; size-checked update-manifest signatures and keys).
 - The Linux, Windows and macOS binaries that read text aloud link espeak-ng, which is **GPL-3.0-or-later**: the GhostPen application code stays MIT, and where the operating system's espeak-ng data is reused the model files stay as they are (Apache-2.0 Kokoro voices, GPL-3 espeak-ng data). The GPL applies to the shipped binary that links espeak-ng; every other part of GhostPen keeps the MIT notice.
 
@@ -192,6 +195,7 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 - Added built-in GGUF models with CPU fallback and the `ghostpen-cli` command-line tool.
 - Added Linux layer-shell overlays, platform permissions, the website, and release packages on Oriel v0.6.0.
 
+[0.2.22]: https://github.com/highercomve/GhostPen/compare/v0.2.21...v0.2.22
 [0.2.21]: https://github.com/highercomve/GhostPen/compare/v0.2.20...v0.2.21
 [0.2.20]: https://github.com/highercomve/GhostPen/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/highercomve/GhostPen/compare/v0.2.18...v0.2.19
