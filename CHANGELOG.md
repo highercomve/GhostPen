@@ -12,6 +12,7 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ### Changed
 
+- Oriel 0.9.8: the framework's memory-safety release (use-after-free, out-of-bounds, overflow and leak fixes across the platform layers, modules and native UI; size-checked update-manifest signatures and keys).
 - The Linux, Windows and macOS binaries that read text aloud link espeak-ng, which is **GPL-3.0-or-later**: the GhostPen application code stays MIT, and where the operating system's espeak-ng data is reused the model files stay as they are (Apache-2.0 Kokoro voices, GPL-3 espeak-ng data). The GPL applies to the shipped binary that links espeak-ng; every other part of GhostPen keeps the MIT notice.
 
 - Shown results (Shift+action, or Settings → show) can now be pasted after reading: a Paste button (or Enter) sends the result to the clipboard and the app underneath; Copy keeps it on the clipboard only. Enter no longer needs Shift at run time — run an action with Shift to preview, decide later.
