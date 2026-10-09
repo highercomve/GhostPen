@@ -155,7 +155,7 @@ pub const Dirs = struct {
 };
 
 /// The model URL scheme on Hugging Face (the download machinery takes plain URLs).
-const repoUrl = "https://huggingface.co/simonfxr/kokoro.cpp-GGUF/resolve/main/";
+pub const repoUrl = "https://huggingface.co/simonfxr/kokoro.cpp-GGUF/resolve/main/";
 
 /// The tts dir; null when the app has no data dir at all (the helper class
 /// contains the models dir we sit next to).
@@ -611,5 +611,83 @@ pub fn shutdown() void {
     if (engine) |ctx| {
         oriel.kokoro.free(ctx);
         engine = null;
+    }
+}
+
+// ---- the catalog for the Settings window -----------------------------------
+
+pub const Entry = struct {
+    /// id, like "kokoro-82m-q8_0" (models) or "ef_dora" (voices).
+    id: []const u8,
+    /// What the row shows.
+    label: []const u8,
+    /// Voices: the espeak language they read ("" for models).
+    lang: []const u8 = "",
+    note: []const u8 = "",
+    size: u64 = 0,
+    /// The bytes of a leftover partial download, 0 when there isn't one.
+    partial: u64 = 0,
+    downloaded: bool = false,
+};
+
+pub const CatalogInfo = struct {
+    models: []Entry,
+    voices: []Entry,
+    /// The phoneme data the engine reads (env, app dir, or the system).
+    espeak_ready: bool,
+    /// Where it was found, for the Settings row's subtitle ("" when not).
+    espeak_source: []const u8,
+    /// The settings phase name (a download may be running for the menu).
+    phase: []const u8,
+};
+
+/// What Settings → Voices lists: the two models, the curated voices, and
+/// whether the phoneme data is there. One arena allocation.
+pub fn listCatalog(arena: std.mem.Allocator, env: *const std.process.Environ.Map, st: State) !CatalogInfo {
+    var models_list: std.ArrayList(Entry) = .empty;
+    var voices_list: std.ArrayList(Entry) = .empty;
+    const d = dirs(arena, env);
+    for (models) |m| {
+        const installed = if (d) |dirs_| modelFile(arena, dirs_, m.file) != null else false;
+        var partial: u64 = 0;
+        if (d) |dirs_| {
+            const part_name = std.fmt.allocPrint(arena, "{s}.part", .{m.file}) catch continue;
+            const part_path = std.fs.path.join(arena, &.{ dirs_.root, part_name }) catch continue;
+            const st_ = std.Io.Dir.cwd().statFile(io, part_path, .{}) catch null;
+            if (st_) |stat| partial = stat.size;
+        }
+        try models_list.append(arena, .{ .id = m.id, .label = m.name, .note = m.note, .size = m.size, .partial = partial, .downloaded = installed });
+    }
+    for (voices) |v| {
+        const installed = if (d) |dirs_| voiceFile(arena, dirs_, v.id) != null else false;
+        try voices_list.append(arena, .{ .id = v.id, .label = v.label, .lang = v.lang, .note = "", .size = v.size, .downloaded = installed });
+    }
+    var src: []const u8 = "";
+    if (espeakDataDir(arena, env, d)) |dir| {
+        src = dir;
+    }
+    return .{
+        .models = models_list.items,
+        .voices = voices_list.items,
+        .espeak_ready = src.len > 0,
+        .espeak_source = src,
+        .phase = @tagName(st.phase),
+    };
+}
+
+/// Delete a model file.
+pub fn deleteModelIo(env: *const std.process.Environ.Map, id: []const u8, arena: std.mem.Allocator) !void {
+    const m = findModel(id) orelse return error.UnknownModel;
+    const d = dirs(arena, env) orelse return error.NoDataDir;
+    const path = std.fs.path.join(arena, &.{ d.root, m.file }) catch return error.OutOfMemory;
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    // The engine holds it: drop the context so the next speak starts clean.
+    engine_lock.lockUncancelable(io);
+    defer engine_lock.unlock(io);
+    if (engine) |ctx| {
+        if (std.mem.eql(u8, engine_model_file, m.file)) {
+            oriel.kokoro.free(ctx);
+            engine = null;
+        }
     }
 }

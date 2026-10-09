@@ -79,6 +79,33 @@ ghostpen-cli translate --lang French --stream "Good morning"
 ghostpen-cli profiles
 ```
 
+## Read aloud (the built-in voice)
+
+A Kokoro-82M voice runs inside the app, on this computer, no network. When a
+result is shown in the menu, **🔊 Speak** reads it (the **S** key does the
+same; press again to stop). A translated result reads back in that language's
+voice; the summary window adds **Read summary** and **Read page** with its own
+Stop. Long texts come out in sentence chunks, one after the next, so reading
+from the menu starts right away. Also from a terminal:
+
+```sh
+ghostpen --say "Good morning" --lang es --voice ef_dora
+```
+
+The first use downloads the voice model (Kokoro 82M Q8_0, ~135 MB; verified
+like every other model) and one voice pack per language (511 KB each; 14
+curated voices covering the languages the translate menu offers).
+**Settings → Voices** manages it all: download, resume and delete the model
+and the voice packs, with progress bars and the phoneme-data row saying where
+the pronunciation rules came from (your Linux distribution's `espeak-ng`
+package provides them; macOS: `brew install espeak-ng`).
+
+**A note on licenses:** the binaries that read text aloud link espeak-ng,
+which is GPL-3.0-or-later. GhostPen's own code stays MIT; espeak-ng's data and
+the Apache-2.0 Kokoro voices come with the shipped parts their licenses apply
+to (the packaged espeak-ng data itself is GPL'd, the voices Apache). No
+audio leaves the machine either way.
+
 ## Built-in models
 
 A profile set to **Built-in** runs the model inside GhostPen itself, with the

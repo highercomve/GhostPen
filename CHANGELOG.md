@@ -6,6 +6,14 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ### Added
 
+- The built-in voice (Kokoro-82M, offline): select text, read it aloud from the menu's result (**🔊 Speak**, or `S` while the result is shown; **■ Stop** the same ways), translated results read back in the target language's voice. In the summary window, **Read summary** and **Read page**. Where supported it runs on the GPU like the chat models (`-Dvulkan`/`-Dcuda` builds); snd: sound output comes with it in-process. First use downloads the voice model (~135 MB, verified, resumable in Settings → Voices) and a 511 KB voice pack per language (14 curated, one label each; the model catalog has two quantizations). `ghostpen --say "text" [--lang es] [--voice ef_dora]` speaks from a terminal.
+- Settings → Voices: download/resume/delete the voice model and voice packs, with progress bars, and the phoneme-data row telling where its pronunciation rules came from.
+- Oriel 0.9.5 carries the engine: `-Dkokoro` compiles [kokoro.cpp](https://github.com/simonfxr/kokoro.cpp) (vanilla ggml), espeak-ng for phonemization, Highway SIMD and an in-app miniaudio playback into the app, exposed as `oriel.kokoro` and `oriel.audio_play`; `AppOptions.include_paths` forwards C include dirs to an app's own root module.
+
+### Changed
+
+- The Linux, Windows and macOS binaries that read text aloud link espeak-ng, which is **GPL-3.0-or-later**: the GhostPen application code stays MIT, and where the operating system's espeak-ng data is reused the model files stay as they are (Apache-2.0 Kokoro voices, GPL-3 espeak-ng data). The GPL applies to the shipped binary that links espeak-ng; every other part of GhostPen keeps the MIT notice.
+
 - Shown results (Shift+action, or Settings → show) can now be pasted after reading: a Paste button (or Enter) sends the result to the clipboard and the app underneath; Copy keeps it on the clipboard only. Enter no longer needs Shift at run time — run an action with Shift to preview, decide later.
 - The result view reads better on long texts: the output fills the menu height with its own scrolling (the buttons stay visible), larger text and line height, selectable and with a thin scrollbar.
 

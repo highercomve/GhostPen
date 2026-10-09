@@ -146,6 +146,31 @@ export interface TtsState {
   voice: string;
 }
 export const ttsState = () => invoke<TtsState>("tts_state");
+/** Settings → Voices: the model, voices and the phoneme data's state. */
+export const ttsCatalog = () => invoke<TtsCatalog>("tts_catalog");
+export const ttsDownloadModel = (id: string) => invoke<void>("tts_download_model", { id });
+export const ttsDownloadVoice = (id: string) => invoke<void>("tts_download_voice", { id });
+export const ttsCancelDownload = () => invoke<void>("tts_cancel_download");
+export const ttsDeleteModel = (id: string) => invoke<void>("tts_delete_model", { id });
+
+export interface TtsCatalogEntry {
+  id: string;
+  label: string;
+  /** Voices: the espeak language they read ("" for models). */
+  lang?: string;
+  note?: string;
+  size: number;
+  /** A leftover partial download's bytes, 0 when there isn't one. */
+  partial?: number;
+  downloaded: boolean;
+}
+export interface TtsCatalog {
+  models: TtsCatalogEntry[];
+  voices: TtsCatalogEntry[];
+  espeak_ready: boolean;
+  espeak_source: string;
+  phase: string;
+}
 /** Read text through the built-in voice (`lang`: an espeak language like "en-us"
  *  or a translate target like "French"; a second call replaces the running one). */
 export const ttsSpeak = (text: string, lang = "", voice = "", model = "") =>

@@ -601,7 +601,9 @@ pub const Commands = struct {
         "llm_models_status",       "llm_download_model",   "llm_delete_model",      "llm_unload",
         "menu_dismissed",          "update_check",         "update_install",        "whisper_models_status",
         "whisper_download_model",  "whisper_delete_model", "summarize_link",        "summary_state",
-        "tts_speak",               "tts_stop",             "tts_state",           "paste_result",
+        "tts_speak",               "tts_stop",             "tts_state",           "tts_catalog",
+        "tts_download_model",      "tts_download_voice",   "tts_cancel_download", "tts_delete_model",
+        "paste_result",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -735,6 +737,68 @@ pub const Commands = struct {
     pub fn tts_state(_: std.mem.Allocator) !TtsState {
         const s = tts.status();
         return .{ .phase = phaseName(s.phase), .message = s.message, .progress = s.progress, .voice = s.voice };
+    }
+
+    // Settings → Voices: the catalog and its downloads (the same resumable
+    // verified machinery the other models use; progress to the window).
+
+    pub fn tts_catalog(arena: std.mem.Allocator) !tts.CatalogInfo {
+        return tts.listCatalog(arena, environ_map, tts.status());
+    }
+
+    fn ttsDownload(kind: enum { model, voice }, arena: std.mem.Allocator, id: []const u8) !void {
+        const Emit = struct {
+            fn progress(_: void, p: llm_models.Progress) void {
+                App.emitTo("settings", "ghostpen://tts-download", p) catch {};
+            }
+        };
+        const d = tts.dirs(arena, environ_map) orelse return oriel.ipc.fail("No data directory.", .{});
+        var status: std.http.Status = .ok;
+        const spec: ?struct { name: []const u8, size: u64, sha256: []const u8, prefix: []const u8 } = switch (kind) {
+            .model => blk: {
+                const m = tts.findModel(id) orelse break :blk null;
+                break :blk .{ .name = m.file, .size = m.size, .sha256 = m.sha256, .prefix = "" };
+            },
+            .voice => blk: {
+                const v = tts.findVoice(id) orelse break :blk null;
+                const name = try std.fmt.allocPrint(arena, "kokoro-voice-{s}.gguf", .{v.id});
+                break :blk .{ .name = name, .size = v.size, .sha256 = v.sha256, .prefix = "voices/" };
+            },
+        };
+        const s = spec orelse return oriel.ipc.fail("Unknown id.", .{});
+        const url = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ tts.repoUrl, s.prefix, s.name });
+        _ = llm_models.downloadFile(io, gpa, arena, d.root, id, s.name, url, s.size, s.sha256, {}, Emit.progress, &status) catch |err| {
+            if (err == error.Busy) return oriel.ipc.fail("Another model is downloading.", .{});
+            const message: []const u8 = switch (err) {
+                error.Cancelled => "",
+                error.ChecksumMismatch => "The download was damaged (checksum mismatch) and was deleted: try again.",
+                error.RangeIgnored => "The server can't resume this download: try again to start over.",
+                error.Incomplete => "The download stopped early: try again to resume it.",
+                error.Stalled => "The download stalled (no data for a minute): check the connection, then resume it.",
+                error.HttpError => try std.fmt.allocPrint(arena, "Download failed: HTTP {d} {s}.", .{ @intFromEnum(status), status.phrase() orelse "" }),
+                else => try std.fmt.allocPrint(arena, "Download failed ({s}).", .{@errorName(err)}),
+            };
+            Emit.progress({}, .{ .id = id, .state = if (err == error.Cancelled) "cancelled" else "error", .message = message });
+            if (err == error.Cancelled) return;
+            return oriel.ipc.fail("{s}", .{message});
+        };
+        Emit.progress({}, .{ .id = id, .state = "done" });
+    }
+
+    pub fn tts_download_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        try ttsDownload(.model, arena, args.id);
+    }
+
+    pub fn tts_download_voice(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        try ttsDownload(.voice, arena, args.id);
+    }
+
+    pub fn tts_cancel_download(_: std.mem.Allocator) !void {
+        llm_models.cancelDownload();
+    }
+
+    pub fn tts_delete_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        tts.deleteModelIo(environ_map, args.id, arena) catch |err| return oriel.ipc.fail("Could not delete the model ({s}).", .{@errorName(err)});
     }
 
     /// Paste a result the user read in the menu (after Shift+action): put it
