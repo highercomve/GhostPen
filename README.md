@@ -92,13 +92,17 @@ from the menu starts right away. Also from a terminal:
 ghostpen --say "Good morning" --lang es --voice ef_dora
 ```
 
-The first use downloads the voice model (Kokoro 82M Q8_0, ~135 MB; verified
-like every other model) and one voice pack per language (511 KB each; 14
-curated voices covering the languages the translate menu offers).
-**Settings → Voices** manages it all: download, resume and delete the model
-and the voice packs, with progress bars and the phoneme-data row saying where
-the pronunciation rules came from (your Linux distribution's `espeak-ng`
-package provides them; macOS: `brew install espeak-ng`).
+The voice is Oriel's `oriel.tts`: synthesis runs on the GPU where GhostPen
+was built with one (`-Dvulkan`, `-Dcuda`), else on
+the CPU, and the first sound comes after the first sentence. The first use
+downloads the voice model (Kokoro 82M Q8_0, ~135 MB; SHA-256 verified) and
+the voice pack for the text's language (511 KB each; 14 curated voices
+covering the languages the translate menu offers) into
+`<data dir>/GhostPen/tts`. **Settings → Voices** manages it all: download and
+delete the model and the voice packs, with progress bars, where the voice
+runs, and the phoneme-data row. The espeak-ng phoneme data ships with
+GhostPen (`espeak-ng-data` next to the program), so no system package is
+needed.
 
 **A note on licenses:** the binaries that read text aloud link espeak-ng,
 which is GPL-3.0-or-later. GhostPen's own code stays MIT; espeak-ng's data and

@@ -31,7 +31,8 @@ pub fn build(b: *std.Build) void {
         .whisper = true,
         // Whisper and the local model runner ("This computer" profiles; src/llm_helper.zig).
         .llama = true,
-        // Text to speech (src/tts.zig, the built-in Kokoro voice).
+        // Text to speech (oriel.tts, wired in src/tts.zig): Kokoro on the GPU with
+        // -Dvulkan/-Dcuda, else the CPU; ships the espeak-ng phoneme data.
         .kokoro = true,
         // Images for vision models (their mmproj projector): Extract Text on Built-in profiles.
         .llama_mtmd = true,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "./icons";
-import { cancelAi, clipboardText, copyText, summarizeLink, summaryState, ttsSpeak, ttsStop, type TtsState } from "./api";
+import { cancelAi, clipboardText, copyText, listenVoice, summarizeLink, summaryState, ttsSpeak, ttsStop, ttsWarmUp, type TtsState } from "./api";
 import { listen } from "./events";
 import { renderMarkdown } from "./markdown";
 
@@ -105,9 +105,9 @@ export default function Summary() {
         setMarkdown((m) => m + e.payload);
       }),
     );
-    ups.push(
-      listen<TtsState>("ghostpen://tts-state", (e) => setVoice(e.payload)),
-    );
+    ups.push(listenVoice(setVoice));
+    // The reader opened: load the voice now so Read starts sooner.
+    ttsWarmUp().catch(() => {});
     summaryState()
       .then((s) => {
         pageTextRef.current = s.page_text || "";

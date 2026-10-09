@@ -164,41 +164,17 @@ pub const Events = struct {
     @"ghostpen://llm-download": llm_models.Progress,
     /// Speech (whisper) model downloads (Settings).
     @"ghostpen://whisper-download": llm_models.Progress,
-    /// The built-in voice (Kokoro): its phase and its download progress.
-    @"ghostpen://tts-state": TtsState,
-    @"ghostpen://tts-download": llm_models.Progress,
+    /// The built-in voice (oriel.tts): download progress, and what the
+    /// reading is doing (oriel.tts's phases plus GhostPen's "downloading").
+    @"tts:download": @FieldType(oriel.tts.Events, "tts:download"),
+    @"tts:state": @FieldType(oriel.tts.Events, "tts:state"),
     /// Update download progress (Settings).
     @"ghostpen://update-progress": updates.Progress,
 };
 
-/// The payload of `ghostpen://tts-state` (the engine state, moved into a
-/// JSON-friendly shape).
-pub const TtsState = struct {
-    phase: []const u8,
-    message: []const u8,
-    progress: f64,
-    voice: []const u8,
-};
-
-fn phaseName(p: tts.Phase) []const u8 {
-    return switch (p) {
-        .idle => "idle",
-        .downloading => "downloading",
-        .generating => "generating",
-        .playing => "playing",
-        .error_state => "error",
-    };
-}
-
+/// GhostPen's own "tts:state" (before oriel.tts speaks): to every window.
 fn ttsStateChanged(s: tts.State) void {
-    const payload: TtsState = .{ .phase = phaseName(s.phase), .message = s.message, .progress = s.progress, .voice = s.voice };
-    App.emitTo("main", "ghostpen://tts-state", payload) catch {};
-    App.emitTo("summary", "ghostpen://tts-state", payload) catch {};
-}
-
-fn ttsDownloadProgress(p: llm_models.Progress) void {
-    App.emitTo("main", "ghostpen://tts-download", p) catch {};
-    App.emitTo("settings", "ghostpen://tts-download", p) catch {};
+    App.emit("tts:state", s);
 }
 
 // ---- built-in models (GhostPen runs them) -------------------------------------------------------
@@ -601,8 +577,8 @@ pub const Commands = struct {
         "llm_models_status",       "llm_download_model",   "llm_delete_model",      "llm_unload",
         "menu_dismissed",          "update_check",         "update_install",        "whisper_models_status",
         "whisper_download_model",  "whisper_delete_model", "summarize_link",        "summary_state",
-        "tts_speak",               "tts_stop",             "tts_state",           "tts_catalog",
-        "tts_download_model",      "tts_download_voice",   "tts_cancel_download", "tts_delete_model",
+        "tts_speak",               "tts_state",            "tts_catalog",           "tts_download",
+        "tts_delete",              "tts_warm_up",
         "paste_result",
     };
 
@@ -715,92 +691,48 @@ pub const Commands = struct {
     }
 
     /// The built-in voice reads text (`lang`: an espeak language like "en-us"
-    /// or a translate target like "French"; `voice` optional). One utterance
-    /// at a time; a second `tts_speak` replaces the first.
+    /// or a translate target like "French", "" to guess it; `voice`
+    /// optional). Returns at once; "tts:state" follows the reading. One
+    /// reading at a time: a second `tts_speak` replaces the first.
     pub fn tts_speak(_: std.mem.Allocator, args: struct { text: []const u8, lang: []const u8 = "", voice: []const u8 = "", model: []const u8 = "" }) !void {
-        var lang = args.lang;
-        if (lang.len == 0) {
-            lang = tts.guessLanguage(args.text);
-        } else if (tts.espeakLanguageFor(lang)) |l| {
-            lang = l;
-        }
-        const voice = if (args.voice.len > 0)
-            args.voice
-        else
-            tts.voiceForLanguage(lang);
-        tts.speak(args.text, lang, voice, args.model);
+        tts.speak(.{ .text = args.text, .lang = args.lang, .voice = args.voice, .model = args.model });
     }
 
-    pub fn tts_stop(_: std.mem.Allocator) !void {
+    /// Not async: it must run while a download or a reading is busy on a worker.
+    pub fn tts_stop(_: std.mem.Allocator) void {
         tts.stop();
     }
 
     /// The voice's state now (a window gets it on load; updates come by event).
-    pub fn tts_state(_: std.mem.Allocator) !TtsState {
-        const s = tts.status();
-        return .{ .phase = phaseName(s.phase), .message = s.message, .progress = s.progress, .voice = s.voice };
+    pub fn tts_state(_: std.mem.Allocator) !tts.State {
+        return tts.status();
     }
 
-    // Settings → Voices: the catalog and its downloads (the same resumable
-    // verified machinery the other models use; progress to the window).
+    /// Load the voice ahead of a reading (the reader opened); nothing when
+    /// it isn't downloaded.
+    pub fn tts_warm_up(_: std.mem.Allocator, args: struct { lang: []const u8 = "" }) !void {
+        tts.warmUp(args.lang);
+    }
+
+    // Settings → Voices: the catalog, downloads ("tts:download" reports
+    // them, SHA-256 verified) and deletes, for models and voices alike.
 
     pub fn tts_catalog(arena: std.mem.Allocator) !tts.CatalogInfo {
-        return tts.listCatalog(arena, environ_map, tts.status());
+        return tts.catalog(arena) catch |err| oriel.ipc.fail("The voice is unavailable ({s}).", .{@errorName(err)});
     }
 
-    fn ttsDownload(kind: enum { model, voice }, arena: std.mem.Allocator, id: []const u8) !void {
-        const Emit = struct {
-            fn progress(_: void, p: llm_models.Progress) void {
-                App.emitTo("settings", "ghostpen://tts-download", p) catch {};
-            }
+    pub fn tts_download(_: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        tts.download(args.id) catch |err| {
+            if (err == error.AlreadyDownloading) return oriel.ipc.fail("Another voice download is running.", .{});
+            return oriel.ipc.fail("{s}", .{tts.downloadMessage(err)});
         };
-        const d = tts.dirs(arena, environ_map) orelse return oriel.ipc.fail("No data directory.", .{});
-        var status: std.http.Status = .ok;
-        const spec: ?struct { name: []const u8, size: u64, sha256: []const u8, prefix: []const u8 } = switch (kind) {
-            .model => blk: {
-                const m = tts.findModel(id) orelse break :blk null;
-                break :blk .{ .name = m.file, .size = m.size, .sha256 = m.sha256, .prefix = "" };
-            },
-            .voice => blk: {
-                const v = tts.findVoice(id) orelse break :blk null;
-                const name = try std.fmt.allocPrint(arena, "kokoro-voice-{s}.gguf", .{v.id});
-                break :blk .{ .name = name, .size = v.size, .sha256 = v.sha256, .prefix = "voices/" };
-            },
+    }
+
+    pub fn tts_delete(_: std.mem.Allocator, args: struct { id: []const u8 }) !void {
+        tts.delete(args.id) catch |err| {
+            if (err == error.Downloading) return oriel.ipc.fail("It is downloading: wait for it to finish.", .{});
+            return oriel.ipc.fail("Could not delete it ({s}).", .{@errorName(err)});
         };
-        const s = spec orelse return oriel.ipc.fail("Unknown id.", .{});
-        const url = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ tts.repoUrl, s.prefix, s.name });
-        _ = llm_models.downloadFile(io, gpa, arena, d.root, id, s.name, url, s.size, s.sha256, {}, Emit.progress, &status) catch |err| {
-            if (err == error.Busy) return oriel.ipc.fail("Another model is downloading.", .{});
-            const message: []const u8 = switch (err) {
-                error.Cancelled => "",
-                error.ChecksumMismatch => "The download was damaged (checksum mismatch) and was deleted: try again.",
-                error.RangeIgnored => "The server can't resume this download: try again to start over.",
-                error.Incomplete => "The download stopped early: try again to resume it.",
-                error.Stalled => "The download stalled (no data for a minute): check the connection, then resume it.",
-                error.HttpError => try std.fmt.allocPrint(arena, "Download failed: HTTP {d} {s}.", .{ @intFromEnum(status), status.phrase() orelse "" }),
-                else => try std.fmt.allocPrint(arena, "Download failed ({s}).", .{@errorName(err)}),
-            };
-            Emit.progress({}, .{ .id = id, .state = if (err == error.Cancelled) "cancelled" else "error", .message = message });
-            if (err == error.Cancelled) return;
-            return oriel.ipc.fail("{s}", .{message});
-        };
-        Emit.progress({}, .{ .id = id, .state = "done" });
-    }
-
-    pub fn tts_download_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
-        try ttsDownload(.model, arena, args.id);
-    }
-
-    pub fn tts_download_voice(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
-        try ttsDownload(.voice, arena, args.id);
-    }
-
-    pub fn tts_cancel_download(_: std.mem.Allocator) !void {
-        llm_models.cancelDownload();
-    }
-
-    pub fn tts_delete_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
-        tts.deleteModelIo(environ_map, args.id, arena) catch |err| return oriel.ipc.fail("Could not delete the model ({s}).", .{@errorName(err)});
     }
 
     /// Paste a result the user read in the menu (after Shift+action): put it
@@ -1280,9 +1212,8 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len > 1 and std.mem.eql(u8, args[1], "--whisper-helper"))
         return @import("whisper_helper.zig").main(io, gpa, args[2..]);
     environ_map = init.environ_map;
-    // The built-in voice: its state broadcasts to the menu and the summary.
-    tts.init(&ttsStateChanged, io, gpa, init.environ_map, tts.dirs(init.arena.allocator(), init.environ_map));
-    tts.emitDownload = &ttsDownloadProgress;
+    // The built-in voice (oriel.tts) in <data dir>/GhostPen/tts.
+    const tts_ready = tts.setUp(io, gpa, init.arena.allocator(), init.environ_map);
     // The LLM runner remembers its last successful split per model+settings
     // in GhostPen's config (~/.config/ghostpen/llm-plans.json): a model swap
     // doesn't re-run the whole plan ladder on every load.
@@ -1309,59 +1240,47 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("ghostpen {s}\n", .{@import("ghostpen_build").version});
             return 0;
         }
-        // `ghostpen --say "text" [--lang en-us] [--voice af_heart]`: read it
-        // through the built-in Kokoro voice, then exit. The first run
-        // downloads the model (see src/tts.zig).
+        // `ghostpen --say "text" [--lang en-us] [--voice af_heart] [--model id]`:
+        // read it through the built-in voice, then exit. The first run
+        // downloads the model and the voice (see src/tts.zig).
         if (std.mem.eql(u8, a, "--say")) {
-            var text: []const u8 = "Hello";
-            var lang: []const u8 = "";
-            var voice: []const u8 = "";
-            var model: []const u8 = "";
+            var req: tts.Request = .{ .text = "Hello" };
             var i: usize = 0;
-            while (i < args[2..].len) : (i += 1) {
-                const arg = args[2..][i];
-                if (std.mem.eql(u8, arg, "--lang") and i + 1 < args[2..].len) {
-                    i += 1;
-                    lang = args[2..][i];
-                    continue;
+            const rest = args[2..];
+            while (i < rest.len) : (i += 1) {
+                const arg = rest[i];
+                const value = if (i + 1 < rest.len) rest[i + 1] else null;
+                if (value) |v| {
+                    if (std.mem.eql(u8, arg, "--lang")) req.lang = v;
+                    if (std.mem.eql(u8, arg, "--voice")) req.voice = v;
+                    if (std.mem.eql(u8, arg, "--model")) req.model = v;
+                    if (std.mem.eql(u8, arg, "--lang") or std.mem.eql(u8, arg, "--voice") or std.mem.eql(u8, arg, "--model")) {
+                        i += 1;
+                        continue;
+                    }
                 }
-                if (std.mem.eql(u8, arg, "--voice") and i + 1 < args[2..].len) {
-                    i += 1;
-                    voice = args[2..][i];
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--model") and i + 1 < args[2..].len) {
-                    i += 1;
-                    model = args[2..][i];
-                    continue;
-                }
-                text = arg;
+                req.text = arg;
             }
-            if (lang.len == 0) lang = tts.guessLanguage(text);
-            if (tts.espeakLanguageFor(lang)) |l| lang = l;
-            if (voice.len == 0) voice = tts.voiceForLanguage(lang);
-            std.debug.print("GhostPen's voice: {s} ({s})…\n", .{ voice, lang });
-            tts.speak(text, lang, voice, model);
-            while (true) {
-                io.sleep(.fromMilliseconds(200), .awake) catch break;
-                const st = tts.status();
-                switch (st.phase) {
-                    .idle => {
-                        std.debug.print("Said it.\n", .{});
-                        return 0;
-                    },
-                    .error_state => {
-                        std.debug.print("The voice failed: {s}\n", .{st.message});
-                        return 1;
-                    },
-                    .downloading => std.debug.print("\r\tdownloading {d}%", .{@as(i64, @intFromFloat(st.progress * 100))}),
-                    else => {},
-                }
+            if (!tts_ready) {
+                std.debug.print("No data directory for the voice.\n", .{});
+                return 1;
             }
+            defer oriel.tts.deinit();
+            const r = tts.say(gpa, req) catch return 1;
+            defer {
+                gpa.free(r.voice);
+                gpa.free(r.lang);
+                gpa.free(r.backend);
+            }
+            std.debug.print("Said it ({s}, {s}, on {s}): first audio in {d} ms (model load {d} ms), {d:.1} s of audio synthesized in {d} ms.\n", .{
+                r.voice, r.lang, r.backend, r.first_audio_ms, r.load_ms, r.audio_s, r.synth_ms,
+            });
             return 0;
         }
     }
     launch_args = args[1..];
+    // The reading's own states (downloading, errors in words) go to every window.
+    tts.emit = &ttsStateChanged;
 
     // Test hook: $GHOSTPEN_TEST_AUDIO (16 kHz mono PCM16 WAV) replaces the
     // sound server for captions and dictation.

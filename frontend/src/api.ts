@@ -3,6 +3,7 @@
 // change. The types below mirror the Zig structs (src/oriel.ts, generated
 // from them, has the exact ones).
 import { orielWindow } from "./oriel";
+import { listen } from "./events";
 
 const invoke = <T>(cmd: string, args?: unknown): Promise<T> => window.oriel.invoke(cmd, args ?? null) as Promise<T>;
 
@@ -137,21 +138,44 @@ export const copyText = (text: string) => invoke<void>("copy_text", { text });
 /** Paste a result that was shown (not pasted) in the menu: clipboard + Ctrl+V into the app underneath. */
 export const pasteResult = (text: string) => invoke<ProcessResult>("paste_result", { text });
 
-// ---- built-in voice (Kokoro) -----------------------------------------------------------
+// ---- built-in voice (oriel.tts, Kokoro) ------------------------------------------------
 
+/** What a reading is doing: oriel.tts's "tts:state" ("loading" shows as
+ *  "generating"), GhostPen's "downloading" before a first reading, and the
+ *  download's progress (0–1) from "tts:download". */
 export interface TtsState {
   phase: "idle" | "downloading" | "generating" | "playing" | "error";
   message: string;
   progress: number;
   voice: string;
 }
-export const ttsState = () => invoke<TtsState>("tts_state");
-/** Settings → Voices: the model, voices and the phoneme data's state. */
+interface TtsStateEvent { phase: string; message: string; voice: string }
+/** Payload of "tts:download" (`done_mb == total_mb` at the end). */
+export interface TtsDownload { id: string; done_mb: number; total_mb: number }
+
+const voicePhase = (p: string): TtsState["phase"] =>
+  p === "loading" ? "generating" : (["idle", "downloading", "generating", "playing", "error"].includes(p) ? p : "idle") as TtsState["phase"];
+export const toTtsState = (s: TtsStateEvent, progress = 0): TtsState => ({ phase: voicePhase(s.phase), message: s.message, voice: s.voice, progress });
+
+/** Follow the voice: `cb` gets every state change and download step. */
+export function listenVoice(cb: (s: TtsState) => void): Promise<() => void> {
+  let last: TtsState = { phase: "idle", message: "", progress: 0, voice: "" };
+  const unState = listen<TtsStateEvent>("tts:state", (e) => cb((last = toTtsState(e.payload))));
+  const unDownload = listen<TtsDownload>("tts:download", (e) => {
+    if (last.phase !== "downloading" || e.payload.total_mb <= 0) return;
+    cb((last = { ...last, progress: Math.min(1, e.payload.done_mb / e.payload.total_mb) }));
+  });
+  return Promise.all([unState, unDownload]).then(([a, b]) => () => { a(); b(); });
+}
+
+export const ttsState = () => invoke<TtsStateEvent>("tts_state").then((s) => toTtsState(s));
+/** Load the voice ahead of a reading (nothing when it isn't downloaded). */
+export const ttsWarmUp = (lang = "") => invoke<void>("tts_warm_up", { lang });
+/** Settings → Voices: the models, voices, phoneme data and where it runs. */
 export const ttsCatalog = () => invoke<TtsCatalog>("tts_catalog");
-export const ttsDownloadModel = (id: string) => invoke<void>("tts_download_model", { id });
-export const ttsDownloadVoice = (id: string) => invoke<void>("tts_download_voice", { id });
-export const ttsCancelDownload = () => invoke<void>("tts_cancel_download");
-export const ttsDeleteModel = (id: string) => invoke<void>("tts_delete_model", { id });
+/** A model or voice; resolves when it's in place, progress as "tts:download". */
+export const ttsDownload = (id: string) => invoke<void>("tts_download", { id });
+export const ttsDelete = (id: string) => invoke<void>("tts_delete", { id });
 
 export interface TtsCatalogEntry {
   id: string;
@@ -160,8 +184,6 @@ export interface TtsCatalogEntry {
   lang?: string;
   note?: string;
   size: number;
-  /** A leftover partial download's bytes, 0 when there isn't one. */
-  partial?: number;
   downloaded: boolean;
 }
 export interface TtsCatalog {
@@ -169,6 +191,11 @@ export interface TtsCatalog {
   voices: TtsCatalogEntry[];
   espeak_ready: boolean;
   espeak_source: string;
+  /** "CPU", "Vulkan0", "CUDA0"… (the loaded model's, else the GPU ggml found). */
+  backend: string;
+  gpu: string | null;
+  /** The model or voice downloading now, "" when none. */
+  downloading: string;
   phase: string;
 }
 /** Read text through the built-in voice (`lang`: an espeak language like "en-us"

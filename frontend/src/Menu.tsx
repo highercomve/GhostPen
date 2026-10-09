@@ -19,6 +19,8 @@ import {
   ttsStop,
   TtsState,
   ttsState,
+  ttsWarmUp,
+  listenVoice,
   processAiAction,
   processAiCustom,
   dismissMenu,
@@ -234,9 +236,14 @@ export default function Menu() {
 
   // The built-in voice: its state lands here while the window is open.
   const [voiceState, setVoiceState] = useState<TtsState>({ phase: "idle", message: "", progress: 0, voice: "" });
+  const voiceRevision = useRef(0);
   useEffect(() => {
-    ttsState().then(setVoiceState).catch(() => {});
-    const un = listen<TtsState>("ghostpen://tts-state", (e) => setVoiceState(e.payload));
+    const revision = voiceRevision.current;
+    ttsState().then((s) => { if (voiceRevision.current === revision) setVoiceState(s); }).catch(() => {});
+    const un = listenVoice((v) => {
+      voiceRevision.current += 1;
+      setVoiceState(v);
+    });
     return () => {
       un.then((f) => f());
     };
@@ -258,14 +265,25 @@ export default function Menu() {
     }
   }, [voiceState.phase]);
 
+  // A result with Speak is shown: load the voice (in its language) meanwhile.
+  useEffect(() => {
+    if (view.kind === "result") ttsWarmUp(resultVoiceLang.current || "").catch(() => {});
+  }, [view.kind]);
+
   // The Read action: read the selection itself, no AI pass. The reading view
   // below follows the voice's progress and offers the Stop.
+  const [readText, setReadText] = useState("");
+  const [readStarting, setReadStarting] = useState(false);
   const doRead = useCallback(() => {
     if (!isTextSelection(selection) || selection.text.trim().length === 0) return;
+    voiceRevision.current += 1;
+    setReadText(selection.text);
+    setReadStarting(true);
+    setVoiceState({ phase: "generating", message: "Preparing your reading…", progress: 0, voice: "" });
     setView({ kind: "reading" });
     ttsSpeak(selection.text, "", "", "").catch((e) => {
-      setView({ kind: "error", message: String(e) });
-    });
+      setVoiceState({ phase: "error", message: String(e), progress: 0, voice: "" });
+    }).finally(() => setReadStarting(false));
   }, [selection]);
 
   // The latest speakResult for the key handler without re-binding it.
@@ -361,24 +379,13 @@ export default function Menu() {
     if (view.kind === "translate") setLangCursor(0);
   }, [view.kind]);
 
-  // The reading view returns to the menu when the voice finished (or failed):
-  // the user read their text, GhostPen is idle again.
-  useEffect(() => {
-    if (view.kind !== "reading") return;
-    if (voiceState.phase === "idle" || voiceState.phase === "error") {
-      const failed = voiceState.phase === "error";
-      const message = voiceState.message;
-      setView(failed ? { kind: "error", message } : { kind: "menu" });
-    }
-  }, [view.kind, voiceState.phase]);
-
   // Keep the cursor in range if the item count changes (e.g. custom actions load in).
   useEffect(() => {
     setCursor((c) => Math.min(c, Math.max(0, menuItems.length - 1)));
   }, [menuItems.length]);
 
   // ---- keyboard control --------------------------------------------------------------
-  // Escape closes the menu; from a sub-view it goes back to the menu first.
+  // Escape dismisses reading/the menu; other sub-views return to the menu first.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -390,9 +397,12 @@ export default function Menu() {
       if (view.kind === "translate" || view.kind === "result" || view.kind === "error") {
         setView({ kind: "menu" });
       } else if (view.kind === "reading") {
-        // Esc stops the reading and goes back to the actions.
+        // Cancel playback and dismiss, even when reading has already stopped.
+        setReadStarting(false);
         ttsStop().catch(() => {});
+        setVoiceState({ phase: "idle", message: "Stopped", progress: 0, voice: "" });
         setView({ kind: "menu" });
+        dismissMenu();
       } else if (view.kind === "loading") {
         // Stop the built-in model's answer instead of pasting it later.
         cancelAi().catch(() => {});
@@ -406,7 +416,7 @@ export default function Menu() {
     return () => window.removeEventListener("keydown", onKey);
   }, [view]);
 
-  // Menu view: ↑/↓ (or j/k) move the cursor, ←/→ (or h/l) change intensity, Enter activates,
+  // Menu view: up/down and j/k traverse actions, left/right and h/l change intensity, Enter activates,
   // and 1–9 jump to and run an action directly.
   useEffect(() => {
     if (view.kind !== "menu") return;
@@ -426,11 +436,17 @@ export default function Menu() {
       }
       switch (e.key) {
         case "ArrowDown":
+          e.preventDefault();
+          setCursor((c) => (c + 1) % n);
+          break;
         case "j":
           e.preventDefault();
           setCursor((c) => (c + 1) % n);
           break;
         case "ArrowUp":
+          e.preventDefault();
+          setCursor((c) => (c - 1 + n) % n);
+          break;
         case "k":
           e.preventDefault();
           setCursor((c) => (c - 1 + n) % n);
@@ -660,7 +676,7 @@ export default function Menu() {
                 className={`action ${i === cursor ? "selected" : ""}`}
                 disabled={empty}
                 onClick={() => a.activate()}
-                title="Shift+click (or Shift+number): preview the result here, paste it after reading"
+                title={a.id === "__read" ? "Read the selected text aloud" : "Shift+click (or Shift+number): preview the result here, paste it after reading"}
                 onMouseEnter={() => setCursor(i)}
               >
                 <Icon name={a.icon} className="action-icon" />
@@ -723,37 +739,34 @@ export default function Menu() {
       )}
 
       {view.kind === "reading" && (
-        <div className="state reading">
-          <div className={voiceState.phase === "playing" ? "read-note" : "read-note breathing"} aria-hidden>
-            {voiceState.phase === "downloading" && (
-              <>
-                <div className="llm-progress">
-                  <div className="llm-bar"><div style={{ width: `${Math.round(voiceState.progress * 100)}%` }} /></div>
-                  <span>{voiceState.message} {Math.round(voiceState.progress * 100)}%</span>
-                </div>
-              </>
+        <section className="state reading" aria-label="Read aloud">
+          <div className="reading-heading"><Icon name="read" /><h2>Read aloud</h2></div>
+          <div className="reading-status" role="status" aria-live="polite">
+            {readStarting || voiceState.phase === "generating" || voiceState.phase === "downloading" ? <span className="spinner" /> : <Icon name="read" />}
+            <div>
+              <strong>{readStarting ? "Preparing your reading…" : voiceState.phase === "playing" ? "Reading aloud" : voiceState.phase === "idle" ? (voiceState.message === "Stopped" ? "Reading stopped" : "Reading finished") : voiceState.phase === "error" ? "Couldn't read this text" : voiceState.phase === "downloading" ? "Downloading the voice" : "Preparing the voice"}</strong>
+              <p>{voiceState.phase === "idle" ? "Read again, or return to your actions." : voiceState.phase === "playing" ? "You can keep using other apps while listening." : voiceState.message || "The first sentence will play as soon as it's ready."}</p>
+            </div>
+          </div>
+          {voiceState.phase === "downloading" && <progress className="reading-download" max={1} value={voiceState.progress} aria-label="Voice download progress" />}
+          <blockquote className="reading-text">{readText}</blockquote>
+          <div className="row reading-controls">
+            {readStarting || ["generating", "playing", "downloading"].includes(voiceState.phase) ? (
+              <button className="action small primary" onClick={async () => {
+                setReadStarting(false);
+                await ttsStop().catch(() => {});
+                setVoiceState({ phase: "idle", message: "Stopped", progress: 0, voice: "" });
+              }}>Stop reading</button>
+            ) : (
+              <button className="action small primary" onClick={() => {
+                setReadStarting(true);
+                setVoiceState({ phase: "generating", message: "Preparing your reading…", progress: 0, voice: "" });
+                ttsSpeak(readText, "", "", "").catch((e) => setVoiceState({ phase: "error", message: String(e), progress: 0, voice: "" })).finally(() => setReadStarting(false));
+              }}>Read again</button>
             )}
-            {voiceState.phase === "generating" && <span>{voiceState.message || "Warming the voice…"}</span>}
-            {voiceState.phase === "playing" && <span className="ok">🔊 Reading…</span>}
-            {voiceState.phase === "idle" && <span>Ready to read.</span>}
-            <div className="hint">{voiceState.voice ? `voice: ${voiceState.voice}` : ""}</div>
+            <button className="action small" onClick={async () => { await ttsStop().catch(() => {}); setView({ kind: "menu" }); }}>Back to actions</button>
           </div>
-          <div className="row">
-            <button
-              className="action small primary"
-              title="Stop the voice (Esc)"
-              onClick={async () => {
-                await ttsStop();
-                setView({ kind: "menu" });
-              }}
-            >
-              ■ Stop
-            </button>
-            <button className="action small" onClick={async () => { await ttsStop().catch(() => {}); setView({ kind: "menu" }); }}>
-              Close
-            </button>
-          </div>
-        </div>
+        </section>
       )}
 
       {view.kind === "result" && (

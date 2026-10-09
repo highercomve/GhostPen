@@ -1,80 +1,26 @@
-//! The built-in voice: Kokoro-82M offline text-to-speech, synthesized and
-//! played inside the app (kokoro.cpp + espeak-ng compiled in through Oriel's
-//! `-Dkokoro`; playback through the vendored miniaudio).
+//! The built-in voice: Kokoro-82M offline text-to-speech through Oriel's
+//! `oriel.tts` (kokoro.cpp + espeak-ng compiled in with `-Dkokoro`, the
+//! model on the GPU where ggml finds one, streaming playback, Markdown read
+//! as prose, the language guessed from the text).
 //!
-//! First use downloads the voice model (~135 MB) and a voice pack (0.5 MB)
-//! into `<data dir>/GhostPen/tts` — the same verified-resume downloads the
-//! model list uses (llm_models.zig does the fetching). The espeak-ng phoneme
-//! data comes from the system package (Linux), Homebrew (macOS) or
-//! GhostPen's own tts dir once present. One request at a time: a newer
-//! `speak` or `stop` cancels the running one. Plain std: the CLI (`--say`)
-//! uses it directly.
+//! What GhostPen adds on top: the models live in `<data dir>/GhostPen/tts`
+//! (downloads from older builds are kept), the menu's translate targets
+//! ("French") map to espeak languages, a first reading downloads the model
+//! and the voice for its language before it speaks, and readings run on a
+//! worker so `tts_speak` returns at once (the UI follows "tts:state").
+//! One reading at a time: a newer `speak` or `stop` cancels the running one.
+//! The CLI (`--say`) uses `say` directly.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const oriel = @import("oriel");
 const llm_models = @import("llm_models.zig");
 
-const log = std.log.scoped(.tts);
+const tts = oriel.tts;
+const log = std.log.scoped(.ghostpen_tts);
 
-const Arena = std.heap.ArenaAllocator;
+pub const State = tts.State;
 
-// ---- the model and voice catalog ---------------------------------------------------------
-
-/// Model catalog entries (simonfxr/kokoro.cpp-GGUF; the SHA-256s are the
-/// repo's manifest.json, verified on download like every other model).
-pub const Model = struct {
-    id: []const u8,
-    name: []const u8,
-    file: []const u8,
-    size: u64,
-    sha256: []const u8,
-    note: []const u8 = "",
-};
-
-pub const Voice = struct {
-    /// The Kokoro voice id, also the file's stem (`af_heart` → `kokoro-voice-af_heart.gguf`).
-    id: []const u8,
-    /// The espeak-ng language this voice reads ("en-us", "es", "fr", ...).
-    lang: []const u8,
-    label: []const u8,
-    size: u64 = 522560,
-    sha256: []const u8,
-};
-
-pub const models = [_]Model{
-    .{ .id = "kokoro-82m-q8_0", .name = "Kokoro 82M (Q8_0)", .file = "kokoro-82m-q8_0.gguf", .size = 141322752, .sha256 = "61cc0186b3a761bdc31ba5d83b9228e4a72bf974cc5b94c281a5f450e683d2cc", .note = "135 MB · every voice reads it · this is the default" },
-    .{ .id = "kokoro-82m-f16", .name = "Kokoro 82M (F16)", .file = "kokoro-82m-f16.gguf", .size = 163728096, .sha256 = "597926de84f5550e1526ce0abde4e496209d464afc9274d8603d14f3c04d1f67", .note = "156 MB · slightly fuller sound" },
-};
-
-/// The curated voice list (the GGUF repo carries all 54 official voice
-/// packs; these cover the languages the translate menu offers).
-pub const voices = [_]Voice{
-    .{ .id = "af_heart", .lang = "en-us", .label = "English (US) · Heart", .sha256 = "c2f44076dfb8f9c098a85d634f6d6b46b038f80e3afdf695ff3b90f6d9ef473f" },
-    .{ .id = "af_bella", .lang = "en-us", .label = "English (US) · Bella", .sha256 = "63d24d0e5d91cb6cf3bca294a3b8c0b4428aa54ac9b5de42e5ba07f6bd110ea8" },
-    .{ .id = "af_nicole", .lang = "en-us", .label = "English (US) · Nicole", .sha256 = "04bee67dd22b1eb687e50187c6851db96b6a1ebeee96daf5ec9448427a1bce42" },
-    .{ .id = "am_michael", .lang = "en-us", .label = "English (US) · Michael", .sha256 = "a2b71b49dd6320a2e235f8dfd176b197a2f76d5b32c1e3222efb08f117e78335" },
-    .{ .id = "am_fenrir", .lang = "en-us", .label = "English (US) · Fenrir", .sha256 = "3983d48599b5e219f581ea4fbc186d9181101d282cd2715d521775ba8a6ba882" },
-    .{ .id = "bf_emma", .lang = "en-gb", .label = "English (UK) · Emma", .sha256 = "78d519c9bfd34b5e15475169d0757cc77a8a3053d05dce65d3fcb77bf6743448" },
-    .{ .id = "ef_dora", .lang = "es", .label = "Español · Dora", .sha256 = "7fa2a87038c41301363e8e7d97bad2260c20da1a786ec22e0ea954d67dc4c412" },
-    .{ .id = "em_alex", .lang = "es", .label = "Español · Alex", .sha256 = "bf44594da819e77b4575d9912b8d4b2ab73d67a6a2b17031412a826b98db2b6f" },
-    .{ .id = "ff_siwis", .lang = "fr", .label = "Français · Siwis", .sha256 = "ebeb2847f5a56301af4d61fd31e5c568dfc05b4017694784e86eff9b17d08296" },
-    .{ .id = "pf_dora", .lang = "pt-br", .label = "Português · Dora", .sha256 = "a08314e467100dcb995d520ac0ccc52860d3b0484df7be1a51308a26127e72bd" },
-    .{ .id = "if_sara", .lang = "it", .label = "Italiano · Sara", .sha256 = "cfc7d3a2ab08df1791ea0e4518c66d0191e91376b1ae437adea826d9556b7b70" },
-    .{ .id = "jf_alpha", .lang = "ja", .label = "日本語 · Alpha", .sha256 = "482bf66e90ff6f42c0edf30ec4fb7f7d840347d4b76e8c3ea2bb59932c29f441" },
-    .{ .id = "zf_xiaobei", .lang = "zh", .label = "中文 · Xiaobei", .sha256 = "9d6ab39cba27274ace22170c47e1c4bafe556d95413fd2fe3b8d5be1f37c2fbb" },
-    .{ .id = "hf_alpha", .lang = "hi", .label = "हिन्दी · Alpha", .sha256 = "e1948214324b9af419ab10053caeb303752f4feee6e641d1dae9a04cdcd57036" },
-};
-
-pub fn findVoice(id: []const u8) ?Voice {
-    for (voices) |v| if (std.mem.eql(u8, v.id, id)) return v;
-    return null;
-}
-
-pub fn findModel(id: []const u8) ?Model {
-    for (models) |m| if (std.mem.eql(u8, m.id, id)) return m;
-    return null;
-}
+// ---- languages and voices ------------------------------------------------------------------
 
 /// "French" → "fr" over the languages the translate menu offers (the exact
 /// names `api.ts`'s TRANSLATE_LANGUAGES carries); null when not in the list.
@@ -90,687 +36,489 @@ pub fn espeakLanguageFor(target: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The voice whose language matches, else the default US English one.
-pub fn voiceForLanguage(lang: []const u8) []const u8 {
-    for (voices) |v| if (std.mem.eql(u8, v.lang, lang)) return v.id;
-    return "af_heart";
+/// The espeak language to read `text` in: `lang` as given (an espeak
+/// language or a translate target), or guessed from the text when empty.
+pub fn languageFor(text: []const u8, lang: []const u8) []const u8 {
+    if (lang.len == 0 or std.mem.eql(u8, lang, "auto")) return tts.guessLanguage(text);
+    return espeakLanguageFor(lang) orelse lang;
 }
 
-/// A cheap guess over the text the user selected: unicode ranges for CJK and
-/// kana, then function-word matching for Spanish vs English (the two languages
-/// one is most likely to confuse on a Latin-Alphabet desktop), accent density
-/// as the last Spanish hint. Nothing clever: covers the catalog's languages.
-pub fn guessLanguage(text: []const u8) []const u8 {
-    var cjk: usize = 0;
-    var kana: usize = 0;
-    var latin: usize = 0;
-    var accented: usize = 0;
-    var i: usize = 0;
-    var strong_es: usize = 0;
-    while (i < text.len) {
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
-            i += 1;
-            continue;
-        };
-        if (i + len > text.len) break;
-        const cp = std.unicode.utf8Decode(text[i .. i + len]) catch {
-            i += len;
-            continue;
-        };
-        switch (cp) {
-            0x0400...0x04FF => return "ru", // cyrillic (espeak): say nothing and leave
-            0x4E00...0x9FFF, 0x3400...0x4DBF => cjk += 1,
-            0x3040...0x30FF => kana += 1,
-            // Spanish tell-tales: ñ, ¿ and ¡ (English text never carries them).
-            0x00F1, 0x00BF, 0x00A1 => {
-                latin += 1;
-                accented += 1;
-                strong_es += 1;
-            },
-            0x00C0...0x00F0, 0x00F2...0x00FF, // latin-1 supplement (á, é, í, ó, ú, ü; ñ/¿/¡ above)
-            0x0100...0x024F => {
-                latin += 1;
-                accented += 1;
-            },
-            0x0041...0x007A => latin += 1,
-            else => {},
-        }
-        i += len;
-    }
-    if (strong_es > 0) return "es";
-    if (kana > cjk / 4) return "ja";
-    if (cjk > 0 and kana == 0) return "zh";
-    if (latin == 0) return "en-us";
-    // Spanish markers as English-reserving word markers.
-    const es_words = [_][]const u8{ "el", "la", "los", "las", "un", "una", "de", "del", "que", "con", "para", "por", "es", "son", "esta", "están", "más", "sí", "en", "su", "su", "año", "sobre" };
-    const en_words = [_][]const u8{ "the", "a", "an", "of", "and", "or", "to", "in", "is", "are", "it", "that", "with", "for", "on", "as", "this", "be", "was" };
-    var es_hits: usize = 0;
-    var en_hits: usize = 0;
-    var word_it = std.mem.tokenizeAny(u8, text, " ,;:.!?()[]{}\"/\t\r\n");
-    while (word_it.next()) |w| {
-        for (es_words) |ew| {
-            if (std.ascii.eqlIgnoreCase(w, ew)) {
-                es_hits += 1;
-                break;
-            }
-        }
-        for (en_words) |ew| {
-            if (std.ascii.eqlIgnoreCase(w, ew)) {
-                en_hits += 1;
-                break;
-            }
-        }
-    }
-    if (es_hits >= en_hits * 2 and es_hits > 1) return "es";
-    if (en_hits > es_hits * 2 and en_hits > 1) return "en-us";
-    // Accent density above 12% says Spanish over plain English; otherwise the
-    // default voice stays (the UK/US voices read most Latin text passably).
-    if (accented * 100 / (1 + latin) > 12) return "es";
-    return "en-us";
+/// The voice for `lang`: one of that language already on the device, else
+/// the catalog's first for it (downloaded by the reading), else US English.
+pub fn voiceFor(lang: []const u8) []const u8 {
+    for (&tts.voices) |*v| if (std.mem.eql(u8, v.lang, lang) and tts.voicePresent(v)) return v.id;
+    for (&tts.voices) |*v| if (std.mem.eql(u8, v.lang, lang)) return v.id;
+    return tts.voices[0].id;
 }
 
-// ---- state: what the UI shows and which request is current -------------------------------
+// ---- files ---------------------------------------------------------------------------------
 
-pub const Phase = enum { idle, downloading, generating, playing, error_state };
-
-pub const State = struct {
-    phase: Phase = .idle,
-    /// What the user sees, empty when idle.
-    message: []const u8 = "",
-    /// 0–1 while downloading and while playing.
-    progress: f64 = 0,
-    /// The voice sounding now ("" while generating).
-    voice: []const u8 = "",
-};
-
-var state_mutex: std.Io.Mutex = .init;
-var app_state: State = .{};
-
-/// Event into the UI: main.zig sets this to broadcast `ghostpen://tts-state`;
-/// the CLI path leaves it null.
-pub var emit: ?*const fn (State) void = null;
-
-fn setState(s: State) void {
-    state_mutex.lockUncancelable(io);
-    app_state = s;
-    state_mutex.unlock(io);
-    if (emit) |f| f(s);
-}
-
-pub fn status() State {
-    state_mutex.lockUncancelable(io);
-    defer state_mutex.unlock(io);
-    return app_state;
-}
-
-/// Bumped to invalidate the request a busy worker holds: a new speak or a
-/// stop while generating makes the running one drop its output.
-var generation: u64 = 0;
-
-fn currentGeneration() u64 {
-    state_mutex.lockUncancelable(io);
-    defer state_mutex.unlock(io);
-    return generation;
-}
-
-fn bumpGeneration() u64 {
-    state_mutex.lockUncancelable(io);
-    defer state_mutex.unlock(io);
-    generation += 1;
-    return generation;
-}
-
-// ---- files and dirs ------------------------------------------------------------------------
-
-pub const Dirs = struct {
-    /// `<data dir>/GhostPen/tts`.
-    root: []const u8,
-};
-
-/// The model URL scheme on Hugging Face (the download machinery takes plain URLs).
-pub const repoUrl = "https://huggingface.co/simonfxr/kokoro.cpp-GGUF/resolve/main/";
-
-/// The tts dir; null when the app has no data dir at all (the helper class
-/// contains the models dir we sit next to).
-pub fn dirs(arena: std.mem.Allocator, env: *const std.process.Environ.Map) ?Dirs {
+/// `<data dir>/GhostPen/tts` (next to the chat models); null when the app has
+/// no data dir at all.
+pub fn modelsDir(arena: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]const u8 {
     const own = llm_models.ownDir(arena, env) orelse return null;
     const app_root = std.fs.path.dirname(own) orelse return null;
-    return Dirs{
-        .root = std.fs.path.join(arena, &.{ app_root, "tts" }) catch return null,
+    return std.fs.path.join(arena, &.{ app_root, "tts" }) catch null;
+}
+
+/// Early builds kept the voice in `<data dir>/ghostpen/tts`: move what the
+/// catalog knows from there (same file names) unless it is here already.
+fn adoptLegacy(arena: std.mem.Allocator, dir: []const u8, io: std.Io) void {
+    const app_root = std.fs.path.dirname(dir) orelse return;
+    const base = std.fs.path.dirname(app_root) orelse return;
+    const legacy = std.fs.path.join(arena, &.{ base, "ghostpen", "tts" }) catch return;
+    if (std.mem.eql(u8, legacy, dir)) return;
+    const cwd = std.Io.Dir.cwd();
+    var made = false;
+    inline for (.{ tts.models, tts.voices }) |list| for (list) |item| {
+        const from = std.fs.path.join(arena, &.{ legacy, item.file }) catch return;
+        const to = std.fs.path.join(arena, &.{ dir, item.file }) catch return;
+        const old = cwd.statFile(io, from, .{}) catch continue;
+        if (old.size != item.size) continue;
+        if (cwd.statFile(io, to, .{})) |_| continue else |_| {}
+        if (!made) {
+            cwd.createDirPath(io, dir) catch return;
+            made = true;
+        }
+        if (cwd.rename(from, cwd, to, io)) {
+            log.info("moved {s} from {s}", .{ item.file, legacy });
+        } else |err| log.warn("cannot move {s} from {s}: {s}", .{ item.file, legacy, @errorName(err) });
     };
 }
 
-fn modelFile(arena: std.mem.Allocator, d: Dirs, file: []const u8) ?[]const u8 {
-    const path = std.fs.path.join(arena, &.{ d.root, file }) catch return null;
-    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
-    _ = st.size;
-    return path;
-}
-
-fn voiceFile(arena: std.mem.Allocator, d: Dirs, id: []const u8) ?[]const u8 {
-    const name = std.fmt.allocPrint(arena, "kokoro-voice-{s}.gguf", .{id}) catch return null;
-    const path = std.fs.path.join(arena, &.{ d.root, name }) catch return null;
-    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
-    _ = st.size;
-    return path;
-}
-
-/// The espeak-ng phoneme data the engine reads IPA phonemes from: the
-/// GHOSTPEN_ESPEAK_DATA env var, GhostPen's own `<tts>/espeak-ng-data`, then
-/// the system package (Linux) or Homebrew (macOS). Duplicated into `arena`.
-pub fn espeakDataDir(arena: std.mem.Allocator, env: *const std.process.Environ.Map, d: ?Dirs) ?[]const u8 {
-    if (env.get("GHOSTPEN_ESPEAK_DATA")) |p| if (p.len > 0) {
-        if (hasPhondata(arena, p)) return arena.dupe(u8, p) catch null;
-    };
-    if (d) |dirs_| {
-        const own = std.fmt.allocPrint(arena, "{s}/espeak-ng-data", .{dirs_.root}) catch null;
-        if (own) |o| if (hasPhondata(arena, o)) return o;
-    }
-    const candidates: []const []const u8 = switch (builtin.os.tag) {
-        .macos => &.{ "/opt/homebrew/share/espeak-ng-data", "/usr/local/share/espeak-ng-data" },
-        else => &.{ "/usr/share/espeak-ng-data", "/usr/local/share/espeak-ng-data" },
-    };
-    for (candidates) |c| {
-        if (hasPhondata(arena, c)) return arena.dupe(u8, c) catch null;
-    }
-    return null;
-}
-
-fn hasPhondata(arena: std.mem.Allocator, dir: []const u8) bool {
-    const probe = std.fmt.allocPrint(arena, "{s}/phondata", .{dir}) catch return false;
-    const st = std.Io.Dir.cwd().statFile(io, probe, .{}) catch return false;
-    _ = st.size;
+/// Point `oriel.tts` at GhostPen's models dir (once, at startup; `arena`
+/// outlives the app). False when there is no data dir.
+pub fn setUp(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env: *const std.process.Environ.Map) bool {
+    const dir = modelsDir(arena, env) orelse return false;
+    adoptLegacy(arena, dir, io);
+    tts.init(io, gpa, dir);
+    shared_io = io;
+    shared_gpa = gpa;
+    ready = true;
     return true;
 }
 
-// ---- the engine -----------------------------------------------------------------------------
+var shared_io: std.Io = undefined;
+var shared_gpa: std.mem.Allocator = undefined;
+var ready = false;
 
-const Context = oriel.kokoro.Context;
+// ---- state: what the UI shows --------------------------------------------------------------
 
-var engine: ?*Context = null;
-var engine_model_file: []const u8 = "";
-var engine_voice: []const u8 = "";
-var engine_lang: []const u8 = "";
-var engine_lock: std.Io.Mutex = .init;
-var espeak_env_ready: bool = false;
+/// GhostPen's own "tts:state" emissions (the phases before `oriel.tts.speak`
+/// takes over: "downloading", and errors in words); main.zig broadcasts it,
+/// the CLI leaves it null.
+pub var emit: ?*const fn (State) void = null;
 
-/// `KOKORO_ESPEAK_DATA_PATH` must be in the environment before espeak's
-/// first init — kokoro.cpp reads it lazily once per process.
-fn ensureEspeakEnv(data_dir: []const u8) void {
-    if (espeak_env_ready) return;
-    switch (builtin.os.tag) {
-        .windows => {
-            // Windows keeps CRT's env for _putenv; the data next to the exe
-            // is espeak's own fallback. TODO: _putenv for GhostPen's dir.
-            log.info("tts: Windows reads espeak data next to the exe", .{});
-        },
-        else => {
-            const zdir = std.heap.page_allocator.dupeZ(u8, data_dir) catch return;
-            defer std.heap.page_allocator.free(zdir);
-            if (setenv("KOKORO_ESPEAK_DATA_PATH", zdir, 1) == 0) {
-                espeak_env_ready = true;
-                log.info("tts: espeak data at {s}", .{data_dir});
-            }
-        },
+var state_mutex: std.Io.Mutex = .init;
+/// What GhostPen said last, while a reading is before `oriel.tts.speak`.
+var own_state: State = .{ .phase = "idle", .message = "", .voice = "" };
+var own_message: [256]u8 = undefined;
+var own_voice: [32]u8 = undefined;
+/// A worker is downloading for a reading (`own_state` is the truth then).
+var preparing = false;
+/// Bumped by every `speak` and `stop`: a stale worker says nothing more.
+var generation: u64 = 0;
+
+fn current(gen: u64) bool {
+    state_mutex.lockUncancelable(shared_io);
+    defer state_mutex.unlock(shared_io);
+    return generation == gen;
+}
+
+/// Store and broadcast `s`, unless `gen` (a reading's) is no longer current.
+fn setState(gen: ?u64, s: State) void {
+    state_mutex.lockUncancelable(shared_io);
+    defer state_mutex.unlock(shared_io);
+    if (gen) |g| if (generation != g) return;
+    const m = @min(s.message.len, own_message.len);
+    const v = @min(s.voice.len, own_voice.len);
+    @memcpy(own_message[0..m], s.message[0..m]);
+    @memcpy(own_voice[0..v], s.voice[0..v]);
+    own_state = .{ .phase = s.phase, .message = own_message[0..m], .voice = own_voice[0..v] };
+    if (emit) |f| f(own_state);
+}
+
+/// The reading's state now (a window asks on load; updates come by event).
+/// Valid until the next state change.
+pub fn status() State {
+    state_mutex.lockUncancelable(shared_io);
+    const own = own_state;
+    const prep = preparing;
+    state_mutex.unlock(shared_io);
+    if (prep or !ready) return own;
+    // Not before the first reading: `oriel.tts.status` loads the GPU backends.
+    if (std.mem.eql(u8, own.phase, "idle") or std.mem.eql(u8, own.phase, "error")) return own;
+    const st = tts.status();
+    if (!st.speaking) return .{ .phase = "idle", .message = "", .voice = "" };
+    return .{ .phase = st.phase, .message = "", .voice = "" };
+}
+
+// ---- downloads -----------------------------------------------------------------------------
+
+fn label(id: []const u8) []const u8 {
+    if (tts.findModel(id)) |m| return m.label;
+    if (tts.findVoice(id)) |v| return v.label;
+    return id;
+}
+
+fn present(id: []const u8) bool {
+    if (tts.findModel(id)) |m| return tts.modelPresent(m);
+    if (tts.findVoice(id)) |v| return tts.voicePresent(v);
+    return false;
+}
+
+/// `oriel.tts.download`, waiting out another download in progress (one at a
+/// time; Settings may be fetching something else). Gives up once `gen`
+/// (when given) is stale.
+fn fetch(id: []const u8, gen: ?u64) !void {
+    while (true) {
+        tts.download(id) catch |err| {
+            if (err != error.AlreadyDownloading) return err;
+            if (gen) |g| if (!current(g)) return error.Cancelled;
+            try shared_io.sleep(.fromMilliseconds(250), .awake);
+            continue;
+        };
+        return;
     }
 }
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+/// What a download error means to the user.
+pub fn downloadMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ChecksumMismatch => "The download was damaged (checksum mismatch) and was deleted: try again.",
+        error.Truncated => "The download stopped early: try again.",
+        error.BadHttpStatus => "The server refused the download: try again later.",
+        error.UnknownModel => "Unknown model or voice.",
+        else => "The download failed: check the connection and try again.",
+    };
+}
 
-const LoadResult = union(enum) {
-    ok,
-    /// A message for the user (missing model/voice download case).
-    missing: []const u8,
-    /// An engine failure, message as-is.
-    failed: []const u8,
+/// What a speaking error means to the user.
+pub fn speakMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.NoModel => "The voice model is not downloaded yet (Settings → Voices).",
+        error.NoVoice, error.UnknownVoice => "The voice is not downloaded yet (Settings → Voices).",
+        error.EspeakDataMissing => "No phoneme data (espeak-ng-data) was found next to GhostPen or on the system.",
+        error.ModelLoadFailed => "Could not load the voice model: delete it in Settings → Voices and download it again.",
+        error.VoiceFailed => "Could not load the voice: delete it in Settings → Voices and download it again.",
+        error.LanguageFailed => "The voice can't read this language.",
+        else => "Could not generate or play the voice. Try reading again.",
+    };
+}
+
+// ---- reading -------------------------------------------------------------------------------
+
+pub const Request = struct {
+    text: []const u8,
+    /// An espeak language, a translate target ("French"), or "" to guess.
+    lang: []const u8 = "",
+    /// A voice id, or "" for the language's.
+    voice: []const u8 = "",
+    /// A model id, or "" for the default (any on the device).
+    model: []const u8 = "",
 };
 
-/// Load (and keep) the engine in `model_id`/`voice`/`lang`. A voice or
-/// language change re-voices the running context cheaply; a model change
-/// reloads it. Caller holds `engine_lock`.
-fn ensureEngine(arena: std.mem.Allocator, d: Dirs, model_id: []const u8, voice: []const u8, lang: []const u8, espeak_dir: []const u8) LoadResult {
-    ensureEspeakEnv(espeak_dir);
-    const model = findModel(model_id) orelse models[0];
-    const model_path = modelFile(arena, d, model.file) orelse return .{ .missing = "The voice model is not downloaded yet" };
-    if (engine) |ctx| {
-        if (!std.mem.eql(u8, engine_model_file, model_path)) {
-            oriel.kokoro.free(ctx);
-            engine = null;
-        }
-    }
-    if (engine == null) {
-        const mp = arena.dupeZ(u8, model_path) catch return .{ .failed = "out of memory" };
-        var params = oriel.kokoro.defaultParams();
-        params.n_threads = 4;
-        params.length_scale = 1.0;
-        params.backend = oriel.kokoro.c.KOKORO_BACKEND_AUTO;
-        engine = oriel.kokoro.init(mp, params) orelse {
-            return .{ .failed = std.fmt.allocPrint(arena, "Could not load the voice model ({s})", .{oriel.kokoro.lastError()}) catch "Could not load the voice model" };
-        };
-        engine_model_file = mp;
-        engine_voice = "";
-        engine_lang = "";
-    }
-    const ctx = engine.?;
-    if (std.mem.eql(u8, engine_voice, voice) and std.mem.eql(u8, engine_lang, lang)) return .ok;
-
-    const vp = voiceFile(arena, d, voice) orelse return .{ .missing = "The voice is not downloaded yet" };
-    const vpz = arena.dupeZ(u8, vp) catch return .{ .failed = "out of memory" };
-    const langz = arena.dupeZ(u8, lang) catch return .{ .failed = "out of memory" };
-    oriel.kokoro.loadVoice(ctx, vpz) catch {
-        return .{ .failed = std.fmt.allocPrint(arena, "Could not load the voice ({s})", .{oriel.kokoro.lastError()}) catch "Could not load the voice" };
-    };
-    oriel.kokoro.setLanguage(ctx, langz) catch {
-        return .{ .failed = std.fmt.allocPrint(arena, "The language is not available ({s})", .{oriel.kokoro.lastError()}) catch "The language is not available" };
-    };
-    engine_voice = voice;
-    engine_lang = langz;
-    return .ok;
-}
-
-// ---- playback: the vendored miniaudio through oriel.audio_play ------------------------------
-var holding_samples: ?[]f32 = null;
-
-
-fn playProgress(fraction: f64) void {
-    setState(.{ .phase = .playing, .progress = fraction, .message = "", .voice = engine_voice });
-}
-
-fn playDone() void {
-    // Called on the device thread when the utterance ended (the chained
-    // request loop spun on `finished()` before this for the last chunk).
-    if (holding_samples) |s| {
-        gpa.free(s);
-        holding_samples = null;
-    }
-    setState(.{ .phase = .idle, .message = "", .progress = 0, .voice = "" });
-}
-
-fn stopPlayback() void {
-    oriel.audio_play.stop();
-    if (holding_samples) |s| {
-        gpa.free(s);
-        holding_samples = null;
-    }
-    setState(.{ .phase = .idle, .message = "", .progress = 0, .voice = "" });
-}
-
-fn playSamples(proc_io: std.Io, samples: []const f32, rate: u32) !void {
-    oriel.audio_play.start(proc_io, gpa, samples, rate) catch |err| {
-        return err;
-    };
-}
-
-// ---- the worker -----------------------------------------------------------------------------
-
-pub var io: std.Io = undefined;
-var gpa: std.mem.Allocator = undefined;
-var shared_env: *const std.process.Environ.Map = undefined;
-var shared_dirs: ?Dirs = null;
-var globals_ready = false;
-
-/// Called once from main before any use, with the process environment and
-/// the app's data dir; the app wires `emit` here.
-pub fn init(emit_fn: ?*const fn (State) void, proc_io: std.Io, allocator: std.mem.Allocator, env: *const std.process.Environ.Map, d: ?Dirs) void {
-    emit = emit_fn;
-    io = proc_io;
-    gpa = allocator;
-    shared_env = env;
-    shared_dirs = d;
-    oriel.audio_play.on_progress = playProgress;
-    oriel.audio_play.on_done = playDone;
-    globals_ready = true;
-    setState(.{ .phase = .idle });
-}
-
-const Request = struct {
-    arena: Arena,
-    text: []const u8,
+const Plan = struct {
     lang: []const u8,
     voice: []const u8,
+    /// What must be downloaded first ("" when nothing).
     model_id: []const u8,
+    voice_id: []const u8,
+    options: tts.Options,
+};
+
+fn plan(req: Request) Plan {
+    const lang = languageFor(req.text, req.lang);
+    const voice = if (req.voice.len > 0) req.voice else voiceFor(lang);
+    var model_id: []const u8 = "";
+    if (req.model.len > 0) {
+        if (!present(req.model)) model_id = req.model;
+    } else {
+        for (&tts.models) |*m| {
+            if (tts.modelPresent(m)) break;
+        } else model_id = tts.models[0].id;
+    }
+    return .{
+        .lang = lang,
+        .voice = voice,
+        .model_id = model_id,
+        .voice_id = if (present(voice)) "" else voice,
+        .options = .{ .model = if (req.model.len > 0) req.model else "auto", .voice = voice, .lang = lang },
+    };
+}
+
+const Job = struct {
+    arena: std.heap.ArenaAllocator,
+    req: Request,
     gen: u64,
 };
 
-fn runRequest(req: *Request) void {
-    defer {
-        req.arena.deinit();
-        gpa.destroy(req);
-    }
-    const arena = req.arena.allocator();
-    const d = shared_dirs orelse {
-        setState(.{ .phase = .error_state, .message = "The app has no data dir", .progress = 0 });
-        return;
+/// Read `req` aloud on a worker (downloading what it needs first); returns
+/// at once. A running reading stops.
+pub fn speak(req: Request) void {
+    if (!ready) return;
+    const gen = blk: {
+        state_mutex.lockUncancelable(shared_io);
+        defer state_mutex.unlock(shared_io);
+        generation += 1;
+        break :blk generation;
     };
-    const is_cancelled = struct {
-        fn f(r: *const Request) bool {
-            return currentGeneration() != r.gen;
-        }
-    }.f;
-
-    // 1. The model (a one-time ~135 MB download; resumable and verified).
-    const model = findModel(req.model_id) orelse models[0];
-    if (modelFile(arena, d, model.file) == null) {
-        setState(.{ .phase = .downloading, .message = model.name, .progress = 0 });
-        var http_status: std.http.Status = undefined;
-        const url = std.fmt.allocPrint(arena, "{s}{s}", .{ repoUrl, model.file }) catch {
-            setState(.{ .phase = .error_state, .message = "out of memory" });
-            return;
-        };
-        _ = llm_models.downloadFile(io, gpa, arena, d.root, model.id, model.file, url, model.size, model.sha256, {}, onDownloadProgress, &http_status) catch |err| {
-            if (is_cancelled(req) or err == error.Cancelled) {
-                setState(.{ .phase = .idle, .message = "" });
-            } else {
-                setState(.{ .phase = .error_state, .message = "Could not download the voice model", .progress = 0 });
-            }
-            return;
-        };
-    }
-
-    // 2. The voice pack.
-    if (voiceFile(arena, d, req.voice) == null) {
-        const v = findVoice(req.voice) orelse {
-            setState(.{ .phase = .error_state, .message = "Unknown voice", .progress = 0 });
-            return;
-        };
-        setState(.{ .phase = .downloading, .message = v.label, .progress = 0 });
-        var http_status: std.http.Status = undefined;
-        const name = std.fmt.allocPrint(arena, "kokoro-voice-{s}.gguf", .{req.voice}) catch return;
-        const url = std.fmt.allocPrint(arena, "{s}voices/{s}", .{ repoUrl, name }) catch return;
-        _ = llm_models.downloadFile(io, gpa, arena, d.root, req.voice, name, url, v.size, v.sha256, {}, onDownloadProgress, &http_status) catch |err| {
-            if (is_cancelled(req) or err == error.Cancelled) {
-                setState(.{ .phase = .idle, .message = "" });
-            } else {
-                setState(.{ .phase = .error_state, .message = "Could not download the voice", .progress = 0 });
-            }
-            return;
-        };
-    }
-
-    // 3. The espeak-ng phoneme data.
-    const espeak_dir = espeakDataDir(arena, shared_env, d) orelse {
-        setState(.{ .phase = .error_state, .message = "No phoneme data (Settings → Speech)", .progress = 0 });
-        return;
+    tts.stop();
+    const job = shared_gpa.create(Job) catch return;
+    job.* = .{ .arena = .init(shared_gpa), .req = undefined, .gen = gen };
+    const a = job.arena.allocator();
+    job.req = .{
+        .text = a.dupe(u8, req.text) catch return dropJob(job),
+        .lang = a.dupe(u8, req.lang) catch return dropJob(job),
+        .voice = a.dupe(u8, req.voice) catch return dropJob(job),
+        .model = a.dupe(u8, req.model) catch return dropJob(job),
     };
-
-    // 4. The engine.
-    setState(.{ .phase = .generating, .message = "Loading the voice", .progress = 0, .voice = "" });
-    engine_lock.lockUncancelable(io);
-    switch (ensureEngine(arena, d, req.model_id, req.voice, req.lang, espeak_dir)) {
-        .ok => {},
-        .missing, .failed => |msg| {
-            engine_lock.unlock(io);
-            setState(.{ .phase = .error_state, .message = msg, .progress = 0 });
-            return;
-        },
-    }
-    if (is_cancelled(req)) {
-        engine_lock.unlock(io);
-        setState(.{ .phase = .idle });
-        return;
-    }
-    // 5. The synthesis.
-    const synth = oriel.kokoro.synthesize(engine.?, req.text) catch {
-        engine_lock.unlock(io);
-        setState(.{ .phase = .error_state, .message = "The synthesis failed", .progress = 0 });
-        return;
-    };
-    engine_lock.unlock(io);
-    log.info("tts synthesized {d} samples @ {d} Hz", .{ synth.samples.len, synth.rate });
-    if (synth.samples.len == 0) {
-        oriel.kokoro.freePcm(synth.samples);
-        setState(.{ .phase = .idle, .message = "" });
-        return;
-    }
-    if (is_cancelled(req)) {
-        oriel.kokoro.freePcm(synth.samples);
-        setState(.{ .phase = .idle });
-        return;
-    }
-
-    // 6. Chunk into sentences (the engine synthesizes one utterance at a
-    // time) and play them in sequence until cancel.
-    const chunks = splitChunks(arena, req.text) catch return;
-    oriel.kokoro.freePcm(synth.samples);
-    if (synth.samples.len > 0) {
-        // The engine's first chunk is already covering the head; the rest
-        // are from here on (the splitChunks call above was pre-cache).
-        for (chunks, 0..) |chunk_text, i| {
-            if (is_cancelled(req)) break;
-            const st_goal = std.fmt.allocPrint(arena, "Speaking {d}/{d}", .{ i + 1, chunks.len }) catch "";
-            setState(.{ .phase = .generating, .message = st_goal, .progress = 0, .voice = "" });
-            engine_lock.lockUncancelable(io);
-            const once = oriel.kokoro.synthesize(engine.?, chunk_text) catch {
-                engine_lock.unlock(io);
-                setState(.{ .phase = .error_state, .message = "The synthesis failed", .progress = 0 });
-                return;
-            };
-            engine_lock.unlock(io);
-            if (is_cancelled(req)) {
-                oriel.kokoro.freePcm(once.samples);
-                break;
-            }
-            const play_samples = gpa.dupe(f32, once.samples) catch {
-                oriel.kokoro.freePcm(once.samples);
-                setState(.{ .phase = .idle });
-                return;
-            };
-            oriel.kokoro.freePcm(once.samples);
-            _ = once.rate;
-            holding_samples = play_samples;
-            // audio_play ends its device; when it finishes it frees the buffer.
-            playSamples(io, play_samples, synth.rate) catch {
-                gpa.free(play_samples);
-                holding_samples = null;
-                setState(.{ .phase = .error_state, .message = "The audio device failed", .progress = 0 });
-                return;
-            };
-            // Wait until the device ran the buffer out (or a stop).
-            while (true) {
-                io.sleep(.fromMilliseconds(30), .awake) catch return;
-                if (is_cancelled(req)) break;
-                if (oriel.audio_play.finished()) break;
-            }
-        }
-    }
-    if (!is_cancelled(req)) setState(.{ .phase = .idle, .message = "" });
-}
-
-/// Split on sentence boundaries into ~250-char chunks (a Kokoro utterance
-/// stays bounded); returns [] []const u8 owned by `arena`.
-fn splitChunks(arena: std.mem.Allocator, text: []const u8) ![][]const u8 {
-    var list: std.ArrayList([]const u8) = .empty;
-    const breakers = ".!?\n";
-    var start: usize = 0;
-    var last_break: usize = 0;
-    for (text, 0..) |ch, i| {
-        if (ch == '\n' or std.mem.indexOfScalar(u8, breakers, ch) != null) {
-            last_break = i + 1;
-        }
-        if (i - start >= 220 and last_break > start) {
-            const end = trimEnd(text, start, last_break);
-            if (end > start) try list.append(arena, text[start..end]);
-            start = last_break;
-        }
-    }
-    if (start < text.len) {
-        const end = trimEnd(text, start, text.len);
-        if (end > start) try list.append(arena, text[start..end]);
-    }
-    if (list.items.len == 0) {
-        const trimmed = std.mem.trim(u8, text, " \t\r\n");
-        if (trimmed.len > 0) try list.append(arena, trimmed);
-    }
-    return list.items;
-}
-
-fn trimEnd(text: []const u8, a: usize, b: usize) usize {
-    var end = b;
-    while (end > a and containsOnlyWhitespace(text[end - 1])) end -= 1;
-    return end;
-}
-
-fn containsOnlyWhitespace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
-fn onDownloadProgress(_: void, progress: llm_models.Progress) void {
-    const total: f64 = if (progress.total > 0) @floatFromInt(progress.total) else 0.0;
-    const frac = if (total > 0) @as(f64, @floatFromInt(progress.done)) / total else 0.0;
-    setState(.{ .phase = .downloading, .message = progress.message, .progress = frac });
-    // The Settings window's detailed channel (ghostpen://tts-download).
-    if (emitDownload) |f| f(progress);
-}
-
-/// Emissions for the download UI (Settings), set by main.zig.
-pub var emitDownload: ?*const fn (llm_models.Progress) void = null;
-
-pub fn speak(text: []const u8, lang: []const u8, voice: []const u8, model_id: []const u8) void {
-    if (!globals_ready) return;
-    // One at a time: a new request stops the current one and takes over.
-    stopPlayback();
-    _ = bumpGeneration();
-    const gen = currentGeneration();
-
-    const req = gpa.create(Request) catch return;
-    var arena = Arena.init(gpa);
-    const a = arena.allocator();
-    req.* = .{
-        .arena = arena,
-        .text = a.dupe(u8, text) catch {
-            arena.deinit();
-            gpa.destroy(req);
-            return;
-        },
-        .lang = a.dupe(u8, lang) catch {
-            arena.deinit();
-            gpa.destroy(req);
-            return;
-        },
-        .voice = a.dupe(u8, voice) catch {
-            arena.deinit();
-            gpa.destroy(req);
-            return;
-        },
-        .model_id = a.dupe(u8, model_id) catch {
-            arena.deinit();
-            gpa.destroy(req);
-            return;
-        },
-        .gen = gen,
-    };
-    setState(.{ .phase = .generating, .message = "Starting…", .progress = 0, .voice = "" });
-    const t = std.Thread.spawn(.{}, runRequest, .{req}) catch |err| {
-        req.arena.deinit();
-        gpa.destroy(req);
-        setState(.{ .phase = .error_state, .message = "Could not start the voice", .progress = 0 });
-        log.err("tts: thread spawn failed ({s})", .{@errorName(err)});
-        return;
+    const t = std.Thread.spawn(.{}, runJob, .{job}) catch |err| {
+        log.err("cannot start the reading: {s}", .{@errorName(err)});
+        setState(gen, .{ .phase = "error", .message = "Could not start the voice", .voice = "" });
+        return dropJob(job);
     };
     t.detach();
 }
 
-/// Stop the current play or cancel the current generation.
-pub fn stop() void {
-    _ = bumpGeneration();
-    stopPlayback();
+fn dropJob(job: *Job) void {
+    job.arena.deinit();
+    shared_gpa.destroy(job);
 }
 
-/// Free the engine on app exit (the audio device stops on its own).
-pub fn shutdown() void {
-    stop();
-    engine_lock.lockUncancelable(io);
-    defer engine_lock.unlock(io);
-    if (engine) |ctx| {
-        oriel.kokoro.free(ctx);
-        engine = null;
+fn setPreparing(on: bool) void {
+    state_mutex.lockUncancelable(shared_io);
+    defer state_mutex.unlock(shared_io);
+    preparing = on;
+}
+
+fn runJob(job: *Job) void {
+    defer dropJob(job);
+    const gen = job.gen;
+    const p = plan(job.req);
+    // 1. The model and the voice, the first time (verified downloads).
+    setPreparing(true);
+    for ([_][]const u8{ p.model_id, p.voice_id }) |id| {
+        if (id.len == 0) continue;
+        if (!current(gen)) return setPreparing(false);
+        setState(gen, .{ .phase = "downloading", .message = label(id), .voice = p.voice });
+        fetch(id, gen) catch |err| {
+            setPreparing(false);
+            if (err == error.Cancelled) return;
+            log.err("download {s}: {s}", .{ id, @errorName(err) });
+            setState(gen, .{ .phase = "error", .message = downloadMessage(err), .voice = "" });
+            return;
+        };
     }
+    setPreparing(false);
+    if (!current(gen)) return;
+    // 2. oriel.tts reads it ("tts:state" follows it from here).
+    setState(gen, .{ .phase = "loading", .message = "", .voice = p.voice });
+    const r = tts.speak(job.arena.allocator(), job.req.text, p.options) catch |err| {
+        log.err("reading failed: {s}", .{@errorName(err)});
+        setState(gen, .{ .phase = "error", .message = speakMessage(err), .voice = "" });
+        return;
+    };
+    logResult(r);
+    // Mirror the end for `status` (the event already went out).
+    state_mutex.lockUncancelable(shared_io);
+    defer state_mutex.unlock(shared_io);
+    if (generation == gen) own_state = .{ .phase = "idle", .message = if (r.stopped) "Stopped" else "Finished", .voice = "" };
 }
 
-// ---- the catalog for the Settings window -----------------------------------
+fn logResult(r: tts.Result) void {
+    log.info("read {s} ({s}) on {s}: first audio {d} ms (load {d} ms), {d} chunks, {d:.1} s of audio in {d} ms{s}", .{
+        r.voice,  r.lang,  r.backend,  r.first_audio_ms, r.load_ms,
+        r.chunks, r.audio_s, r.synth_ms, if (r.stopped) ", stopped" else "",
+    });
+}
+
+/// Stop the current reading (or the download it waits for).
+pub fn stop() void {
+    if (!ready) return;
+    {
+        state_mutex.lockUncancelable(shared_io);
+        defer state_mutex.unlock(shared_io);
+        generation += 1;
+    }
+    tts.stop();
+    setState(null, .{ .phase = "idle", .message = "Stopped", .voice = "" });
+}
+
+/// Load the model and voice a reading in `lang` ("" for English) would use,
+/// so it starts sooner; nothing when they aren't downloaded. Blocks.
+pub fn warmUp(lang: []const u8) void {
+    if (!ready) return;
+    const l = if (lang.len == 0) "en-us" else espeakLanguageFor(lang) orelse lang;
+    const v = voiceFor(l);
+    if (!present(v)) return;
+    tts.warmUp(.{ .voice = v, .lang = l }) catch |err| switch (err) {
+        error.NoModel, error.NoVoice => {},
+        else => log.warn("warm-up: {s}", .{@errorName(err)}),
+    };
+}
+
+/// `ghostpen --say`: read `req` aloud in the foreground, downloading what
+/// it needs first (progress on stderr).
+pub fn say(gpa: std.mem.Allocator, req: Request) !tts.Result {
+    const p = plan(req);
+    for ([_][]const u8{ p.model_id, p.voice_id }) |id| {
+        if (id.len == 0) continue;
+        std.debug.print("Downloading {s}…\n", .{label(id)});
+        fetch(id, null) catch |err| {
+            std.debug.print("{s}\n", .{downloadMessage(err)});
+            return err;
+        };
+    }
+    std.debug.print("GhostPen's voice: {s} ({s})…\n", .{ p.voice, p.lang });
+    const r = tts.speak(gpa, req.text, p.options) catch |err| {
+        std.debug.print("The voice failed: {s}\n", .{speakMessage(err)});
+        return err;
+    };
+    logResult(r);
+    return r;
+}
+
+// ---- the catalog for Settings → Voices -----------------------------------------------------
 
 pub const Entry = struct {
-    /// id, like "kokoro-82m-q8_0" (models) or "ef_dora" (voices).
+    /// "kokoro-82m-q8_0" (models) or "ef_dora" (voices).
     id: []const u8,
-    /// What the row shows.
     label: []const u8,
     /// Voices: the espeak language they read ("" for models).
     lang: []const u8 = "",
     note: []const u8 = "",
     size: u64 = 0,
-    /// The bytes of a leftover partial download, 0 when there isn't one.
-    partial: u64 = 0,
     downloaded: bool = false,
 };
 
 pub const CatalogInfo = struct {
     models: []Entry,
     voices: []Entry,
-    /// The phoneme data the engine reads (env, app dir, or the system).
+    /// The phoneme data the engine reads (bundled with GhostPen, or the system's).
     espeak_ready: bool,
-    /// Where it was found, for the Settings row's subtitle ("" when not).
+    /// Where it was found ("" when not).
     espeak_source: []const u8,
-    /// The settings phase name (a download may be running for the menu).
+    /// Where the voice runs: the loaded model's backend ("CPU", "Vulkan0"),
+    /// else the GPU backend ggml found, else "CPU".
+    backend: []const u8,
+    gpu: ?[]const u8,
+    /// The model or voice being downloaded, "" when none.
+    downloading: []const u8,
+    /// The reading's phase.
     phase: []const u8,
 };
 
-/// What Settings → Voices lists: the two models, the curated voices, and
-/// whether the phoneme data is there. One arena allocation.
-pub fn listCatalog(arena: std.mem.Allocator, env: *const std.process.Environ.Map, st: State) !CatalogInfo {
-    var models_list: std.ArrayList(Entry) = .empty;
-    var voices_list: std.ArrayList(Entry) = .empty;
-    const d = dirs(arena, env);
-    for (models) |m| {
-        const installed = if (d) |dirs_| modelFile(arena, dirs_, m.file) != null else false;
-        var partial: u64 = 0;
-        if (d) |dirs_| {
-            const part_name = std.fmt.allocPrint(arena, "{s}.part", .{m.file}) catch continue;
-            const part_path = std.fs.path.join(arena, &.{ dirs_.root, part_name }) catch continue;
-            const st_ = std.Io.Dir.cwd().statFile(io, part_path, .{}) catch null;
-            if (st_) |stat| partial = stat.size;
-        }
-        try models_list.append(arena, .{ .id = m.id, .label = m.name, .note = m.note, .size = m.size, .partial = partial, .downloaded = installed });
+fn modelNote(id: []const u8) []const u8 {
+    if (std.mem.eql(u8, id, "kokoro-82m-q8_0")) return "every voice reads it · this is the default";
+    if (std.mem.eql(u8, id, "kokoro-82m-f16")) return "slightly fuller sound";
+    return "";
+}
+
+/// What Settings → Voices lists: the models, the curated voices, whether
+/// the phoneme data is there and where the voice runs.
+pub fn catalog(arena: std.mem.Allocator) !CatalogInfo {
+    if (!ready) return error.NoDataDir;
+    const st = tts.status();
+    const models = try arena.alloc(Entry, st.models.len);
+    for (st.models, models) |m, *e| {
+        const size = tts.findModel(m.id).?.size;
+        e.* = .{ .id = m.id, .label = m.label, .note = modelNote(m.id), .size = size, .downloaded = m.present };
     }
-    for (voices) |v| {
-        const installed = if (d) |dirs_| voiceFile(arena, dirs_, v.id) != null else false;
-        try voices_list.append(arena, .{ .id = v.id, .label = v.label, .lang = v.lang, .note = "", .size = v.size, .downloaded = installed });
-    }
-    var src: []const u8 = "";
-    if (espeakDataDir(arena, env, d)) |dir| {
-        src = dir;
+    const voices = try arena.alloc(Entry, st.voices.len);
+    for (st.voices, voices) |v, *e| {
+        const size = tts.findVoice(v.id).?.size;
+        e.* = .{ .id = v.id, .label = v.label, .lang = v.lang, .size = size, .downloaded = v.present };
     }
     return .{
-        .models = models_list.items,
-        .voices = voices_list.items,
-        .espeak_ready = src.len > 0,
-        .espeak_source = src,
-        .phase = @tagName(st.phase),
+        .models = models,
+        .voices = voices,
+        .espeak_ready = st.espeak_data != null,
+        .espeak_source = if (st.espeak_data) |d| try arena.dupe(u8, d) else "",
+        .backend = try arena.dupe(u8, st.backend),
+        .gpu = if (st.gpu) |g| try arena.dupe(u8, g) else null,
+        .downloading = if (st.downloading) |d| try arena.dupe(u8, d) else "",
+        .phase = status().phase,
     };
 }
 
-/// Delete a model file.
-pub fn deleteModelIo(env: *const std.process.Environ.Map, id: []const u8, arena: std.mem.Allocator) !void {
-    const m = findModel(id) orelse return error.UnknownModel;
-    const d = dirs(arena, env) orelse return error.NoDataDir;
-    const path = std.fs.path.join(arena, &.{ d.root, m.file }) catch return error.OutOfMemory;
-    std.Io.Dir.cwd().deleteFile(io, path) catch {};
-    // The engine holds it: drop the context so the next speak starts clean.
-    engine_lock.lockUncancelable(io);
-    defer engine_lock.unlock(io);
-    if (engine) |ctx| {
-        if (std.mem.eql(u8, engine_model_file, m.file)) {
-            oriel.kokoro.free(ctx);
-            engine = null;
-        }
-    }
+/// Settings → Voices: download a model or voice ("tts:download" reports it).
+pub fn download(id: []const u8) !void {
+    if (!ready) return error.NoDataDir;
+    try tts.download(id);
 }
 
-// ---- tests ----------------------------------------------------------------------------------
+/// Settings → Voices: remove a model or voice (a reading using it stops).
+pub fn delete(id: []const u8) !void {
+    if (!ready) return error.NoDataDir;
+    tts.delete(id) catch |err| {
+        if (err != error.Speaking) return err;
+        stop();
+        // The reading returns at its next chunk.
+        var tries: u32 = 0;
+        while (tries < 50) : (tries += 1) {
+            shared_io.sleep(.fromMilliseconds(100), .awake) catch {};
+            tts.delete(id) catch |again| {
+                if (again == error.Speaking) continue;
+                return again;
+            };
+            return;
+        }
+        return err;
+    };
+}
 
-test "guessLanguage: the obvious cases" {
-    try std.testing.expectEqualStrings("es", guessLanguage("El coche rojo avanza por la ciudad, y las campanas suenan a lejos."));
-    try std.testing.expectEqualStrings("en-us", guessLanguage("The committee reviews the design every quarter."));
-    try std.testing.expectEqualStrings("es", guessLanguage("¿Cómo está la señal?"));
-    try std.testing.expectEqualStrings("zh", guessLanguage("今天天气很好。"));
-    try std.testing.expectEqualStrings("ja", guessLanguage("今日はとても良い天気です"));
+// ---- tests ---------------------------------------------------------------------------------
+
+test "translate targets map to espeak languages" {
+    try std.testing.expectEqualStrings("fr", espeakLanguageFor("French").?);
+    try std.testing.expectEqualStrings("pt-br", espeakLanguageFor("portuguese").?);
+    try std.testing.expect(espeakLanguageFor("Klingon") == null);
+    try std.testing.expectEqualStrings("it", languageFor("anything", "Italian"));
+    try std.testing.expectEqualStrings("en-gb", languageFor("anything", "en-gb"));
+}
+
+test "the language guesser keeps GhostPen's cases (oriel.tts.guessLanguage)" {
+    try std.testing.expectEqualStrings("es", languageFor("El coche rojo avanza por la ciudad, y las campanas suenan a lejos.", ""));
+    try std.testing.expectEqualStrings("en-us", languageFor("The committee reviews the design every quarter.", ""));
+    try std.testing.expectEqualStrings("es", languageFor("¿Cómo está la señal?", "auto"));
+    try std.testing.expectEqualStrings("zh", languageFor("今天天气很好。", ""));
+    try std.testing.expectEqualStrings("ja", languageFor("今日はとても良い天気です", ""));
+}
+
+test "the catalog keeps GhostPen's file names (downloads from earlier builds stay usable)" {
+    try std.testing.expectEqualStrings("kokoro-82m-q8_0.gguf", tts.findModel("kokoro-82m-q8_0").?.file);
+    try std.testing.expectEqualStrings("kokoro-voice-af_heart.gguf", tts.findVoice("af_heart").?.file);
+    try std.testing.expectEqualStrings("kokoro-voice-ef_dora.gguf", tts.findVoice("ef_dora").?.file);
+}
+
+test "earlier builds' voice files move in and the catalog lists them as downloaded" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const blank = try t.allocator.alloc(u8, tts.findVoice("ef_dora").?.size);
+    defer t.allocator.free(blank);
+    @memset(blank, 0);
+    try tmp.dir.createDirPath(t.io, "ghostpen/tts");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "ghostpen/tts/kokoro-voice-ef_dora.gguf", .data = blank });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "ghostpen/tts/kokoro-voice-af_heart.gguf", .data = "truncated" });
+
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const base = try tmp.dir.realPathFileAlloc(t.io, ".", arena.allocator());
+    const dir = try std.fs.path.join(arena.allocator(), &.{ base, "GhostPen", "tts" });
+    adoptLegacy(arena.allocator(), dir, t.io);
+    tts.init(t.io, t.allocator, dir);
+    shared_io = t.io;
+    ready = true;
+    defer {
+        ready = false;
+        tts.deinit();
+    }
+    const info = try catalog(arena.allocator());
+    for (info.voices) |v| try t.expectEqual(std.mem.eql(u8, v.id, "ef_dora"), v.downloaded);
+    for (info.models) |m| try t.expect(!m.downloaded);
+    try t.expectEqualStrings("ef_dora", voiceFor("es"));
+    try t.expectEqualStrings("ff_siwis", voiceFor("fr")); // to download
+    try t.expectEqualStrings("idle", info.phase);
 }
