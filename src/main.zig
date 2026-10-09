@@ -1314,7 +1314,7 @@ pub fn main(init: std.process.Init) !u8 {
         // downloads the model (see src/tts.zig).
         if (std.mem.eql(u8, a, "--say")) {
             var text: []const u8 = "Hello";
-            var lang: []const u8 = "en-us";
+            var lang: []const u8 = "";
             var voice: []const u8 = "";
             var model: []const u8 = "";
             var i: usize = 0;
@@ -1337,6 +1337,8 @@ pub fn main(init: std.process.Init) !u8 {
                 }
                 text = arg;
             }
+            if (lang.len == 0) lang = tts.guessLanguage(text);
+            if (tts.espeakLanguageFor(lang)) |l| lang = l;
             if (voice.len == 0) voice = tts.voiceForLanguage(lang);
             std.debug.print("GhostPen's voice: {s} ({s})…\n", .{ voice, lang });
             tts.speak(text, lang, voice, model);

@@ -96,14 +96,16 @@ pub fn voiceForLanguage(lang: []const u8) []const u8 {
     return "af_heart";
 }
 
-/// A cheap unicode-range guess over the text the user selected. None of the
-/// model's intelligence: ranges over the languages the catalog carries.
+/// A cheap guess over the text the user selected: unicode ranges for CJK and
+/// kana, then function-word matching for Spanish vs English (the two languages
+/// one is most likely to confuse on a Latin-Alphabet desktop), accent density
+/// as the last Spanish hint. Nothing clever: covers the catalog's languages.
 pub fn guessLanguage(text: []const u8) []const u8 {
     var cjk: usize = 0;
     var kana: usize = 0;
     var latin: usize = 0;
-    var i: usize = 0;
     var accented: usize = 0;
+    var i: usize = 0;
     while (i < text.len) {
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
             i += 1;
@@ -115,9 +117,11 @@ pub fn guessLanguage(text: []const u8) []const u8 {
             continue;
         };
         switch (cp) {
+            0x0400...0x04FF => return "ru", // cyrillic (espeak): say nothing and leave
             0x4E00...0x9FFF, 0x3400...0x4DBF => cjk += 1,
             0x3040...0x30FF => kana += 1,
-            0x00C0...0x024F => {
+            0x00C0...0x00FF, // latin-1 supplement (á, é, ñ, ¿, ¡)
+            0x0100...0x024F => {
                 latin += 1;
                 accented += 1;
             },
@@ -127,16 +131,37 @@ pub fn guessLanguage(text: []const u8) []const u8 {
         i += len;
     }
     if (kana > cjk / 4) return "ja";
-    if (cjk > 0) return "zh";
+    if (cjk > 0 and kana == 0) return "zh";
     if (latin == 0) return "en-us";
-    // Accent density (á, é, ñ in Latin-1 supplement): Spaniards write plenty
-    // of them; English (and French/Italian) get denser ranges below, but the
-    // catalog's curated languages decide the best fit we can cheaply make.
+    // Spanish markers as English-reserving word markers.
+    const es_words = [_][]const u8{ "el", "la", "los", "las", "un", "una", "de", "del", "que", "con", "para", "por", "es", "son", "esta", "están", "más", "sí", "en", "su", "su", "año", "sobre" };
+    const en_words = [_][]const u8{ "the", "a", "an", "of", "and", "or", "to", "in", "is", "are", "it", "that", "with", "for", "on", "as", "this", "be", "was" };
+    var es_hits: usize = 0;
+    var en_hits: usize = 0;
+    var word_it = std.mem.tokenizeAny(u8, text, " ,;:.!?()[]{}\"/\t\r\n");
+    while (word_it.next()) |w| {
+        for (es_words) |ew| {
+            if (std.ascii.eqlIgnoreCase(w, ew)) {
+                es_hits += 1;
+                break;
+            }
+        }
+        for (en_words) |ew| {
+            if (std.ascii.eqlIgnoreCase(w, ew)) {
+                en_hits += 1;
+                break;
+            }
+        }
+    }
+    if (es_hits >= en_hits * 2 and es_hits > 1) return "es";
+    if (en_hits > es_hits * 2 and en_hits > 1) return "en-us";
+    // Accent density above 25% says Spanish over plain English; otherwise the
+    // default voice stays (the UK/US voices read most Latin text passably).
     if (accented * 100 > latin * 25) return "es";
     return "en-us";
 }
 
-// ---- state -------------------------------------------------------------------------------
+// ---- state: what the UI shows and which request is current -------------------------------
 
 pub const Phase = enum { idle, downloading, generating, playing, error_state };
 
@@ -150,24 +175,24 @@ pub const State = struct {
     voice: []const u8 = "",
 };
 
-var mutex: std.Io.Mutex = .init;
-var state: State = .{};
+var state_mutex: std.Io.Mutex = .init;
+var app_state: State = .{};
 
 /// Event into the UI: main.zig sets this to broadcast `ghostpen://tts-state`;
 /// the CLI path leaves it null.
 pub var emit: ?*const fn (State) void = null;
 
 fn setState(s: State) void {
-    mutex.lockUncancelable(io);
-    state = s;
-    mutex.unlock(io);
+    state_mutex.lockUncancelable(io);
+    app_state = s;
+    state_mutex.unlock(io);
     if (emit) |f| f(s);
 }
 
 pub fn status() State {
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    return state;
+    state_mutex.lockUncancelable(io);
+    defer state_mutex.unlock(io);
+    return app_state;
 }
 
 /// Bumped to invalidate the request a busy worker holds: a new speak or a
@@ -175,14 +200,14 @@ pub fn status() State {
 var generation: u64 = 0;
 
 fn currentGeneration() u64 {
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
+    state_mutex.lockUncancelable(io);
+    defer state_mutex.unlock(io);
     return generation;
 }
 
 fn bumpGeneration() u64 {
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
+    state_mutex.lockUncancelable(io);
+    defer state_mutex.unlock(io);
     generation += 1;
     return generation;
 }
