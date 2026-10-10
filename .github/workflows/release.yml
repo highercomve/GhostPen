@@ -40,6 +40,24 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Zig packages (the tarballs in Zig's global cache) are kept between
+      # runs, and fetched with retries: a dropped download (GitHub archives
+      # sometimes close the connection) shouldn't fail a release.
+      - name: Zig packages (cache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ZIG_GLOBAL_CACHE_DIR }}/p
+          key: zig-pkg-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-${{ runner.os }}-
+      - name: Fetch Zig packages
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do
+            zig build --fetch=all && exit 0
+            echo "::warning::fetching Zig packages failed (attempt $i), retrying"
+            sleep $((i * 20))
+          done
+          exit 1
       - name: Oriel CLI and nfpm
         run: |
           curl -fsSL https://raw.githubusercontent.com/highercomve/Oriel/main/install.sh | ORIEL_VERSION=$ORIEL_VERSION ORIEL_INSTALL_DIR=/usr/local/bin sh
@@ -72,6 +90,24 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Zig packages (the tarballs in Zig's global cache) are kept between
+      # runs, and fetched with retries: a dropped download (GitHub archives
+      # sometimes close the connection) shouldn't fail a release.
+      - name: Zig packages (cache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ZIG_GLOBAL_CACHE_DIR }}/p
+          key: zig-pkg-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-${{ runner.os }}-
+      - name: Fetch Zig packages
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do
+            zig build --fetch=all && exit 0
+            echo "::warning::fetching Zig packages failed (attempt $i), retrying"
+            sleep $((i * 20))
+          done
+          exit 1
       - name: Oriel CLI and nfpm
         run: |
           curl -fsSL https://raw.githubusercontent.com/highercomve/Oriel/main/install.sh | ORIEL_VERSION=$ORIEL_VERSION ORIEL_INSTALL_DIR=/usr/local/bin sh
@@ -131,6 +167,24 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Zig packages (the tarballs in Zig's global cache) are kept between
+      # runs, and fetched with retries: a dropped download (GitHub archives
+      # sometimes close the connection) shouldn't fail a release.
+      - name: Zig packages (cache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ZIG_GLOBAL_CACHE_DIR }}/p
+          key: zig-pkg-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-${{ runner.os }}-
+      - name: Fetch Zig packages
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do
+            zig build --fetch=all && exit 0
+            echo "::warning::fetching Zig packages failed (attempt $i), retrying"
+            sleep $((i * 20))
+          done
+          exit 1
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
@@ -185,6 +239,24 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Zig packages (the tarballs in Zig's global cache) are kept between
+      # runs, and fetched with retries: a dropped download (GitHub archives
+      # sometimes close the connection) shouldn't fail a release.
+      - name: Zig packages (cache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ZIG_GLOBAL_CACHE_DIR }}/p
+          key: zig-pkg-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-${{ runner.os }}-
+      - name: Fetch Zig packages
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do
+            zig build --fetch=all && exit 0
+            echo "::warning::fetching Zig packages failed (attempt $i), retrying"
+            sleep $((i * 20))
+          done
+          exit 1
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
@@ -245,6 +317,24 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Zig packages (the tarballs in Zig's global cache) are kept between
+      # runs, and fetched with retries: a dropped download (GitHub archives
+      # sometimes close the connection) shouldn't fail a release.
+      - name: Zig packages (cache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ZIG_GLOBAL_CACHE_DIR }}/p
+          key: zig-pkg-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-${{ runner.os }}-
+      - name: Fetch Zig packages
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do
+            zig build --fetch=all && exit 0
+            echo "::warning::fetching Zig packages failed (attempt $i), retrying"
+            sleep $((i * 20))
+          done
+          exit 1
       - uses: actions/download-artifact@v4
         with:
           path: dist
