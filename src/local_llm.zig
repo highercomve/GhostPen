@@ -51,6 +51,12 @@ pub const Chat = struct {
     image: ?[]const u8 = null,
     /// A JSON Schema the answer must match ("" = free text).
     schema: []const u8 = "",
+    /// An OpenAI chat request (JSON) the model's own chat template renders,
+    /// in place of `system` and `user`: the messages with their tool calls
+    /// and results, the tools, response_format (the model service's agents).
+    /// The answer is parsed back into content, reasoning and tool calls
+    /// (`Result.message`).
+    request: []const u8 = "",
     /// Keep the runner this long after the answer (0: stop it now); null:
     /// `Config.idle_minutes`.
     keep_alive_ms: ?u64 = null,
@@ -70,6 +76,9 @@ pub const Result = struct {
     gen_tokens: u64 = 0,
     prompt_ms: u64 = 0,
     gen_ms: u64 = 0,
+    /// `Chat.request`'s answer as an OpenAI message (JSON):
+    /// {"role","content","reasoning_content","tool_calls":[{"name","arguments"}]}.
+    message: ?[]const u8 = null,
 };
 
 pub const Error = error{ LocalFailed, OutOfMemory };
@@ -207,7 +216,13 @@ fn chatImpl(
     s.busy.store(true, .release);
     defer s.busy.store(false, .release);
 
-    // Before loading anything (escaping only makes the line longer).
+    // Before loading anything (escaping only makes the line longer). An
+    // agent's whole conversation (`request`) can be far longer than a
+    // selection: the context is its limit.
+    if (req.request.len > max_image_line_bytes) {
+        diag.* = "The conversation is too long for the built-in model.";
+        return error.LocalFailed;
+    }
     if (req.system.len + req.user.len > max_request_bytes) {
         diag.* = "The text is too long for the built-in model (about 200 KB at most): select less.";
         return error.LocalFailed;
@@ -242,12 +257,13 @@ fn chatImpl(
         .channels = channels,
         .image = image_b64,
         .schema = req.schema,
+        .request = req.request,
     }, .{});
-    if (image_b64.len > 0 and line_out.len > max_image_line_bytes) {
+    if ((image_b64.len > 0 or req.request.len > 0) and line_out.len > max_image_line_bytes) {
         diag.* = "The image is too large for the built-in model.";
         return error.LocalFailed;
     }
-    if (image_b64.len == 0 and line_out.len > max_request_bytes) {
+    if (image_b64.len == 0 and req.request.len == 0 and line_out.len > max_request_bytes) {
         diag.* = "The text is too long for the built-in model (about 200 KB at most): select less.";
         return error.LocalFailed;
     }
@@ -290,6 +306,10 @@ fn chatImpl(
         gen_tokens: u64 = 0,
         prompt_ms: u64 = 0,
         gen_ms: u64 = 0,
+        // A `request`'s answer: what each token added, then the message.
+        reasoning: ?[]const u8 = null,
+        content: ?[]const u8 = null,
+        message: ?[]const u8 = null,
     };
     while (true) {
         const line = (r.reader.interface.takeDelimiter('\n') catch null) orelse {
@@ -322,6 +342,15 @@ fn chatImpl(
             have_channel = true;
             continue;
         };
+        if (msg.reasoning != null or msg.content != null) {
+            // Already split by the model's template: no channels to find.
+            if (msg.reasoning) |t| if (channels) on_chunk(ctx, .{ .channel = .thinking, .text = t });
+            if (msg.content) |t| {
+                try text.appendSlice(arena, t);
+                on_chunk(ctx, if (channels) .{ .channel = .answer, .text = t } else t);
+            }
+            if (!msg.done) continue;
+        }
         if (!msg.done and msg.delta == null) {
             // The runner's progress line (the prompt's size, then the speed
             // while generating): only the in-flight stats change.
@@ -378,13 +407,14 @@ fn chatImpl(
             deadline.finish(); // before a keep_alive of 0 kills the runner
             keepAlive(io, s, r, req.keep_alive_ms);
             return .{
-                .text = if (channels) normalized.answer.items else text.items,
+                .text = if (channels and req.request.len == 0) normalized.answer.items else text.items,
                 .truncated = msg.truncated,
                 .cancelled = msg.cancelled,
                 .prompt_tokens = msg.prompt_tokens,
                 .gen_tokens = msg.gen_tokens,
                 .prompt_ms = msg.prompt_ms,
                 .gen_ms = msg.gen_ms,
+                .message = msg.message,
             };
         }
     }

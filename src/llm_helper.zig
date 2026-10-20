@@ -42,6 +42,15 @@
 //!     {"id":2,"cmd":"embed","texts":["a","b"]}
 //!     {"id":2,"done":true,"embeddings":[[…],[…]],"model":"embeddinggemma-300M-Q8_0"}
 //!
+//! A chat can instead carry `"request":"<OpenAI chat request JSON>"` (the
+//! model service's agents): the model's own chat template renders its
+//! messages, tool calls and results, and tools (llama.cpp's common/chat.cpp,
+//! as llama-server does), the template's lazy tool-call grammar samples, and
+//! the answer streams as what each token adds, then the parsed message:
+//!
+//!     {"id":1,"reasoning":"The user wants"}  {"id":1,"content":"Hi"}
+//!     {"id":1,"done":true,…,"message":"{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"…\",\"tool_calls\":[{\"name\":\"read\",\"arguments\":\"{…}\"}]}"}
+//!
 //! It exits when stdin closes (GhostPen quit or unloaded it). llama.cpp's
 //! errors go to stderr, which GhostPen keeps for its error messages.
 
@@ -103,6 +112,9 @@ const Request = struct {
     schema: []const u8 = "",
     /// `embed`: the texts to embed.
     texts: []const []const u8 = &.{},
+    /// An OpenAI chat request for the model's own template, in place of
+    /// `system`/`user` (see the top).
+    request: []const u8 = "",
 };
 
 fn parseKvType(s: []const u8) ?c.ggml_type {
@@ -283,12 +295,19 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
 
     var engine: ?Engine = if (chat) |m| blk: {
         const vocab = c.llama_model_get_vocab(m.model).?;
-        break :blk .{ .gpa = gpa, .model = m.model, .ctx = m.ctx, .vocab = vocab, .format = m.format, .template = m.template, .vision = m.vision, .n_ubatch = m.n_ubatch, .specials = controlTexts(gpa, vocab, m.vision != null) };
+        var why: ?[]u8 = null;
+        const templates = oriel.llama.ChatTemplates.init(gpa, m.model, null, &why) catch |err| t: {
+            std.debug.print("ghostpen-llm: no chat template for requests ({s}: {s})\n", .{ @errorName(err), why orelse "" });
+            break :t null;
+        };
+        if (why) |w| gpa.free(w);
+        break :blk .{ .gpa = gpa, .model = m.model, .ctx = m.ctx, .vocab = vocab, .format = m.format, .template = m.template, .templates = templates, .vision = m.vision, .n_ubatch = m.n_ubatch, .specials = controlTexts(gpa, vocab, m.vision != null) };
     } else null;
 
     defer if (engine) |*e| {
         e.cached.deinit(gpa);
         gpa.free(e.specials.texts);
+        if (e.templates) |t| t.deinit();
     };
 
     // Requests: the worker generates; this thread keeps reading so a cancel
@@ -995,6 +1014,8 @@ const Engine = struct {
     vocab: *const c.llama_vocab,
     format: chat_format.Format,
     template: ?[]const u8,
+    /// The model's chat template for `request`s (null: it couldn't be parsed).
+    templates: ?oriel.llama.ChatTemplates,
     vision: ?*c.mtmd_context,
     /// The prompt micro-batch (the plan's choice): prefill feeds one decoder
     /// call this many tokens.
@@ -1057,6 +1078,7 @@ const Engine = struct {
     fn generate(self: *Engine, arena: std.mem.Allocator, request: Request) Error!void {
         // The prompt is tokenized with parse_special (for the template's
         // markers): the client's text must not carry any.
+        if (request.request.len > 0) return self.answerRequest(arena, request);
         var req = request;
         req.system = try chat_format.neutralize(arena, req.system, &self.specials);
         req.user = try chat_format.neutralize(arena, req.user, &self.specials);
@@ -1150,6 +1172,85 @@ const Engine = struct {
         return self.finish(req.id, n_prompt, generated, prompt_ms, gen_ms, !cancelled and generated >= budget, cancelled);
     }
 
+    /// A `request`: the model's own template renders it, its sampler (with
+    /// the template's tool-call grammar) draws the answer, and its parser
+    /// streams what each token adds, then the message.
+    fn answerRequest(self: *Engine, arena: std.mem.Allocator, req: Request) Error!void {
+        const templates = self.templates orelse return fail(req.id, "This model's chat template isn't supported.", .{});
+        var why: ?[]u8 = null;
+        // A fresh seed each time: a retry isn't the same answer again.
+        const turn = templates.begin(self.gpa, req.request, .{ .think = req.think, .temperature = req.temperature, .seed = c.LLAMA_DEFAULT_SEED }, &why) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                defer if (why) |w| self.gpa.free(w);
+                return fail(req.id, "The model's chat template can't render this request: {s}", .{why orelse @errorName(err)});
+            },
+        };
+        defer turn.deinit(self.gpa);
+        const n_ctx: usize = c.llama_n_ctx(self.ctx);
+        const req_start = std.Io.Clock.awake.now(io);
+        const n_prompt = try self.evalText(arena, req.id, turn.prompt, n_ctx);
+        if (n_prompt == 0) return self.finish(req.id, 0, 0, 0, 0, false, true); // cancelled
+        const prompt_ms: u64 = @intCast(@max(req_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
+        sendStat(req.id, n_prompt, prompt_ms, 0, 0);
+        const gen_start = std.Io.Clock.awake.now(io);
+        const budget = @min(@as(usize, req.max_tokens), n_ctx - n_prompt);
+
+        var generated: usize = 0;
+        var last_stat_ms: u64 = 0;
+        var cancelled = false;
+        var stopped = false;
+        while (generated < budget) {
+            if (cancel.load(.acquire)) {
+                cancelled = true;
+                break;
+            }
+            var tok = turn.sample(self.ctx);
+            if (c.llama_vocab_is_eog(self.vocab, tok)) break;
+            generated += 1;
+            const delta = try turn.feed(self.gpa, tok);
+            defer delta.deinit(self.gpa);
+            sendDelta(req.id, delta.reasoning, delta.content);
+            if (delta.stop) {
+                stopped = true;
+                break;
+            }
+            const rc = c.llama_decode(self.ctx, c.llama_batch_get_one(&tok, 1));
+            if (rc != 0) {
+                if (cancel.load(.acquire)) {
+                    cancelled = true;
+                    break;
+                }
+                return fail(req.id, "The built-in model stopped generating (llama_decode {d}).", .{rc});
+            }
+            const gen_ms: u64 = @intCast(@max(gen_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
+            if (gen_ms - last_stat_ms >= 250) {
+                last_stat_ms = gen_ms;
+                sendStat(req.id, n_prompt, prompt_ms, generated, gen_ms);
+            }
+        }
+        const final = try turn.finish(self.gpa);
+        defer final.deinit(self.gpa);
+        sendDelta(req.id, final.delta.reasoning, final.delta.content);
+        const gen_ms: u64 = @intCast(@max(gen_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
+        sendFinal(.{
+            .id = req.id,
+            .done = true,
+            .prompt_tokens = n_prompt,
+            .gen_tokens = generated,
+            .prompt_ms = prompt_ms,
+            .gen_ms = gen_ms,
+            .truncated = !cancelled and !stopped and generated >= budget,
+            .cancelled = cancelled,
+            .message = final.message,
+        });
+    }
+
+    fn sendDelta(id: u64, reasoning: []const u8, content: []const u8) void {
+        if (reasoning.len > 0) send(.{ .id = id, .reasoning = reasoning });
+        if (content.len > 0) send(.{ .id = id, .content = content });
+    }
+
     /// Greedy at temperature 0, else llama.cpp's usual chain.
     fn samplerChain(self: *Engine, req: Request) Error!*c.llama_sampler {
         const chain = c.llama_sampler_chain_init(c.llama_sampler_chain_default_params()) orelse return error.OutOfMemory;
@@ -1221,11 +1322,15 @@ const Engine = struct {
     /// with the previous request: only the new tail is evaluated. Returns its
     /// token count (0: cancelled).
     fn readTextPrompt(self: *Engine, arena: std.mem.Allocator, req: Request, n_ctx: usize) Error!usize {
-        const text = try self.prompt(arena, req, req.user);
+        return self.evalText(arena, req.id, try self.prompt(arena, req, req.user), n_ctx);
+    }
+
+    /// Decode `text` (a whole prompt) the same way.
+    fn evalText(self: *Engine, arena: std.mem.Allocator, id: u64, text: []const u8, n_ctx: usize) Error!usize {
         const tokens = try self.tokenize(arena, text);
-        if (tokens.len == 0) return fail(req.id, "Empty prompt.", .{});
+        if (tokens.len == 0) return fail(id, "Empty prompt.", .{});
         if (tokens.len + 16 > n_ctx)
-            return fail(req.id, "The text is too long for the built-in model's context ({d} tokens, the context holds {d}): raise the context size in Settings.", .{ tokens.len, n_ctx });
+            return fail(id, "The text is too long for the built-in model's context ({d} tokens, the context holds {d}): raise the context size in Settings.", .{ tokens.len, n_ctx });
 
         // The longest prefix the last request already has in the cache; at
         // least one token is always decoded (so the cache never "covers" a
@@ -1252,7 +1357,7 @@ const Engine = struct {
             const n = @min(tokens.len - pos, self.n_ubatch);
             const rc = c.llama_decode(self.ctx, c.llama_batch_get_one(tokens[pos..].ptr, @intCast(n)));
             if (cancel.load(.acquire)) return 0;
-            if (rc != 0) return fail(req.id, "The built-in model failed to read the prompt (llama_decode {d}).", .{rc});
+            if (rc != 0) return fail(id, "The built-in model failed to read the prompt (llama_decode {d}).", .{rc});
             pos += n;
         }
         if (common > 0) log.info("prompt cache: {d} of {d} prompt tokens reused", .{ common, tokens.len });

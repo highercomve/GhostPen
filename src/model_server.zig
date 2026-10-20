@@ -9,9 +9,13 @@
 //!
 //! - `POST /v1/chat/completions`: messages (text, and `image_url` data URLs
 //!   when the model has a vision projector), `max_tokens`, `temperature`,
-//!   `stream`, `chat_template_kwargs.enable_thinking`, and `response_format`
-//!   `json_schema` (the answer matches the schema). The runner takes one
-//!   system and one user turn: earlier turns are folded into the user text.
+//!   `stream`, thinking, and `response_format` `json_schema` (the answer
+//!   matches the schema). Thinking is on unless the request turns it off
+//!   (`reasoning_effort: "none"`, `chat_template_kwargs.enable_thinking` or
+//!   `think` false); the reasoning comes back as `reasoning_content`.
+//!   GhostPen's own features don't go through here and keep theirs off.
+//!   The runner takes one system and one user turn: earlier turns are folded
+//!   into the user text.
 //!   The `model` field selects any installed built-in model; an omitted model
 //!   uses the configured default. The runner loads on demand and switches models.
 //! - `POST /v1/embeddings`: `input` (a string or strings), 768-dim vectors
@@ -41,6 +45,7 @@ const oriel = @import("oriel");
 const main = @import("main.zig");
 const ai = @import("ai.zig");
 const local_llm = @import("local_llm.zig");
+const ai_stream = @import("ai_stream.zig");
 const metrics = @import("metrics.zig");
 const models = @import("models.zig");
 const llm_models = @import("llm_models.zig");
@@ -354,10 +359,17 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     const choice = toolChoice(obj);
     const use_tools = tools.len > 0 and choice != .none;
 
-    const folded = try foldMessages(arena, messages, use_tools, err) orelse return null;
-    var chat: local_llm.Chat = .{ .system = folded.system, .user = folded.user, .image = folded.image };
+    const folded = try foldMessages(arena, messages, err) orelse return null;
+    // Other apps' agents get the model's reasoning by default (it picks
+    // tools far better with it); GhostPen's own features run without.
+    var chat: local_llm.Chat = .{ .system = folded.system, .user = folded.user, .image = folded.image, .think = true };
     try applyOptions(arena, obj, &chat);
-    if (use_tools) {
+    // Without an image the model's own chat template takes the request as it
+    // is, as llama-server does: the messages with their tool calls and
+    // results, and the tools, in the format the model was trained on. An
+    // image goes the runner's vision way: one system and one user turn.
+    if (folded.image == null) chat.request = body;
+    if (use_tools and chat.request.len == 0) {
         chat.schema = try toolSchema(arena, tools, choice);
         const guide = try toolGuide(arena, tools, choice);
         chat.system = if (chat.system.len > 0) try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ chat.system, guide }) else guide;
@@ -391,7 +403,7 @@ const Folded = struct { system: []const u8, user: []const u8, image: ?[]const u8
 /// developer messages joined; one user turn after them as it is, else the
 /// conversation as a transcript (tool results carry the tool's name). The
 /// last user turn's image. Null (with `err` set) on an image it can't take.
-fn foldMessages(arena: std.mem.Allocator, messages: []const std.json.Value, use_tools: bool, err: *[]const u8) !?Folded {
+fn foldMessages(arena: std.mem.Allocator, messages: []const std.json.Value, err: *[]const u8) !?Folded {
     var system: std.ArrayList(u8) = .empty;
     var image: ?[]const u8 = null;
     var last_user_index: ?usize = null;
@@ -400,8 +412,10 @@ fn foldMessages(arena: std.mem.Allocator, messages: []const std.json.Value, use_
         if (std.mem.eql(u8, r, "user")) last_user_index = i;
         if (!std.mem.eql(u8, r, "system") and !std.mem.eql(u8, r, "developer")) n_turns += 1;
     };
-    // One user turn after the system prompt: no transcript.
-    const simple = n_turns <= 1 and !use_tools;
+    // One user turn after the system prompt: no transcript, tools or not (a
+    // "Continue as the assistant" wrapper makes models narrate instead of
+    // calling the tool).
+    const simple = n_turns <= 1;
 
     var transcript: std.ArrayList(u8) = .empty;
     var last_user: []const u8 = "";
@@ -455,6 +469,10 @@ fn applyOptions(arena: std.mem.Allocator, obj: std.json.ObjectMap, chat: *local_
         .float => |f| chat.temperature = f,
         .integer => |n| chat.temperature = @floatFromInt(n),
         else => {},
+    };
+    // OpenAI's spelling (pi, Codex): "none" is off, any effort is on.
+    if (obj.get("reasoning_effort")) |e| if (e == .string) {
+        chat.think = !std.mem.eql(u8, e.string, "none");
     };
     if (obj.get("chat_template_kwargs")) |k| if (k == .object) if (k.object.get("enable_thinking")) |t| if (t == .bool) {
         chat.think = t.bool;
@@ -649,22 +667,35 @@ pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server
     const id = completionId(&id_buf);
     const created = std.Io.Clock.real.now(io).toSeconds();
 
-    if (req.tools) return toolReply(io, arena, request, req, cfg, model, id, created);
+    if (req.tools and req.chat.request.len == 0) return toolReply(io, arena, request, req, cfg, model, id, created);
     if (!req.stream) return try completeChat(io, arena, req, cfg, model, id, created);
     try streamChat(io, arena, request, req, cfg, model, id, created);
     return null;
 }
 
+/// The model's reasoning, kept apart from the answer (`res.text`) as
+/// `chatChannels` delivers it; null when it didn't reason.
+const Reasoning = struct {
+    arena: std.mem.Allocator,
+    text: std.ArrayList(u8) = .empty,
+    fn collect(self: *Reasoning, d: ai_stream.Delta) void {
+        if (d.channel == .thinking) self.text.appendSlice(self.arena, d.text) catch {};
+    }
+    fn content(self: *const Reasoning) ?[]const u8 {
+        return if (self.text.items.len > 0) self.text.items else null;
+    }
+};
+
 /// The whole answer as one reply.
 fn completeChat(io: std.Io, arena: std.mem.Allocator, req: ChatRequest, cfg: local_llm.Config, model: []const u8, id: []const u8, created: i64) !Reply {
     var diag: []const u8 = "";
-    const res = local_llm.chat(io, gpa, arena, cfg, req.chat, {}, struct {
-        fn f(_: void, _: []const u8) void {}
-    }.f, &diag) catch |e| switch (e) {
+    var reasoning: Reasoning = .{ .arena = arena };
+    const res = local_llm.chatChannels(io, gpa, arena, cfg, req.chat, &reasoning, Reasoning.collect, &diag) catch |e| switch (e) {
         error.OutOfMemory => return e,
         error.LocalFailed => return errorReply(.internal_server_error, diag, arena),
     };
     const counted = usageFields(res);
+    const msg: ToolMessage = if (res.message) |m| try templateMessage(arena, m, id) else .{ .content = res.text, .reasoning_content = reasoning.content() };
     return .{ .body = try std.json.Stringify.valueAlloc(arena, .{
         .id = id,
         .object = "chat.completion",
@@ -672,12 +703,12 @@ fn completeChat(io: std.Io, arena: std.mem.Allocator, req: ChatRequest, cfg: loc
         .model = model,
         .choices = .{.{
             .index = 0,
-            .message = .{ .role = "assistant", .content = res.text },
-            .finish_reason = if (res.truncated) "length" else "stop",
+            .message = msg,
+            .finish_reason = finishReason(msg, res),
         }},
         .usage = counted.usage,
         .timings = counted.timings,
-    }, .{}) };
+    }, .{ .emit_null_optional_fields = false }) };
 }
 
 /// Server-sent events, one per piece of text as the runner writes it,
@@ -716,15 +747,18 @@ fn streamChat(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Re
             self.failed = true;
             local_llm.cancel(self.io);
         }
-        fn chunk(self: *@This(), text: []const u8) void {
-            self.event(.{ .content = text }, null);
+        fn chunk(self: *@This(), d: ai_stream.Delta) void {
+            switch (d.channel) {
+                .answer => self.event(.{ .content = d.text }, null),
+                .thinking => self.event(.{ .reasoning_content = d.text }, null),
+            }
         }
     };
     var sse: Sse = .{ .io = io, .w = &bw, .arena = arena, .id = id, .model = model, .created = created };
     sse.event(.{ .role = "assistant", .content = "" }, null);
     if (sse.failed) return; // gone already: don't generate at all
     var diag: []const u8 = "";
-    const res = local_llm.chat(io, gpa, arena, cfg, req.chat, &sse, Sse.chunk, &diag) catch |e| switch (e) {
+    const res = local_llm.chatChannels(io, gpa, arena, cfg, req.chat, &sse, Sse.chunk, &diag) catch |e| switch (e) {
         error.OutOfMemory => return e,
         error.LocalFailed => {
             sse.event(.{ .content = "" }, "error");
@@ -734,9 +768,13 @@ fn streamChat(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Re
             return;
         },
     };
+    // Tool calls go out whole, after the text (they can't be shown before
+    // they're complete).
+    const msg: ToolMessage = if (res.message) |m| try templateMessage(arena, m, id) else .{};
+    if (msg.tool_calls) |calls| sse.event(.{ .tool_calls = try indexedCalls(arena, calls) }, null);
     // The last chunk's delta is an empty object (`.{}` would be `[]`).
     const Empty = struct {};
-    sse.event(Empty{}, if (res.truncated) "length" else "stop");
+    sse.event(Empty{}, finishReason(msg, res));
     if (req.include_usage) {
         // OpenAI's shape: a chunk with no choices, only the usage.
         const chunk = std.json.Stringify.valueAlloc(arena, .{
@@ -759,6 +797,7 @@ fn streamChat(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Re
 const ToolMessage = struct {
     role: []const u8 = "assistant",
     content: ?[]const u8 = null,
+    reasoning_content: ?[]const u8 = null,
     tool_calls: ?[]const ToolCall = null,
     const ToolCall = struct {
         id: []const u8,
@@ -766,6 +805,47 @@ const ToolMessage = struct {
         function: struct { name: []const u8, arguments: []const u8 },
     };
 };
+
+/// A `Chat.request`'s answer (`Result.message`, parsed by the model's chat
+/// template) as the OpenAI message, its tool calls with ids. A message it
+/// can't read is passed on as content.
+fn templateMessage(arena: std.mem.Allocator, message: []const u8, id: []const u8) !ToolMessage {
+    const Parsed = struct {
+        content: []const u8 = "",
+        reasoning_content: []const u8 = "",
+        tool_calls: []const struct { name: []const u8, arguments: []const u8 } = &.{},
+    };
+    const p = std.json.parseFromSliceLeaky(Parsed, arena, message, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
+        return .{ .content = message };
+    var calls: ?[]ToolMessage.ToolCall = null;
+    if (p.tool_calls.len > 0) {
+        const out = try arena.alloc(ToolMessage.ToolCall, p.tool_calls.len);
+        for (p.tool_calls, out, 0..) |call, *o, i| o.* = .{
+            .id = try std.fmt.allocPrint(arena, "call_{s}_{d}", .{ id["chatcmpl-".len..], i }),
+            .function = .{ .name = call.name, .arguments = call.arguments },
+        };
+        for (out) |c| log.info("tool call: {s}", .{c.function.name});
+        calls = out;
+    }
+    return .{
+        .content = if (p.content.len > 0 or calls == null) p.content else null,
+        .reasoning_content = if (p.reasoning_content.len > 0) p.reasoning_content else null,
+        .tool_calls = calls,
+    };
+}
+
+fn finishReason(msg: ToolMessage, res: local_llm.Result) []const u8 {
+    return if (msg.tool_calls != null) "tool_calls" else if (res.truncated) "length" else "stop";
+}
+
+/// Streamed tool calls carry an index each.
+const IndexedCall = struct { index: usize, id: []const u8, type: []const u8 = "function", function: struct { name: []const u8, arguments: []const u8 } };
+
+fn indexedCalls(arena: std.mem.Allocator, calls: []const ToolMessage.ToolCall) ![]IndexedCall {
+    const out = try arena.alloc(IndexedCall, calls.len);
+    for (calls, out, 0..) |cl, *o, i| o.* = .{ .index = i, .id = cl.id, .function = .{ .name = cl.function.name, .arguments = cl.function.arguments } };
+    return out;
+}
 
 fn toolMessage(arena: std.mem.Allocator, text: []const u8, id: []const u8) !ToolMessage {
     const parsed = std.json.parseFromSliceLeaky(ToolAnswer, arena, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
@@ -785,13 +865,13 @@ fn toolMessage(arena: std.mem.Allocator, text: []const u8, id: []const u8) !Tool
 /// tool calls can't be shown before they're complete).
 fn toolReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request, req: ChatRequest, cfg: local_llm.Config, model: []const u8, id: []const u8, created: i64) !?Reply {
     var diag: []const u8 = "";
-    const res = local_llm.chat(io, gpa, arena, cfg, req.chat, {}, struct {
-        fn f(_: void, _: []const u8) void {}
-    }.f, &diag) catch |e| switch (e) {
+    var reasoning: Reasoning = .{ .arena = arena };
+    const res = local_llm.chatChannels(io, gpa, arena, cfg, req.chat, &reasoning, Reasoning.collect, &diag) catch |e| switch (e) {
         error.OutOfMemory => return e,
         error.LocalFailed => return errorReply(.internal_server_error, diag, arena),
     };
-    const msg = try toolMessage(arena, res.text, id);
+    var msg = try toolMessage(arena, res.text, id);
+    msg.reasoning_content = reasoning.content();
     const finish: []const u8 = if (msg.tool_calls != null) "tool_calls" else if (res.truncated) "length" else "stop";
     if (msg.tool_calls) |calls| {
         for (calls) |c| log.info("tool call: {s}", .{c.function.name});
@@ -815,20 +895,14 @@ fn toolReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Req
             .{ .name = "cache-control", .value = "no-cache" },
         },
     } });
-    // Streamed tool calls carry an index each.
-    const Indexed = struct { index: usize, id: []const u8, type: []const u8 = "function", function: struct { name: []const u8, arguments: []const u8 } };
-    var indexed: []Indexed = &.{};
-    if (msg.tool_calls) |calls| {
-        indexed = try arena.alloc(Indexed, calls.len);
-        for (calls, indexed, 0..) |cl, *o, i| o.* = .{ .index = i, .id = cl.id, .function = .{ .name = cl.function.name, .arguments = cl.function.arguments } };
-    }
-    const Delta = struct { role: []const u8 = "assistant", content: ?[]const u8 = null, tool_calls: ?[]const Indexed = null };
+    const indexed: []const IndexedCall = if (msg.tool_calls) |calls| try indexedCalls(arena, calls) else &.{};
+    const Delta = struct { role: []const u8 = "assistant", content: ?[]const u8 = null, reasoning_content: ?[]const u8 = null, tool_calls: ?[]const IndexedCall = null };
     const chunk = try std.json.Stringify.valueAlloc(arena, .{
         .id = id,
         .object = "chat.completion.chunk",
         .created = created,
         .model = model,
-        .choices = .{.{ .index = 0, .delta = Delta{ .content = msg.content, .tool_calls = if (msg.tool_calls != null) indexed else null }, .finish_reason = finish }},
+        .choices = .{.{ .index = 0, .delta = Delta{ .content = msg.content, .reasoning_content = msg.reasoning_content, .tool_calls = if (msg.tool_calls != null) indexed else null }, .finish_reason = finish }},
     }, .{ .emit_null_optional_fields = false });
     bw.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{chunk}) catch {};
     bw.end() catch {};
@@ -1005,12 +1079,17 @@ test "tools: schema, guide, transcript and the answer as tool_calls" {
         \\  {"role":"tool","tool_call_id":"c1","content":"2 moments found"}]}
     , &err)).?;
     try std.testing.expect(req.tools);
-    try std.testing.expect(std.mem.indexOf(u8, req.chat.system, "search_moments: Search the footage") != null);
+    // No image: the model's own template takes the request as it is.
+    try std.testing.expect(std.mem.indexOf(u8, req.chat.request, "\"search_moments\"") != null);
+    try std.testing.expectEqualStrings("", req.chat.schema);
+    try std.testing.expectEqualStrings("You write scripts.", req.chat.system);
     try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "User: Find a dog") != null);
     try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "Assistant called tools: [{\"name\":\"search_moments\",\"arguments\":{\"query\":\"dog\"}}]") != null);
     try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "Tool result (search_moments):\n2 moments found") != null);
-    // The schema converts to a grammar.
-    const g = try oriel.llama.jsonSchemaToGrammar(arena, req.chat.schema, null);
+    // The image path's guide and grammar (the schema converts).
+    const tools = (try std.json.parseFromSliceLeaky(std.json.Value, arena, req.chat.request, .{})).object.get("tools").?.array.items;
+    try std.testing.expect(std.mem.indexOf(u8, try toolGuide(arena, tools, .auto), "search_moments: Search the footage") != null);
+    const g = try oriel.llama.jsonSchemaToGrammar(arena, try toolSchema(arena, tools, .auto), null);
     try std.testing.expect(std.mem.indexOf(u8, g, "search_moments") != null);
 
     const calls = try toolMessage(arena, "{\"tool_calls\":[{\"name\":\"search_moments\",\"arguments\":{\"query\":\"cat\"}}]}", "chatcmpl-abc");
@@ -1020,6 +1099,37 @@ test "tools: schema, guide, transcript and the answer as tool_calls" {
     const answer = try toolMessage(arena, "{\"answer\":\"Here it is.\"}", "chatcmpl-abc");
     try std.testing.expectEqualStrings("Here it is.", answer.content.?);
     try std.testing.expect(answer.tool_calls == null);
+}
+
+test "parseChat: thinking on unless the request turns it off; one turn with tools isn't wrapped" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var err: []const u8 = "";
+    const msgs = "\"messages\":[{\"role\":\"developer\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Read a.md\"}]";
+    const tools = "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"parameters\":{\"type\":\"object\"}}}]";
+
+    const plain = (try parseChat(arena, "{" ++ msgs ++ "}", &err)).?;
+    try std.testing.expect(plain.chat.think);
+    const high = (try parseChat(arena, "{\"reasoning_effort\":\"high\"," ++ msgs ++ "}", &err)).?;
+    try std.testing.expect(high.chat.think);
+    const none = (try parseChat(arena, "{\"reasoning_effort\":\"none\"," ++ msgs ++ "}", &err)).?;
+    try std.testing.expect(!none.chat.think);
+    const ollama = (try parseChat(arena, "{\"think\":false," ++ msgs ++ "}", &err)).?;
+    try std.testing.expect(!ollama.chat.think);
+    // An explicit switch wins over the effort.
+    const kwarg = (try parseChat(arena, "{\"reasoning_effort\":\"high\",\"chat_template_kwargs\":{\"enable_thinking\":false}," ++ msgs ++ "}", &err)).?;
+    try std.testing.expect(!kwarg.chat.think);
+
+    const tooled = (try parseChat(arena, "{" ++ tools ++ "," ++ msgs ++ "}", &err)).?;
+    try std.testing.expect(tooled.tools);
+    try std.testing.expectEqualStrings("Read a.md", tooled.chat.user);
+    try std.testing.expect(tooled.chat.request.len > 0);
+
+    // An image: the vision path (one system and one user turn), tools in the guide.
+    const pic = (try parseChat(arena, "{" ++ tools ++ ",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"What is it?\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,aGVsbG8=\"}}]}]}", &err)).?;
+    try std.testing.expectEqualStrings("", pic.chat.request);
+    try std.testing.expect(std.mem.indexOf(u8, pic.chat.system, "# Tools") != null);
 }
 
 test "parseChat: system, history folded, image, thinking and schema" {

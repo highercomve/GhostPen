@@ -2,6 +2,22 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [Unreleased]
+
+### Changed
+
+- Model service: chat requests go through the model's own chat template, as
+  llama-server serves them: the messages with their tool calls and results,
+  and the tools, in the format the model was trained on, sampled with the
+  template's tool-call grammar and parsed back into content, reasoning and
+  tool calls. Agents (pi, Codex, OpenCode) call tools instead of announcing
+  them, and long agent sessions are no longer folded into one turn or capped
+  at 240 KB. Requests with an image keep the vision path.
+- Model service: other apps' chat requests think by default, and the reasoning
+  comes back as `reasoning_content` (streamed too). `reasoning_effort: "none"`,
+  `enable_thinking: false` or `think: false` turn it off. GhostPen's own
+  features are unchanged.
+
 ## [0.3.6] - 2026-10-20
 
 ### Fixed
