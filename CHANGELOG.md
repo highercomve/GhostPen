@@ -2,6 +2,26 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.3.6] - 2026-10-20
+
+### Fixed
+
+- Link summaries keep exposed model thinking separate from the answer while
+  streaming, after reopening, and when cancelled. Copy and Read summary use
+  only the answer.
+- Corrected the Gemma 4 E4B prompt to prevent unwanted thinking when it is
+  disabled, and clarified the summary format so section headings stay outside
+  bullet lists.
+- Summary text updates during continuous generation instead of waiting for
+  the model to pause.
+
+### Changed
+
+- Added a Show thinking switch matching the reader design. It reveals received
+  thinking and requests it for the next summary; the choice is remembered.
+- Thinking channels are normalized in the backend from provider fields,
+  explicit markers, and local template metadata, with bounded processing.
+
 ## [0.3.5] - 2026-10-19
 
 ### Changed
