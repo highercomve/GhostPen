@@ -96,6 +96,12 @@ chat template. Ordinary headings and literal tokens in the answer stay
 intact. Output is limited to 1 MiB per request; exceeding the limit stops the
 summary with a recoverable error.
 
+Use **Export → PDF** to save the summary with rendered Mermaid diagrams, or
+**Export → Markdown** to save its source. Large diagrams continue in labeled,
+overlapping panels at a readable size; headings stay with their first panel.
+Invalid diagrams remain readable as source. PDF diagrams use a light palette
+even when the reader uses dark mode.
+
 ## Meetings
 
 Turn on **🎙 Meeting** in the captions bar, then Start: the captions also

@@ -1169,9 +1169,13 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .summary-heading-dot { color: var(--reader-accent); }
 .summary-heading p { margin: 0; color: var(--reader-muted); font-size: 12px; line-height: 1.5; }
 .summary-copy { display: flex; align-items: center; gap: 8px; flex: none; border: 1px solid var(--reader-line); background: transparent; color: var(--reader-ink); padding: 10px 13px; border-radius: 8px; font-size: 12px; cursor: pointer; }
-.summary-head-btns { display: flex; align-items: center; gap: 10px; flex: none; }
+.summary-head-btns { display: flex; align-items: center; gap: 10px; flex: none; position: relative; }
 .summary-copy:disabled { opacity: .4; cursor: default; }
 .summary-copy:hover:not(:disabled), .summary-copy.done { background: var(--reader-paper); border-color: var(--reader-accent); }
+/* The export choice hangs under the header button. */
+.summary-export-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; display: flex; flex-direction: column; min-width: 178px; padding: 5px; border: 1px solid var(--reader-line); border-radius: 9px; background: var(--reader-input); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3); }
+.summary-export-menu button { flex: 1; justify-content: flex-start; padding: 9px 12px; border: 0; border-radius: 6px; background: transparent; color: var(--reader-ink); font-size: 12.5px; text-align: left; cursor: pointer; }
+.summary-export-menu button:hover { background: color-mix(in srgb, var(--reader-accent) 12%, transparent); }
 .summary-bar { margin: 0 32px 18px; padding: 18px; background: var(--reader-paper); border: 1px solid var(--reader-line); border-radius: 12px; flex: none; }
 .summary-label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 10px; }
 .summary-url-field { display: flex; align-items: center; gap: 10px; padding-left: 12px; background: var(--reader-input); border: 1px solid var(--reader-line); border-radius: 8px; }
@@ -1215,7 +1219,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .summary-font-size button:hover:not(:disabled) { background: var(--reader-paper); border-color: var(--reader-line); }
 .summary-font-size button:focus-visible { outline: 2px solid var(--reader-accent); outline-offset: 2px; }
 .summary-font-size button:disabled { opacity: .3; cursor: default; }
-.summary-thinking { max-width: 68ch; margin: 0 auto 20px; padding: 16px 20px; border: 1px solid var(--reader-line); border-radius: 8px; color: var(--reader-muted); background: var(--reader-paper); }
+.summary-thinking { max-width: max(68ch, min(74vw, 980px)); margin: 0 auto 20px; padding: 16px 20px; border: 1px solid var(--reader-line); border-radius: 8px; color: var(--reader-muted); background: var(--reader-paper); }
 .summary-thinking h2 { margin: 0 0 12px; font-size: 12px; }
 .summary-thinking-empty { margin: 0; font-size: 13px; line-height: 1.5; }
 .summary-font-size { display: flex; align-items: center; gap: 3px; }
@@ -1244,7 +1248,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .summary-error { border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--reader-line)); background: var(--reader-paper); border-radius: 10px; padding: 24px; margin-top: 12px; }
 .summary-error h2 { font: normal 24px/1.3 Georgia, serif; margin: 12px 0; }
 .summary-error-title { color: var(--reader-muted); font-size: 13px; line-height: 1.7; margin: 0; overflow-wrap: anywhere; }
-.summary-paper { max-width: 68ch; margin: 0 auto; padding: 28px 30px 36px; border: 1px solid var(--reader-line); border-radius: 4px; background: var(--reader-paper); }
+.summary-paper { max-width: max(68ch, min(74vw, 980px)); margin: 0 auto; padding: 28px 30px 36px; border: 1px solid var(--reader-line); border-radius: 4px; background: var(--reader-paper); }
 .summary-paper-meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--reader-line); padding-bottom: 16px; margin-bottom: 24px; }
 .summary-paper-meta > span:last-child { font-size: 10px; color: var(--reader-muted); }
 .summary-document-title { font: normal 30px/1.25 Georgia, serif; letter-spacing: -.6px; margin: 0 0 24px; overflow-wrap: anywhere; }
@@ -1284,6 +1288,12 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   max-width: 62ch;
   margin-inline: auto;
 }
+/* A ```mermaid fence, before and after diagrams.js draws it: the source is
+ * legible until the SVG replaces it; the drawn one scrolls sideways, never
+ * squishes. */
+.md-diagram { margin: 16px 0; padding: 10px 14px; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); }
+.md-diagram pre, pre.mermaid { margin: 0; padding: 0; background: transparent; border: 0; font: 13px/1.5 ui-monospace, monospace; }
+.md-diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; font-family: var(--reader-font, inherit); }
 .md > :first-child { margin-top: 0; }
 .md h1, .md h2, .md h3, .md h4 {
   line-height: 1.3;

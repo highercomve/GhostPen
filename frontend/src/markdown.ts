@@ -1,7 +1,8 @@
 // A small, safe Markdown renderer for the summaries: HTML-escape the text
 // first, then turn back into tags only the subset the summaries use —
 // headings, paragraphs, nested ordered/unordered lists, block quotes,
-// fenced code, horizontal rules, links, bold, italic and strikethrough.
+// fenced code, Mermaid diagrams, horizontal rules, links, bold, italic
+// and strikethrough.
 // Inline code spans are pulled out before the other inline passes so the
 // markup inside them can never interact.
 
@@ -11,6 +12,7 @@ export function renderMarkdown(src: string): string {
 
   let para: string[] = [];
   let fence: string[] | null = null;
+  let fence_lang = "";
   let quote: string[] = [];
   // The open list tags, outermost first ("ul"/"ol"), and the last item's
   // nesting depth (-1: none open) — a sibling continues its list, a deeper
@@ -44,8 +46,9 @@ export function renderMarkdown(src: string): string {
     // Fenced code: on until the next fence (all or nothing).
     if (fence !== null) {
       if (/^\s*(```|~~~)/.test(raw)) {
-        out.push(`<pre><code>${escape(fence.join("\n"))}</code></pre>`);
+        out.push(fenceBlock(fence, fence_lang));
         fence = null;
+        fence_lang = "";
       } else {
         fence.push(raw);
       }
@@ -53,6 +56,7 @@ export function renderMarkdown(src: string): string {
     }
     if (/^\s*(```|~~~)/.test(raw)) {
       closeAll();
+      fence_lang = (/^\s*(?:```|~~~)\s*([A-Za-z0-9_-]*)/.exec(raw)?.[1] ?? "").toLowerCase();
       fence = [];
       continue;
     }
@@ -117,9 +121,20 @@ export function renderMarkdown(src: string): string {
     closeLists();
     para.push(raw.trim());
   }
-  if (fence !== null) out.push(`<pre><code>${escape(fence.join("\n"))}</code></pre>`);
+  if (fence !== null) out.push(fenceBlock(fence, fence_lang));
   closeAll();
   return out.join("\n");
+}
+
+// A closed fence: Mermaid's keep their readable source as a `<pre
+// class="mermaid">` (diagrams.ts turns it into an SVG); the rest is one
+// escaping away from a code block.
+function fenceBlock(lines: string[], lang: string): string {
+  const body = escape(lines.join("\n"));
+  if (lang === "mermaid") {
+    return `<div class="md-diagram"><pre class="mermaid" aria-label="Mermaid diagram">${body}</pre></div>`;
+  }
+  return `<pre><code>${body}</code></pre>`;
 }
 
 // One spaced dash or bullet, bold/italic pairs, slashes and underscores

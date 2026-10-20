@@ -267,6 +267,18 @@ export interface SummaryDelta {
 }
 export type SummaryStatus = Pick<SummaryState, "state" | "title" | "chars" | "message" | "revision" | "page_text" | "thinking_requested">;
 export const summaryState = () => invoke<SummaryState>("summary_state");
+/** Save the summary through a save dialog, as Markdown or as a typeset PDF
+ *  (the diagrams rasterize in). Resolves with an "Exported…" phrase; ""
+ *  is the user backing out. */
+export const exportSummary = (title: string, markdown: string, images: ExportDiagram[], format: "markdown" | "pdf") =>
+  invoke<string>("export_summary", { title, markdown, images, format });
+/** One rendered Mermaid diagram in the PDF export (the fence's source is its key). */
+export interface ExportDiagram {
+  key: string;
+  jpeg: string;
+  width: number;
+  height: number;
+}
 /** The clipboard's text, when there is any (the summary window's prefill). */
 export const clipboardText = () => invoke<string>("clipboard_text");
 /** Playground: transform text directly, no clipboard involved. */

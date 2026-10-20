@@ -14,6 +14,7 @@ const app = @import("oriel_app");
 const ai = @import("ai.zig");
 const settings_mod = @import("settings.zig");
 const store = @import("store.zig");
+const pdf = @import("pdf.zig");
 const image = @import("image.zig");
 const captions = @import("captions.zig");
 const dictation = @import("dictation.zig");
@@ -623,17 +624,18 @@ fn imageFail(err: anyerror) error{CommandFailed} {
 
 pub const Commands = struct {
     pub const async_commands = .{
-        "get_selection",           "extract_image_text",      "process_ai_action",      "process_ai_custom",
-        "process_text",            "process_text_stream",     "fetch_models",           "captions_start",
-        "captions_download_model", "dictation_start",         "captions_list_devices",  "dictation_list_devices",
-        "llm_models_status",       "llm_download_model",      "llm_delete_model",       "llm_unload",
-        "menu_dismissed",          "update_check",            "update_install",         "whisper_models_status",
-        "whisper_download_model",  "whisper_delete_model",    "summarize_link",         "summary_state",
-        "tts_speak",               "tts_state",               "tts_catalog",            "tts_download",
-        "tts_delete",              "tts_warm_up",             "paste_result",           "meetings_list",
-        "meetings_get",            "meetings_update",         "meetings_delete",        "meetings_reprocess",
-        "meetings_export",         "meetings_open_folder",    "meetings_release_audio", "meetings_folder",
-        "meetings_voices",         "meetings_remember_voice", "meetings_forget_voice",  "meetings_ask",
+        "get_selection",           "extract_image_text",   "process_ai_action",       "process_ai_custom",
+        "process_text",            "process_text_stream",  "fetch_models",            "captions_start",
+        "captions_download_model", "dictation_start",      "captions_list_devices",   "dictation_list_devices",
+        "llm_models_status",       "llm_download_model",   "llm_delete_model",        "llm_unload",
+        "menu_dismissed",          "update_check",         "update_install",          "whisper_models_status",
+        "whisper_download_model",  "whisper_delete_model", "summarize_link",          "summary_state",
+        "export_summary",          "tts_speak",            "tts_state",               "tts_catalog",
+        "tts_download",            "tts_delete",           "tts_warm_up",             "paste_result",
+        "meetings_list",           "meetings_get",         "meetings_update",         "meetings_delete",
+        "meetings_reprocess",      "meetings_export",      "meetings_open_folder",    "meetings_release_audio",
+        "meetings_folder",         "meetings_voices",      "meetings_remember_voice", "meetings_forget_voice",
+        "meetings_ask",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -952,6 +954,55 @@ pub const Commands = struct {
             return;
         }
         summarySet("ready", pd.title, pd.text.len, "");
+    }
+
+    /// Export the summary through a save dialog: as Markdown, or as PDF
+    /// typeset from the Markdown (`src/pdf.zig`) with `images` carrying the
+    /// rendered Mermaid diagrams (the fence's source is its key). `""`
+    /// means the user backed out; the return is what the window flashes.
+    pub fn export_summary(arena: std.mem.Allocator, args: struct {
+        title: []const u8,
+        markdown: []const u8,
+        images: []const pdf.Image = &.{},
+        format: []const u8 = "markdown",
+    }) ![]const u8 {
+        const is_pdf = std.mem.eql(u8, args.format, "pdf");
+        if (std.mem.trim(u8, args.markdown, " \n\t").len == 0)
+            return oriel.ipc.fail("Nothing to export yet: the summary isn't there.", .{});
+        var data: []const u8 = args.markdown;
+        if (is_pdf) {
+            const day = @import("meeting_store.zig").localNow();
+            data = pdf.render(arena, .{
+                .title = args.title,
+                .subtitle = try std.fmt.allocPrint(arena, "GhostPen summary · {d:0>4}-{d:0>2}-{d:0>2}", .{ day.year, day.month, day.day }),
+                .markdown = args.markdown,
+                .images = args.images,
+            }) catch |err| return oriel.ipc.fail("Could not typeset the summary ({s}).", .{@errorName(err)});
+            for (args.images, 0..) |img, i| {
+                const decoded = pdf.decode64(arena, img.jpeg) catch &.{};
+                log.info("export image {d}: {d}x{d}, {d} b64 chars, {d} bytes", .{ i, img.width, img.height, img.jpeg.len, decoded.len });
+                if (environ_map.get("GHOSTPEN_EXPORT_PATH") != null and decoded.len > 0) {
+                    const dumps = std.fmt.allocPrint(arena, "/tmp/ghostpen-export-{d}.jpg", .{i}) catch "";
+                    if (dumps.len > 0) {
+                        const df = std.Io.Dir.cwd().createFile(io, dumps, .{}) catch null;
+                        if (df) |f| {
+                            defer f.close(io);
+                            f.writeStreamingAll(io, decoded) catch {};
+                        }
+                    }
+                }
+            }
+        }
+        const title = if (is_pdf) "Export the summary as PDF" else "Export the summary as Markdown";
+        // Tests (GHOSTPEN_EXPORT_PATH) skip the dialog.
+        const path = if (environ_map.get("GHOSTPEN_EXPORT_PATH")) |forced| (gpa.dupe(u8, forced) catch return error.OutOfMemory) else ((oriel.dialog.saveFile(gpa, .{ .title = title }) catch |err|
+            return oriel.ipc.fail("Could not open the save dialog ({s}).", .{@errorName(err)})) orelse return "");
+        errdefer gpa.free(path);
+        oriel.dialog.writeFile(io, path, data) catch |err|
+            return oriel.ipc.fail("Could not write the file ({s}).", .{@errorName(err)});
+        gpa.free(path);
+        log.info("summary exported as {s} ({d} bytes)", .{ args.format, data.len });
+        return if (is_pdf) "Exported as PDF" else "Exported as Markdown";
     }
 
     // ---- built-in models (Settings → Built-in models) ----

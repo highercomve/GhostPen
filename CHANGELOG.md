@@ -2,6 +2,22 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.3.8] - 2026-10-20
+
+### Added
+
+- Export link summaries as PDF or Markdown from the reader toolbar.
+- Render Mermaid diagrams in the reader and embed them in PDF exports.
+
+### Fixed
+
+- Large PDF diagrams retain readable labels across overlapping panels instead
+  of shrinking to fit a single page. Short horizontal panels share a page.
+- Keep headings with their diagrams, including nearly page-high drawings.
+- Invalid Mermaid keeps readable source without leaving error graphics behind.
+- Recognize tilde fences, repeated diagrams, and Windows line endings during
+  export; clean up temporary rendering elements after failures.
+
 ## [0.3.7] - 2026-10-20
 
 ### Changed

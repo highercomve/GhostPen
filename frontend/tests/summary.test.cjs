@@ -23,7 +23,7 @@ before(async () => {
   const outfile = path.join(directory, 'Summary.cjs');
   await build({
     entryPoints: [path.join(__dirname, '../src/Summary.tsx')], outfile,
-    bundle: true, platform: 'node', format: 'cjs', jsx: 'automatic',
+    bundle: true, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['mermaid'],
     plugins: [{
       name: 'native-bridge',
       setup(b) {
@@ -60,6 +60,7 @@ beforeEach(() => {
       calls.push({ name, args });
       if (name === 'summary_state') return getSnapshot();
       if (name === 'clipboard_text') return 'https://example.com/article';
+      if (name === 'export_summary') return args.format === 'pdf' ? 'Exported as PDF' : 'Exported as Markdown';
       if (name === 'summarize_link') {
         snapshot.thinking_requested = args.thinking;
         emitStatus('fetching');
@@ -128,6 +129,39 @@ test('heading-free thinking never appears in the summary or enables Copy/TTS, in
   assert.equal(paper(), null);
   assert.ok(calls.some((c) => c.name === 'cancel_ai'));
   assert.equal(calls.some((c) => ['copy_text', 'tts_speak'].includes(c.name)), false);
+});
+
+test('export saves the finished summary, through the menu, and offers nothing before it exists', async () => {
+  await mount();
+  const ex = () => screen.getByRole('button', { name: /^Export$/ });
+  assert.equal(ex().disabled, true, 'nothing to export yet');
+  snapshot = { ...empty, state: 'ready', markdown: answer, revision: 4 };
+  await unmount();
+  await mount();
+  assert.equal(ex().disabled, false);
+  await click(ex());
+  const pdf = screen.getByRole('menuitem', { name: 'PDF' });
+  await click(pdf);
+  assert.deepEqual(calls.find((c) => c.name === 'export_summary').args, {
+    title: '', markdown: answer, images: [], format: 'pdf',
+  });
+  assert.match(document.body.textContent, /Exported as PDF/);
+  await click(screen.getByRole('button', { name: /^Exported as PDF$/ }));
+  await click(screen.getByRole('menuitem', { name: 'Markdown (.md)' }));
+  assert.deepEqual(calls.filter((c) => c.name === 'export_summary').at(-1).args, {
+    title: '', markdown: answer, images: [], format: 'markdown',
+  });
+  // A cancelled dialog clears the busy state without an error banner.
+  snapshot = { ...snapshot };
+  await click(screen.getByRole('button', { name: /^Exported as Markdown$/ }));
+  const fail = window.oriel.invoke;
+  window.oriel.invoke = async (name, args) => {
+    calls.push({ name, args });
+    throw new Error('Could not open the save dialog (Cancelled).');
+  };
+  await click(screen.getByRole('menuitem', { name: 'PDF' }));
+  assert.match(document.body.textContent, /Could not write|Cancelled|dialog/);
+  window.oriel.invoke = fail;
 });
 
 test('toolbar switch is a focusable native checkbox, persists, and Reset restores hidden thinking', async () => {

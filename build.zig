@@ -3,7 +3,7 @@ const oriel = @import("oriel");
 
 /// GhostPen's version: the packages, `ghostpen --version`, Settings → About
 /// and the updater all read it from here.
-const version = "0.3.7";
+const version = "0.3.8";
 
 /// Public half of the release signing key (the private half is the
 /// GHOSTPEN_UPDATE_KEY secret the release workflow signs latest.json with).
@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
         // WebView (Oriel's docs/native-renderer.md).
         .native_ui = b.option(bool, "native_ui", "Experimental: draw the windows with native widgets instead of a WebView (Linux)") orelse false,
         .menu = false,
-        .dialog = false,
+        .dialog = true,
         // Updates (Settings → About & updates; src/updates.zig).
         .updater = true,
         .sql = false,

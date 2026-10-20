@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "./icons";
-import { cancelAi, clipboardText, copyText, listenVoice, summarizeLink, summaryState, ttsSpeak, ttsStop, ttsWarmUp, type TtsState, type SummaryState, type SummaryDelta, type SummaryStatus } from "./api";
+import { cancelAi, clipboardText, copyText, exportSummary, listenVoice, summarizeLink, summaryState, ttsSpeak, ttsStop, ttsWarmUp, type TtsState, type SummaryState, type SummaryDelta, type SummaryStatus } from "./api";
 import { listen } from "./events";
 import { renderMarkdown } from "./markdown";
+import { renderDiagrams, exportDiagrams } from "./diagrams";
 import { openExternal } from "./oriel";
 
 // What the Zig side reports while it fetches and summarizes
@@ -108,6 +109,27 @@ export default function Summary() {
   const html = useStreamingMarkdown(summary);
   const thinkingHtml = useStreamingMarkdown(reader.showThinking ? thinking : "");
   const [copied, setCopied] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const [exported, setExported] = useState("");
+  // Export: Markdown (the answer's own text) or PDF (typed from it); the
+  // save dialog and the write run on the backend, the busy flag only spins
+  // the button.
+  const [saving, setSaving] = useState<"markdown" | "pdf" | null>(null);
+  const doExport = async (format: "markdown" | "pdf") => {
+    if (!summary || saving) return;
+    setMenu(false);
+    setSaving(format);
+    try {
+      // The PDF gets the diagrams as images: each Mermaid fence renders
+      // fresh in the light palette; a refusal keeps the code block.
+      const images = format === "pdf" ? await exportDiagrams(summary).catch(() => []) : [];
+      setExported(await exportSummary(state.title, summary, images, format));
+      window.setTimeout(() => setExported(""), 2400);
+    } catch (e) {
+      setExported(String(e).replace(/.*"message":"([^"]+)".*/s, "$1"));
+    }
+    setSaving(null);
+  };
   const bodyRef = useRef<HTMLElement>(null);
   // The built-in voice: the read-aloud controls below listen to its state.
   const [voice, setVoice] = useState<TtsState>({ phase: "idle", message: "", progress: 0, voice: "" });
@@ -203,6 +225,12 @@ export default function Summary() {
     if (chasing) el.scrollTop = el.scrollHeight;
   }, [html, thinkingHtml, state.state]);
 
+  // Mermaid fences in the answer render on every pass; only fresh nodes are
+  // touched, so a streamed document draws once the fence changes to final.
+  useEffect(() => {
+    void renderDiagrams(bodyRef.current);
+  }, [html, thinkingHtml]);
+
   // Revealing a section above the answer must bring it into view, even if
   // the reader finished at the bottom of a long summary.
   useEffect(() => {
@@ -248,6 +276,23 @@ export default function Summary() {
           <p>A little less reading. A lot more understanding.</p>
         </div>
         <div className="summary-head-btns">
+          <button
+            className={`summary-copy ${exported ? "done" : ""}`}
+            title="Save the summary as a file (Markdown or PDF)"
+            disabled={!summary || !!saving}
+            onClick={() => setMenu((m) => !m)}
+            aria-haspopup="menu"
+            aria-expanded={menu}
+          >
+            <Icon name="download" />
+            {saving ? "Exporting…" : exported ? exported : "Export"}
+          </button>
+          {menu && (
+            <div className="summary-export-menu" role="menu" onMouseLeave={() => setMenu(false)}>
+              <button role="menuitem" onClick={() => void doExport("markdown")}>Markdown (.md)</button>
+              <button role="menuitem" onClick={() => void doExport("pdf")}>PDF</button>
+            </div>
+          )}
           <button
             className={`summary-copy ${copied ? "done" : ""}`}
             title="Copy the whole summary (Markdown)"
