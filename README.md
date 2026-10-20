@@ -10,7 +10,11 @@ Highlight text in any app, press the hotkey (or click the tray icon), pick an
 action (proofread, rewrite, translate, …); the result is pasted back in
 place. Also: a Playground with streaming answers, text extraction from
 clipboard images (OCR through a vision model), live captions of system audio,
-and voice dictation. Any OpenAI-compatible endpoint works (Ollama, LM
+and voice dictation. Summarize web pages and export them as PDF or Markdown
+with Mermaid diagrams. Record meetings, revisit speaker-labelled transcripts,
+and keep summaries and answers alongside the recording.
+
+Any OpenAI-compatible endpoint works (Ollama, LM
 Studio, OpenAI, OpenRouter, Groq, …; the default is a local Ollama with
 `gemma4:e4b`), or GhostPen runs a downloaded model itself: see
 [Built-in models](#built-in-models).
@@ -81,6 +85,12 @@ ghostpen-cli profiles
 
 ## Link summaries
 
+Select a webpage link and choose **Summarize link** in GhostPen, or paste the
+URL into the Summary window. Choose **Brief**, **Standard**, or **Detailed**
+to set the depth. The answer streams into a reader with adjustable text size,
+font, and spacing. **Read summary** reads the answer aloud; **Read page**
+reads the source page.
+
 The Summary window keeps exposed model thinking separate from the summary.
 The **Show thinking** switch requests thinking for the next summary and
 reveals any thinking already received, during generation or after it finishes.
@@ -96,13 +106,19 @@ chat template. Ordinary headings and literal tokens in the answer stay
 intact. Output is limited to 1 MiB per request; exceeding the limit stops the
 summary with a recoverable error.
 
-Use **Export → PDF** to save the summary with rendered Mermaid diagrams, or
-**Export → Markdown** to save its source. Large diagrams continue in labeled,
+Mermaid code fences render as diagrams in the reader. Use **Export → PDF**
+to save the summary with those diagrams, or **Export → Markdown** to keep
+the editable Markdown and diagram source. Choose a location in the save
+dialog to write the file. Large diagrams continue in labeled,
 overlapping panels at a readable size; headings stay with their first panel.
 Invalid diagrams remain readable as source. PDF diagrams use a light palette
 even when the reader uses dark mode.
 
 ## Meetings
+
+Keep the recording, speaker-labelled transcript, clean text, summary, and saved
+questions together. Play the audio while following individual words, jump to a
+line, or ask for decisions and action items with timestamps you can revisit.
 
 Turn on **🎙 Meeting** in the captions bar, then Start: the captions also
 record what your computer plays and your microphone ("Me"). Stop saves the

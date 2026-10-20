@@ -5,7 +5,7 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<meta name="description" content="GhostPen: AI text editing anywhere on your desktop. Select text in any app, pick an action, get the result pasted back. Runs AI models itself, or any OpenAI-compatible endpoint.">
 		<meta property="og:title" content="GhostPen: AI text editing anywhere on your desktop">
-		<meta property="og:description" content="Proofread, rewrite and translate the text you select in any app. Live captions and dictation. Runs models on your own machine.">
+		<meta property="og:description" content="Rewrite in any app, summarize links, export PDFs with Mermaid diagrams, and revisit recorded meetings. Run models on your own machine.">
 		<meta property="og:image" content="$site.asset('screenshots/menu.png').link()">
 		<meta name="theme-color" content="#111317">
 		<link rel="icon" type="image/png" href="$site.asset('brand/icon-64.png').link()">

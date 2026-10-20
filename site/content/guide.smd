@@ -1,6 +1,6 @@
 ---
 .title = "Guide",
-.description = "Install GhostPen, set up your AI, and use it in every app.",
+.description = "Set up GhostPen, summarize links, export PDFs, record meetings, and use AI in every app.",
 .date = .date("2026-09-26T00:00:00"),
 .authors = ["GhostPen"],
 .layout = "page.shtml",
@@ -33,7 +33,7 @@ or the [GitHub releases](https://github.com/highercomve/GhostPen/releases).
   and paste the result.
 
 GhostPen starts in the tray (menu bar on macOS). Its menu has Dictation,
-Captions, Playground and Settings.
+Captions, Meetings, Playground and Settings.
 
 # Set up your AI
 
@@ -93,6 +93,36 @@ the Playground next to the built-in ones.
 A window to try actions on text you paste, with the answer streaming in.
 Open it from the tray or the flask icon in the menu.
 
+```=html
+<a id="link-summaries"></a>
+```
+
+## Link summaries
+
+Select a webpage link, open GhostPen, and choose **Summarize link**, or paste
+the URL into the Summary window. Pick **Brief**, **Standard**, or **Detailed**
+to choose how much context to keep. The answer streams into a reader with
+adjustable text size, serif or sans-serif type, and comfortable or compact
+spacing.
+
+**Read summary** reads the answer aloud with the built-in voice, and
+**Read page** reads the source page. The **Show thinking** switch requests
+thinking on the next summary and reveals any the model returns. Some models
+do not expose it. Copy, Read summary, and exports use the answer itself.
+
+### Export a summary
+
+1. Open **Export** in the reader toolbar.
+2. Choose **PDF** for a formatted document, or **Markdown (.md)** for editable
+   text with the original Mermaid diagram source.
+3. Choose where to save the file in the save dialog.
+
+Mermaid diagrams render in the reader and are embedded as images in the PDF.
+Large drawings continue in labeled, overlapping panels so their labels stay
+readable. A heading stays with its first panel. PDF diagrams use a light
+palette, even if your reader is in dark mode. Invalid diagrams keep their
+readable source instead of stopping the export.
+
 ## Live captions
 
 `Ctrl+Shift+L` shows subtitles for what
@@ -102,7 +132,18 @@ a GPU) and download it once. Captions can be translated to English by
 whisper, or to any language by your AI profile. On macOS, captions need a
 loopback device such as BlackHole to hear the system audio.
 
+```=html
+<a id="meetings"></a>
+```
+
 ## Meetings
+
+Keep a conversation's audio, speaker-labelled transcript, clean text, summary,
+and saved questions together. Transcription and speaker detection run on your
+computer; proofreading, summaries, and questions use the active AI profile.
+Choose a Built-in profile to keep that work on your device too.
+
+### Record and revisit
 
 Turn on **🎙 Meeting** in the captions bar, then **Start**. The captions
 also record what your computer plays and your microphone (shown as
@@ -120,11 +161,15 @@ them by themselves. **Copy** gives the clean text, Markdown or subtitles;
 **Redo** proofreads or finds the speakers again; right-click a meeting to
 rename or delete it.
 
+### Summaries and questions
+
 The **Summary** tab writes an overview, key points, decisions and action
 items with your AI profile (a long meeting is read in parts first), and
 under it you can ask your own questions, such as *What did Alex say about
 me?* Answers cite the times they come from and are saved with the
 meeting; **🔊 Read** reads the summary or an answer aloud.
+
+### Recording setup
 
 Use a headset if you can: through speakers the microphone hears the call
 too. GhostPen drops those lines (same words, same moment), but a headset
@@ -210,6 +255,13 @@ echo "teh quick brown fox" | ghostpen-cli proofread
 ghostpen-cli translate --lang French --stream "Good morning"
 ghostpen-cli profiles
 ghostpen-cli models
+```
+
+To inspect the application log without opening a window:
+
+```
+ghostpen logs
+ghostpen logs --follow
 ```
 
 # Where things are

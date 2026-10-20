@@ -211,10 +211,34 @@ body.motion-paused *,body.motion-paused *:before,body.motion-paused *:after { an
 .flow .feature-card[data-kind='captions'] { --scene-accent:#bfa9fa; --scene-wash:#8f70d139; }
 .flow .feature-card[data-kind='read'] { --scene-accent:#8fd8e8; --scene-wash:#4fb3c933; }
 .flow .feature-card[data-kind='image'] { --scene-accent:#e8bc88; --scene-wash:#c58c4d39; }
+.flow .feature-card[data-kind='summary'] { --scene-accent:#b9d6bd; --scene-wash:#79ae8540; }
+.flow .feature-card[data-kind='meeting'] { --scene-accent:#e8c698; --scene-wash:#b9854740; }
+.feature-guide { display:inline-flex; gap:10px; align-items:center; color:var(--scene-accent); font-size:15px; font-weight:600; margin-top:17px; }
+.feature-guide:hover { text-decoration:underline; text-underline-offset:4px; }
+.scene-paper { margin:17px 17px 0; padding:15px 18px 10px; background:#fffcf5; color:#293c31; border:1px solid #c4d1bf; border-radius:5px; box-shadow:0 10px 25px #0002; }
+.scene-paper-meta { display:flex; justify-content:space-between; flex-wrap:wrap; gap:5px; font-size:9px; font-weight:700; letter-spacing:.5px; color:#526b59; border-bottom:1px solid #d4ddcf; padding-bottom:8px; }
+.scene-paper h4 { font:21px/1.2 Georgia,serif; margin:12px 0 6px; letter-spacing:-.3px; }
+.flow .feature-card .scene-paper p { font-size:12px; line-height:1.5; color:#526151; }
+.scene-paper svg { display:block; width:100%; height:65px; margin-top:5px; }
+.scene-paper-footer { border-top:1px solid #d4ddcf; padding-top:6px; font-size:10px; color:#526b59; }
+.scene-meeting { margin:15px 17px 0; }
+.meeting-scene-title { display:flex; justify-content:space-between; gap:10px; font-size:14px; margin-bottom:10px; color:#f0e2cd; }
+.meeting-scene-title>span { font-size:12px; color:#b0bbcb; font-variant-numeric:tabular-nums; }
+.meeting-scene-line { display:flex; gap:12px; border:1px solid transparent; border-radius:6px; padding:7px 9px; }
+.meeting-scene-line time { flex:none; font-size:11px; color:#a5b4ca; padding-top:2px; font-variant-numeric:tabular-nums; }
+.meeting-scene-line strong { color:#c4d1f1; font-size:11px; }
+.flow .feature-card .meeting-scene-line p { font-size:13px; line-height:1.45; margin-top:2px; color:#dce2ee; }
+.meeting-scene-line.active { background:#e8c69812; border-color:#e8c6983b; }
+.meeting-scene-line.active strong { color:#e8c698; }
+.meeting-scene-line mark { background:#e8c698; color:#302313; padding:1px 3px; border-radius:2px; }
+.meeting-scene-question { margin:12px 9px 0; border-top:1px solid #ffffff1a; padding-top:9px; }
+.meeting-scene-question span { color:#b4c0d2; font-size:9px; font-weight:700; letter-spacing:.7px; }
+.flow .feature-card .meeting-scene-question p { color:#f0e2cd; font-size:13px; line-height:1.45; margin-top:3px; }
 .flow .feature-card>div:last-child { padding:23px 23px 26px; }
 .flow .feature-card h3 { margin:0 0 8px; font-size:20.5px; line-height:1.35; }
 .flow .feature-card p { font-size:16.5px; line-height:1.65; }
 .flow .feature-card .card-visual { display:block; height:320px; padding:0; border:0; position:relative; isolation:isolate; color:#e3e9f5; background:radial-gradient(circle at 85% 6%,var(--scene-wash),transparent 55%),linear-gradient(155deg,#1c2738,#17202e 72%); }
+.flow .feature-card[data-kind='summary'] .card-visual,.flow .feature-card[data-kind='meeting'] .card-visual { height:350px; }
 .flow .card-visual:before { content:''; position:absolute; inset:0; z-index:-1; pointer-events:none; background:linear-gradient(#ffffff08 1px,transparent 1px),linear-gradient(90deg,#ffffff08 1px,transparent 1px); background-size:22px 22px; opacity:.4; mask-image:linear-gradient(to bottom,transparent,#000); }
 .scene-top { display:flex; align-items:center; justify-content:space-between; gap:10px; height:46px; padding:0 17px; border-bottom:1px solid #ffffff1a; color:#bac6d9; font-size:15.5px; }
 .scene-top span:first-child { display:flex; align-items:center; gap:7px; }
@@ -472,3 +496,6 @@ body.motion-paused *,body.motion-paused *:before,body.motion-paused *:after { an
 }
 
 .flow .hero-demo .motion-toggle { display:block; margin:8px 0 0 auto; padding:5px 8px; }
+@media (max-width:360px) {
+  .flow .feature-card[data-kind='summary'] .card-visual,.flow .feature-card[data-kind='meeting'] .card-visual { height:390px; }
+}
