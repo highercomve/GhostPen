@@ -1300,6 +1300,8 @@ fn probeInput() void {
 pub fn main(init: std.process.Init) !u8 {
     io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1 and std.mem.eql(u8, args[1], "logs"))
+        return @import("logs.zig").run(init, args[2..], app.build.id);
     // The built-in model runner (started by local_llm.zig): no GUI.
     if (args.len > 1 and std.mem.eql(u8, args[1], "--llm-helper"))
         return @import("llm_helper.zig").main(io, gpa, args[2..]);
@@ -1324,6 +1326,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             std.debug.print(
                 \\Usage: ghostpen [--trigger | --voice-input | --captions | --settings | --playground | --tray]
+                \\       ghostpen logs [-f | --follow]
                 \\
                 \\A running GhostPen receives these flags from later launches, so a
                 \\desktop keybinding can run e.g. `ghostpen --trigger`.

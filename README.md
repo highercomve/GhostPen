@@ -294,6 +294,17 @@ once more. Zig caches by content, so nothing is recompiled.
 recompiles one crate incrementally; Zig compiles the whole app as one unit
 through LLVM, and most of that time is debug info.
 
+## Application logs
+
+Run `ghostpen logs` to print the application log, or `ghostpen logs --follow`
+(`-f`) to keep watching new entries. Press Ctrl+C to stop following.
+These commands work while GhostPen is running and do not open a window.
+
+Logs are stored in `$XDG_DATA_HOME/dev.ghostpen.Oriel/app.log` (default
+`~/.local/share/dev.ghostpen.Oriel/app.log`) on Linux,
+`~/Library/Logs/dev.ghostpen.Oriel/app.log` on macOS, and
+`%LOCALAPPDATA%\dev.ghostpen.Oriel\app.log` on Windows.
+
 ## Transcription server for other tools
 
 `GHOSTPEN_STT_SERVER=1 ghostpen` also serves the whisper model as an
