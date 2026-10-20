@@ -2,7 +2,7 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
-## [Unreleased]
+## [0.3.7] - 2026-10-20
 
 ### Changed
 
