@@ -15,6 +15,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const metrics = @import("metrics.zig");
+const ai_stream = @import("ai_stream.zig");
+const chat_format = @import("chat_format.zig");
 
 const log = std.log.scoped(.local_llm);
 
@@ -170,6 +172,35 @@ pub fn chat(
     comptime on_chunk: fn (@TypeOf(ctx), []const u8) void,
     diag: *[]const u8,
 ) Error!Result {
+    return chatImpl(false, io, gpa, arena, cfg, req, ctx, on_chunk, diag);
+}
+
+/// Unfiltered helper output with producer-declared initial channel. The same
+/// normalizer as remote SSE emits explicit channels before reaching the UI.
+pub fn chatChannels(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cfg: Config,
+    req: Chat,
+    ctx: anytype,
+    comptime on_chunk: fn (@TypeOf(ctx), ai_stream.Delta) void,
+    diag: *[]const u8,
+) Error!Result {
+    return chatImpl(true, io, gpa, arena, cfg, req, ctx, on_chunk, diag);
+}
+
+fn chatImpl(
+    comptime channels: bool,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cfg: Config,
+    req: Chat,
+    ctx: anytype,
+    comptime on_chunk: fn (@TypeOf(ctx), if (channels) ai_stream.Delta else []const u8) void,
+    diag: *[]const u8,
+) Error!Result {
     const s = &chat_slot;
     s.mutex.lockUncancelable(io);
     defer s.mutex.unlock(io);
@@ -208,6 +239,7 @@ pub fn chat(
         .max_tokens = req.max_tokens,
         .temperature = req.temperature,
         .think = req.think,
+        .channels = channels,
         .image = image_b64,
         .schema = req.schema,
     }, .{});
@@ -243,9 +275,13 @@ pub fn chat(
     defer deadline.finish();
 
     var text: std.ArrayList(u8) = .empty;
+    var normalized = ai_stream.Stream.init(arena, null);
+    var have_channel = false;
     const Line = struct {
         id: u64 = 0,
         delta: ?[]const u8 = null,
+        format: ?chat_format.Format = null,
+        initial_thinking: bool = false,
         done: bool = false,
         @"error": ?[]const u8 = null,
         truncated: bool = false,
@@ -275,6 +311,17 @@ pub fn chat(
             metrics.requestFailed(io);
             return error.LocalFailed;
         }
+        if (channels) if (msg.format) |format| {
+            const rfmt = chat_format.reasoning(format);
+            if (have_channel or (msg.initial_thinking and rfmt == null)) {
+                stop(io, s);
+                diag.* = "Invalid model channel metadata.";
+                return error.LocalFailed;
+            }
+            normalized = ai_stream.Stream.init(arena, if (msg.initial_thinking) rfmt else null);
+            have_channel = true;
+            continue;
+        };
         if (!msg.done and msg.delta == null) {
             // The runner's progress line (the prompt's size, then the speed
             // while generating): only the in-flight stats change.
@@ -287,10 +334,29 @@ pub fn chat(
             continue;
         }
         if (msg.delta) |d| {
-            try text.appendSlice(arena, d);
-            on_chunk(ctx, d);
+            if (channels) {
+                if (!have_channel) {
+                    stop(io, s);
+                    diag.* = "The model runner did not declare its output channel.";
+                    return error.LocalFailed;
+                }
+                normalized.feed(d, ctx, on_chunk) catch |err| {
+                    stop(io, s);
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    diag.* = ai_stream.limit_message;
+                    return error.LocalFailed;
+                };
+            } else {
+                try text.appendSlice(arena, d);
+                on_chunk(ctx, d);
+            }
         }
         if (msg.done) {
+            if (channels) (if (msg.cancelled or msg.truncated) normalized.cancel(ctx, on_chunk) else normalized.finish(ctx, on_chunk)) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                diag.* = ai_stream.limit_message;
+                return error.LocalFailed;
+            };
             r.last_used = .now(io, .awake);
             // The generation speed, for the log: what to blame when a big
             // model crawls (GPU layers, expert offload, context size).
@@ -312,7 +378,7 @@ pub fn chat(
             deadline.finish(); // before a keep_alive of 0 kills the runner
             keepAlive(io, s, r, req.keep_alive_ms);
             return .{
-                .text = text.items,
+                .text = if (channels) normalized.answer.items else text.items,
                 .truncated = msg.truncated,
                 .cancelled = msg.cancelled,
                 .prompt_tokens = msg.prompt_tokens,

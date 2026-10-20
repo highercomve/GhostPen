@@ -177,8 +177,8 @@ pub const Events = struct {
     @"ghostpen://update-progress": updates.Progress,
     /// The summarize-link flow's state (to the Summary window); the
     /// accumulating markdown travels in summary-chunk.
-    @"ghostpen://summary-status": struct { state: []const u8, title: []const u8, chars: usize, message: []const u8 },
-    @"ghostpen://summary-chunk": []const u8,
+    @"ghostpen://summary-status": struct { state: []const u8, title: []const u8, chars: usize, message: []const u8, thinking_requested: bool, revision: u64 },
+    @"ghostpen://summary-chunk": struct { channel: ai.channels.Channel, text: []const u8, revision: u64 },
     /// A meeting's save pipeline (src/meetings.zig): its state and progress
     /// (0–1 within the state); `message` an error or a note.
     @"ghostpen://meeting": struct { id: []const u8, state: []const u8, progress: f64, message: []const u8 },
@@ -276,6 +276,10 @@ pub const SummaryState = struct {
     /// The failure's phrase (state "error").
     message: []const u8 = "",
     markdown: []const u8 = "",
+    thinking: []const u8 = "",
+    /// Captured when this run starts; a display toggle cannot change it mid-run.
+    thinking_requested: bool = false,
+    revision: u64 = 0,
     /// The page's readable text, for the read-aloud control (trimmed at a
     /// sane limit; "" when the summary came from beyond a page — empty only
     /// while no page was read).
@@ -285,6 +289,7 @@ pub const SummaryState = struct {
 var summary_mutex: std.Io.Mutex = .init;
 var link_summary: SummaryState = .{};
 var summary_markdown: std.ArrayList(u8) = .empty;
+var summary_thinking: std.ArrayList(u8) = .empty;
 var summary_page_text: []u8 = &.{};
 /// `link_summary.title` and `.message` live here (owned by `gpa`): the
 /// callers' strings belong to a request's arena, which is gone by the time
@@ -306,7 +311,7 @@ fn summaryStoreLocked(state: []const u8, title: []const u8, chars: usize, messag
     gpa.free(summary_message);
     summary_title = t;
     summary_message = m;
-    link_summary = .{ .state = state, .title = t, .chars = chars, .message = m, .markdown = summary_markdown.items };
+    link_summary = .{ .state = state, .title = t, .chars = chars, .message = m, .markdown = summary_markdown.items, .thinking = summary_thinking.items, .thinking_requested = link_summary.thinking_requested, .revision = link_summary.revision + 1 };
 }
 
 fn summarySet(state: []const u8, title: []const u8, chars: usize, message: []const u8) void {
@@ -319,6 +324,8 @@ fn summarySet(state: []const u8, title: []const u8, chars: usize, message: []con
         .title = link_summary.title,
         .chars = link_summary.chars,
         .message = link_summary.message,
+        .thinking_requested = link_summary.thinking_requested,
+        .revision = link_summary.revision,
     }) catch {};
 }
 
@@ -616,18 +623,17 @@ fn imageFail(err: anyerror) error{CommandFailed} {
 
 pub const Commands = struct {
     pub const async_commands = .{
-        "get_selection",           "extract_image_text",   "process_ai_action",     "process_ai_custom",
-        "process_text",            "process_text_stream",  "fetch_models",          "captions_start",
-        "captions_download_model", "dictation_start",      "captions_list_devices", "dictation_list_devices",
-        "llm_models_status",       "llm_download_model",   "llm_delete_model",      "llm_unload",
-        "menu_dismissed",          "update_check",         "update_install",        "whisper_models_status",
-        "whisper_download_model",  "whisper_delete_model", "summarize_link",        "summary_state",
-        "tts_speak",               "tts_state",            "tts_catalog",           "tts_download",
-        "tts_delete",              "tts_warm_up",          "paste_result",
-        "meetings_list",           "meetings_get",         "meetings_update",       "meetings_delete",
-        "meetings_reprocess",      "meetings_export",      "meetings_open_folder",  "meetings_release_audio",
-        "meetings_folder",         "meetings_voices",      "meetings_remember_voice", "meetings_forget_voice",
-        "meetings_ask",
+        "get_selection",           "extract_image_text",      "process_ai_action",      "process_ai_custom",
+        "process_text",            "process_text_stream",     "fetch_models",           "captions_start",
+        "captions_download_model", "dictation_start",         "captions_list_devices",  "dictation_list_devices",
+        "llm_models_status",       "llm_download_model",      "llm_delete_model",       "llm_unload",
+        "menu_dismissed",          "update_check",            "update_install",         "whisper_models_status",
+        "whisper_download_model",  "whisper_delete_model",    "summarize_link",         "summary_state",
+        "tts_speak",               "tts_state",               "tts_catalog",            "tts_download",
+        "tts_delete",              "tts_warm_up",             "paste_result",           "meetings_list",
+        "meetings_get",            "meetings_update",         "meetings_delete",        "meetings_reprocess",
+        "meetings_export",         "meetings_open_folder",    "meetings_release_audio", "meetings_folder",
+        "meetings_voices",         "meetings_remember_voice", "meetings_forget_voice",  "meetings_ask",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -858,6 +864,7 @@ pub const Commands = struct {
         out.title = arena.dupe(u8, link_summary.title) catch "";
         out.message = arena.dupe(u8, link_summary.message) catch "";
         out.markdown = arena.dupe(u8, summary_markdown.items) catch "";
+        out.thinking = arena.dupe(u8, summary_thinking.items) catch "";
         // The read-aloud's whole page (kept under the TTS request limit).
         const limit = 200_000;
         out.page_text = arena.dupe(u8, summary_page_text[0..@min(summary_page_text.len, limit)]) catch "";
@@ -868,7 +875,7 @@ pub const Commands = struct {
     /// profile and stream the answer to the summary window as Markdown.
     /// Failures of the page or the model report to the window, not the menu
     /// (the menu is already behind the window the user is looking at).
-    pub fn summarize_link(arena: std.mem.Allocator, args: struct { url: []const u8, level: ?[]const u8 = null }) !void {
+    pub fn summarize_link(arena: std.mem.Allocator, args: struct { url: []const u8, level: ?[]const u8 = null, thinking: bool = false }) !void {
         try acquireBusy();
         defer busy.store(false, .release);
         const url = std.mem.trim(u8, args.url, " \t\r\n");
@@ -878,10 +885,12 @@ pub const Commands = struct {
             summary_mutex.lockUncancelable(io);
             defer summary_mutex.unlock(io);
             summary_markdown.clearRetainingCapacity();
-            summaryStoreLocked("fetching", url, 0, "");
+            summary_thinking.clearRetainingCapacity();
+            link_summary.thinking_requested = args.thinking;
             if (summary_page_text.len > 0) gpa.free(summary_page_text);
             summary_page_text = &.{};
         }
+        summarySet("fetching", url, 0, "");
         showWindow("summary", true);
 
         var diag: web_page.Diag = .{};
@@ -905,26 +914,43 @@ pub const Commands = struct {
         log.info("summarize: {s}: {s} ({d} chars)", .{ url, pd.title, pd.text.len });
 
         const Emit = struct {
-            fn chunk(_: void, delta: []const u8) void {
+            failed: bool = false,
+            fn chunk(self: *@This(), delta: ai.channels.Delta) void {
+                if (self.failed) return;
                 summary_mutex.lockUncancelable(io);
-                summary_markdown.appendSlice(gpa, delta) catch |err| log.warn("summary: a chunk was not kept ({s})", .{@errorName(err)});
+                defer summary_mutex.unlock(io);
+                const target = if (delta.channel == .answer) &summary_markdown else &summary_thinking;
+                target.appendSlice(gpa, delta.text) catch {
+                    self.failed = true;
+                    return;
+                };
                 link_summary.markdown = summary_markdown.items;
-                summary_mutex.unlock(io);
-                events.emitTo("summary", .@"ghostpen://summary-chunk", delta) catch {};
+                link_summary.thinking = summary_thinking.items;
+                link_summary.revision += 1;
+                events.emitTo("summary", .@"ghostpen://summary-chunk", .{
+                    .channel = delta.channel,
+                    .text = delta.text,
+                    .revision = link_summary.revision,
+                }) catch {};
             }
         };
+        var emit: Emit = .{};
         summarySet("writing", pd.title, pd.text.len, "");
         var ai_diag: ai.Diag = .{};
-        _ = ai.completeStream(io, gpa, arena, .{
+        _ = ai.completeStreamChannels(io, gpa, arena, .{
             .profile = (try shared.get(io, arena)).activeProfile(),
             .system = try web_page.summaryPrompt(arena, web_page.parseLevel(args.level)),
             .user = .{ .text = try pd.prompt(arena) },
-        }, {}, Emit.chunk, &ai_diag) catch |err| {
+        }, args.thinking, &emit, Emit.chunk, &ai_diag) catch |err| {
             const msg: []const u8 = if (err == error.AiFailed) ai_diag.message else @errorName(err);
             summarySet("error", pd.title, pd.text.len, msg);
             log.warn("summarize: the AI request failed: {s}", .{msg});
             return;
         };
+        if (emit.failed) {
+            summarySet("error", pd.title, pd.text.len, "Out of memory keeping the summary.");
+            return;
+        }
         summarySet("ready", pd.title, pd.text.len, "");
     }
 
@@ -1390,4 +1416,3 @@ pub fn main(init: std.process.Init) !u8 {
 fn onLifecycle(event: oriel.lifecycle.Event) void {
     if (event == .terminating) @import("model_server.zig").removeDiscovery(io, environ_map);
 }
-

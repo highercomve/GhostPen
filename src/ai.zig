@@ -3,12 +3,14 @@
 //!
 //! Ported from GhostPen's ai.rs: the same prompts (verbatim), SSE streaming,
 //! vision input for OCR, `GET /models`, and bounded requests with readable
-//! errors. Thinking (the reasoning phase) is always off: every action is a
-//! direct rewrite, and a reasoning pass only costs time.
+//! errors. Editing actions keep thinking off; the Summary reader can request
+//! it explicitly and receive it separately from the answer.
 
 const std = @import("std");
 const settings = @import("settings.zig");
 const local_llm = @import("local_llm.zig");
+const chat_format = @import("chat_format.zig");
+pub const channels = @import("ai_stream.zig");
 
 pub const Profile = settings.Profile;
 
@@ -271,6 +273,7 @@ fn localCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator,
 }
 
 fn ignoreChunk(_: void, _: []const u8) void {}
+fn ignoreDelta(_: void, _: channels.Delta) void {}
 
 /// A non-streamed completion from the profile's endpoint or the built-in model.
 fn completion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, thinking: bool, diag: *Diag) Error![]const u8 {
@@ -285,14 +288,14 @@ pub fn complete(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, re
 }
 
 /// An empty answer is an error; one that reads like the model's reasoning
-/// is logged (and returned: the reasoning phase stays off).
+/// is logged and returned rather than classified by prose heuristics.
 fn checked(out: []const u8, req: Request, diag: *Diag) Error![]const u8 {
     if (out.len == 0) return fail(diag, "Model returned empty output");
     const input: ?[]const u8 = switch (req.user) {
         .text => |t| t,
         .image_with_text => null,
     };
-    if (looksLikeReasoning(out, input)) std.log.warn("the answer reads like the model's reasoning (thinking is off); try another model", .{});
+    if (looksLikeReasoning(out, input)) std.log.warn("the answer reads like the model's reasoning; try another model", .{});
     return out;
 }
 
@@ -307,36 +310,80 @@ pub fn completeStream(
     comptime on_chunk: fn (@TypeOf(ctx), []const u8) void,
     diag: *Diag,
 ) Error![]const u8 {
+    const Forward = struct {
+        ctx: @TypeOf(ctx),
+        fn chunk(self: *@This(), delta: channels.Delta) void {
+            if (delta.channel == .answer) on_chunk(self.ctx, delta.text);
+        }
+    };
+    var forward: Forward = .{ .ctx = ctx };
+    return completeStreamChannels(io, gpa, arena, req, false, &forward, Forward.chunk, diag);
+}
+
+/// Explicit exposed channels for readers. Other streaming callers receive
+/// only the answer through completeStream's adapter above, with thinking off.
+pub fn completeStreamChannels(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    req: Request,
+    thinking: bool,
+    ctx: anytype,
+    comptime on_chunk: fn (@TypeOf(ctx), channels.Delta) void,
+    diag: *Diag,
+) Error![]const u8 {
     if (req.profile.isLocal()) {
-        const out = try localCompletion(io, gpa, arena, req, false, ctx, on_chunk, diag);
-        return checked(out, req, diag);
+        const resolver = local_resolver orelse return fail(diag, "Built-in models aren't available in this build.");
+        const cfg = try resolver(arena, req.profile, diag);
+        const text, const image: ?[]const u8 = switch (req.user) {
+            .text => |t| .{ t, null },
+            .image_with_text => |iw| .{ iw.text, iw.png },
+        };
+        var message: []const u8 = "";
+        const res = local_llm.chatChannels(io, gpa, arena, cfg, .{
+            .system = req.system,
+            .user = text,
+            .image = image,
+            .temperature = req.profile.temperature,
+            .think = thinking,
+            .max_tokens = max_tokens,
+        }, ctx, on_chunk, &message) catch |err| switch (err) {
+            error.LocalFailed => return fail(diag, message),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (res.cancelled) return fail(diag, "Cancelled.");
+        return checked(std.mem.trim(u8, res.text, " \t\r\n"), req, diag);
     }
-    const body = try buildBody(arena, req, false, true);
+    const body = try buildBody(arena, req, thinking, true);
     var sink: SseSink(@TypeOf(ctx), on_chunk) = .{ .arena = arena, .ctx = ctx };
     sink.init();
     const status = exchange(io, gpa, arena, .POST, try endpoint(arena, req.profile.baseUrl, "/chat/completions"), req.profile.apiKey, body, &sink.writer, diag) catch |err| {
+        sink.cancel() catch {};
+        if (sink.normalized.failed) return fail(diag, channels.limit_message);
         if (sink.too_large) return fail(diag, too_large);
         if (sink.oom) return error.OutOfMemory;
         return err;
     };
     // Its errors are the flags below (a last line past the cap, or memory).
     sink.finish() catch {};
+    if (sink.normalized.failed) return fail(diag, channels.limit_message);
     if (sink.oom) return error.OutOfMemory;
     if (sink.too_large) return fail(diag, too_large);
     if (status.class() != .success) return apiError(arena, diag, status, sink.raw.items);
 
-    const out = try stripReasoning(arena, sink.full.items);
+    const out = std.mem.trim(u8, sink.normalized.answer.items, " \t\r\n");
     return checked(out, req, diag);
 }
 
 /// A writer that parses `data:` lines of an SSE body as they arrive.
-fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, []const u8) void) type {
+fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, channels.Delta) void) type {
     return struct {
         const Self = @This();
         arena: std.mem.Allocator,
         ctx: Ctx,
         line: std.ArrayList(u8) = .empty,
-        full: std.ArrayList(u8) = .empty,
+        normalized: channels.Stream = undefined,
+        structured: bool = false,
         /// The start of the body, for error messages.
         raw: std.ArrayList(u8) = .empty,
         done: bool = false,
@@ -354,6 +401,7 @@ fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, []const u8) void) typ
         writer: std.Io.Writer = undefined,
 
         fn init(self: *Self) void {
+            self.normalized = channels.Stream.init(self.arena, null);
             self.writer = .{ .buffer = &self.buf, .vtable = &.{ .drain = drain, .flush = flush } };
         }
 
@@ -407,11 +455,23 @@ fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, []const u8) void) typ
 
         /// Everything written so far, including a last line without '\n'.
         fn finish(self: *Self) !void {
+            errdefer |err| if (err == error.OutOfMemory) {
+                self.oom = true;
+            };
             try self.writer.flush();
             if (self.line.items.len > 0) {
                 try self.handleLine(std.mem.trim(u8, self.line.items, " \t\r"));
                 self.line.clearRetainingCapacity();
             }
+            try self.normalized.finish(self.ctx, on_chunk);
+        }
+
+        fn cancel(self: *Self) !void {
+            errdefer |err| if (err == error.OutOfMemory) {
+                self.oom = true;
+            };
+            try self.writer.flush();
+            try self.normalized.cancel(self.ctx, on_chunk);
         }
 
         fn handleLine(self: *Self, line: []const u8) !void {
@@ -422,13 +482,25 @@ fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, []const u8) void) typ
                 return;
             }
             if (data.len == 0) return;
-            const Chunk = struct { choices: []const struct { delta: struct { content: ?[]const u8 = null } = .{} } = &.{} };
+            const Chunk = struct { choices: []const struct { delta: struct {
+                content: ?[]const u8 = null,
+                reasoning_content: ?[]const u8 = null,
+                reasoning: ?[]const u8 = null,
+            } = .{} } = &.{} };
             const parsed = std.json.parseFromSliceLeaky(Chunk, self.arena, data, .{ .ignore_unknown_fields = true }) catch return;
             if (parsed.choices.len == 0) return;
-            const delta = parsed.choices[0].delta.content orelse return;
-            if (delta.len == 0) return;
-            try self.full.appendSlice(self.arena, delta);
-            on_chunk(self.ctx, delta);
+            const delta = parsed.choices[0].delta;
+            if (delta.reasoning_content orelse delta.reasoning) |thought| {
+                self.structured = true;
+                try self.normalized.field(.{ .channel = .thinking, .text = thought }, self.ctx, on_chunk);
+            }
+            if (delta.content) |content| {
+                if (self.structured) {
+                    try self.normalized.field(.{ .channel = .answer, .text = content }, self.ctx, on_chunk);
+                } else {
+                    try self.normalized.feed(content, self.ctx, on_chunk);
+                }
+            }
         }
     };
 }
@@ -510,17 +582,12 @@ pub fn listModels(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, 
 /// gemma's `<|channel>thought…<channel|>`). An unterminated opener drops
 /// everything after it (the whole answer was reasoning).
 pub fn stripReasoning(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
-    const blocks = [_][2][]const u8{
-        .{ "<think>", "</think>" },
-        .{ "<reasoning>", "</reasoning>" },
-        .{ "<|channel>thought", "<channel|>" },
-    };
     var s: std.ArrayList(u8) = .empty;
     try s.appendSlice(arena, raw);
-    for (blocks) |b| {
-        while (std.mem.indexOf(u8, s.items, b[0])) |start| {
-            if (std.mem.indexOfPos(u8, s.items, start, b[1])) |close| {
-                try s.replaceRange(arena, start, close + b[1].len - start, "");
+    for (chat_format.reasoning_blocks) |b| {
+        while (std.mem.indexOf(u8, s.items, b.open)) |start| {
+            if (std.mem.indexOfPos(u8, s.items, start, b.close)) |close| {
+                try s.replaceRange(arena, start, close + b.close.len - start, "");
             } else {
                 s.shrinkRetainingCapacity(start);
             }
@@ -612,17 +679,20 @@ test buildBody {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const body = try buildBody(a, .{
-        .profile = settings.default_profile,
-        .system = "sys",
-        .user = .{ .image_with_text = .{ .text = ocr_user_text, .png = "PNG" } },
-    }, false, true);
-    const v = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
-    try std.testing.expectEqualStrings("gemma4:e4b", v.object.get("model").?.string);
-    const content = v.object.get("messages").?.array.items[1].object.get("content").?.array.items;
-    try std.testing.expectEqualStrings("data:image/png;base64,UE5H", content[1].object.get("image_url").?.object.get("url").?.string);
-    try std.testing.expectEqual(false, v.object.get("think").?.bool);
-    try std.testing.expectEqual(true, v.object.get("stream").?.bool);
+    for ([_]bool{ false, true }) |thinking| {
+        const body = try buildBody(a, .{
+            .profile = settings.default_profile,
+            .system = "sys",
+            .user = .{ .image_with_text = .{ .text = ocr_user_text, .png = "PNG" } },
+        }, thinking, true);
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
+        try std.testing.expectEqualStrings("gemma4:e4b", v.object.get("model").?.string);
+        const content = v.object.get("messages").?.array.items[1].object.get("content").?.array.items;
+        try std.testing.expectEqualStrings("data:image/png;base64,UE5H", content[1].object.get("image_url").?.object.get("url").?.string);
+        try std.testing.expectEqual(thinking, v.object.get("think").?.bool);
+        try std.testing.expectEqual(thinking, v.object.get("chat_template_kwargs").?.object.get("enable_thinking").?.bool);
+        try std.testing.expectEqual(true, v.object.get("stream").?.bool);
+    }
 }
 
 test "SSE sink" {
@@ -630,7 +700,7 @@ test "SSE sink" {
     defer arena.deinit();
     const Collect = struct {
         n: usize = 0,
-        fn chunk(self: *@This(), _: []const u8) void {
+        fn chunk(self: *@This(), _: channels.Delta) void {
             self.n += 1;
         }
     };
@@ -640,7 +710,7 @@ test "SSE sink" {
     try sink.writer.writeAll("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"con");
     try sink.writer.writeAll("tent\":\"lo\"}}]}\n\ndata: [DONE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"X\"}}]}\n");
     try sink.finish();
-    try std.testing.expectEqualStrings("Hello", sink.full.items);
+    try std.testing.expectEqualStrings("Hello", sink.normalized.answer.items);
     try std.testing.expectEqual(@as(usize, 2), c.n);
 }
 
@@ -649,7 +719,7 @@ test "SSE sink: streamed from a reader, deltas as they arrive" {
     defer arena.deinit();
     const Collect = struct {
         n: usize = 0,
-        fn chunk(self: *@This(), _: []const u8) void {
+        fn chunk(self: *@This(), _: channels.Delta) void {
             self.n += 1;
         }
     };
@@ -662,13 +732,13 @@ test "SSE sink: streamed from a reader, deltas as they arrive" {
     // The delta is out before any flush (its line ended; only the blank line waits).
     try std.testing.expectEqual(@as(usize, 1), c.n);
     try sink.finish();
-    try std.testing.expectEqualStrings("A", sink.full.items);
+    try std.testing.expectEqualStrings("A", sink.normalized.answer.items);
 }
 
 test "SSE sink and response collector refuse oversized answers" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    var sink: SseSink(void, ignoreChunk) = .{ .arena = arena.allocator(), .ctx = {} };
+    var sink: SseSink(void, ignoreDelta) = .{ .arena = arena.allocator(), .ctx = {} };
     sink.init();
     const chunk = try arena.allocator().alloc(u8, 64 * 1024);
     @memset(chunk, 'x');
@@ -690,4 +760,54 @@ test "SSE sink and response collector refuse oversized answers" {
     var diag: Diag = .{};
     try std.testing.expectEqual(error.AiFailed, out.failure(error.AiFailed, &diag));
     try std.testing.expectEqualStrings(too_large, diag.message);
+}
+
+test "SSE exposes structured reasoning and content, with literal answer tokens intact" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const Collect = struct {
+        arena: std.mem.Allocator,
+        answer: std.ArrayList(u8) = .empty,
+        thinking: std.ArrayList(u8) = .empty,
+        fn chunk(self: *@This(), delta: channels.Delta) void {
+            const out = if (delta.channel == .answer) &self.answer else &self.thinking;
+            out.appendSlice(self.arena, delta.text) catch unreachable;
+        }
+    };
+    const fixture =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Analyze the request. \"}}]}\n\n" ++
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":\"Private reasoning\",\"content\":\"## Thinking Process:\\n\"}}]}\n\n" ++
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Literal <think> and <channel|> tokens.\"}}]}\n\n" ++
+        "data: [DONE]\n\n";
+    for (0..fixture.len + 1) |split| {
+        var c: Collect = .{ .arena = arena.allocator() };
+        var sink: SseSink(*Collect, Collect.chunk) = .{ .arena = arena.allocator(), .ctx = &c };
+        sink.init();
+        try sink.feed(fixture[0..split]);
+        try sink.feed(fixture[split..]);
+        try sink.finish();
+        try std.testing.expectEqualStrings("Analyze the request. Private reasoning", c.thinking.items);
+        try std.testing.expectEqualStrings("## Thinking Process:\nLiteral <think> and <channel|> tokens.", c.answer.items);
+        try std.testing.expectEqualStrings(c.answer.items, sink.normalized.answer.items);
+        try std.testing.expectEqualStrings(c.thinking.items, sink.normalized.thinking.items);
+    }
+}
+
+test "SSE inline blocks are hidden before completion and output overflow stops delivery" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var sink: SseSink(void, ignoreDelta) = .{ .arena = arena.allocator(), .ctx = {} };
+    sink.init();
+    for ([_][]const u8{ "<thi", "nk>Analyze the request.", " Private reasoning", "</thi" }) |part| {
+        const line = try std.fmt.allocPrint(arena.allocator(), "data: {{\"choices\":[{{\"delta\":{{\"content\":{f}}}}}]}}\n\n", .{std.json.fmt(part, .{})});
+        try sink.feed(line);
+        try std.testing.expectEqualStrings("", sink.normalized.answer.items);
+    }
+    // Cancellation must leave both snapshots and the displayed stream safe.
+    try sink.cancel();
+    try std.testing.expectEqualStrings("", sink.normalized.answer.items);
+    sink.normalized.limit = sink.normalized.received;
+    try std.testing.expectError(error.TooLarge, sink.feed("data: {\"choices\":[{\"delta\":{\"content\":\"more\"}}]}\n\n"));
+    try std.testing.expect(sink.normalized.failed);
+    try std.testing.expectEqualStrings("", sink.normalized.answer.items);
 }

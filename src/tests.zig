@@ -1,6 +1,7 @@
 test {
     _ = @import("gguf_context.zig");
     _ = @import("ai.zig");
+    _ = @import("ai_stream.zig");
     _ = @import("settings.zig");
     _ = @import("store.zig");
     _ = @import("image.zig");

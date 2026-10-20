@@ -41,10 +41,16 @@ pub const Reasoning = struct {
     opened_by_prompt: bool,
 };
 
+pub const reasoning_blocks = [_]Reasoning{
+    .{ .open = "<think>", .close = "</think>", .opened_by_prompt = true },
+    .{ .open = "<reasoning>", .close = "</reasoning>", .opened_by_prompt = false },
+    .{ .open = "<|channel>thought", .close = "<channel|>", .opened_by_prompt = true },
+};
+
 pub fn reasoning(format: Format) ?Reasoning {
     return switch (format) {
-        .gemma4 => .{ .open = "<|channel>thought", .close = "<channel|>", .opened_by_prompt = false },
-        .chatml_think => .{ .open = "<think>", .close = "</think>", .opened_by_prompt = true },
+        .gemma4 => reasoning_blocks[2],
+        .chatml_think => reasoning_blocks[0],
         else => null,
     };
 }
@@ -57,7 +63,11 @@ pub fn render(arena: std.mem.Allocator, format: Format, system: []const u8, user
     const usr = std.mem.trim(u8, user, " \t\r\n");
     return switch (format) {
         .gemma4 => try std.fmt.allocPrint(arena, "<|turn>system\n{s}{s}<turn|>\n<|turn>user\n{s}<turn|>\n<|turn>model\n{s}", .{
-            if (think) "<|think|>\n" else "", sys, usr, if (think) "" else "<|channel>thought\n<channel|>",
+            // E2B/E4B's thinking-off template ends at the model turn. The
+            // synthetic empty thought prefill is documented for larger
+            // models, so do not inject it into the shared Gemma template.
+            // With thinking on we own the opener, so its initial channel is known.
+            if (think) "<|think|>\n" else "", sys, usr, if (think) "<|channel>thought\n" else "",
         }),
         .gemma3 => try std.fmt.allocPrint(arena, "<start_of_turn>user\n{s}{s}{s}<end_of_turn>\n<start_of_turn>model\n", .{
             sys, if (sys.len > 0) "\n\n" else "", usr,
@@ -222,7 +232,7 @@ test render {
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expectEqualStrings(
-        "<|turn>system\nS<turn|>\n<|turn>user\nU<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>system\nS<turn|>\n<|turn>user\nU<turn|>\n<|turn>model\n",
         (try render(a, .gemma4, "S", " U\n", false)).?,
     );
     try std.testing.expectEqualStrings(
@@ -263,7 +273,8 @@ test ReasoningFilter {
     try std.testing.expect(g.visible("<|channel>thought\nhmm") == null);
     try std.testing.expectEqualStrings("Ok", g.visible("<|channel>thought\nhmm<channel|>Ok").?);
     var h: ReasoningFilter = .init(.gemma4, true);
-    try std.testing.expectEqualStrings("Plain", h.visible("Plain").?);
+    try std.testing.expect(h.visible("Implicit thoughts without a heading") == null);
+    try std.testing.expectEqualStrings("Plain", h.visible("Implicit thoughts without a heading<channel|>Plain").?);
     var off: ReasoningFilter = .init(.chatml_think, false);
     try std.testing.expectEqualStrings("x", off.visible("x").?);
 }

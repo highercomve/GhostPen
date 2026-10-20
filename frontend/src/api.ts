@@ -243,8 +243,9 @@ export const processAiAction = (action: string, targetLang: string | null, level
 export const processAiCustom = (instruction: string, show = false) =>
   invoke<ProcessResult>("process_ai_custom", { instruction, show });
 /** Reads the URL, summarizes it and opens the summary window (the answer streams there).
- *  `level` is the summary's depth (web_page.Level): "brief", "standard" or "detailed". */
-export const summarizeLink = (url: string, level?: string) => invoke<void>("summarize_link", { url, level });
+ *  `level` is the summary's depth (web_page.Level): "brief", "standard" or "detailed".
+ *  `thinking` requests exposed model thinking for this run. */
+export const summarizeLink = (url: string, level?: string, thinking = false) => invoke<void>("summarize_link", { url, level, thinking });
 /** The summarize-link flow's state: for the summary window's page to pick up what
  * it missed while loading (its listeners attach after the first events). */
 export interface SummaryState {
@@ -253,9 +254,18 @@ export interface SummaryState {
   chars: number;
   message: string;
   markdown: string;
+  thinking: string;
+  thinking_requested: boolean;
+  revision: number;
   /** The page's readable text: the read-aloud's whole-page source. */
   page_text?: string;
 }
+export interface SummaryDelta {
+  channel: "answer" | "thinking";
+  text: string;
+  revision: number;
+}
+export type SummaryStatus = Pick<SummaryState, "state" | "title" | "chars" | "message" | "revision" | "page_text" | "thinking_requested">;
 export const summaryState = () => invoke<SummaryState>("summary_state");
 /** The clipboard's text, when there is any (the summary window's prefill). */
 export const clipboardText = () => invoke<string>("clipboard_text");

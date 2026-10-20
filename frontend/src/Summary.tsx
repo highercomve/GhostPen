@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "./icons";
-import { cancelAi, clipboardText, copyText, listenVoice, summarizeLink, summaryState, ttsSpeak, ttsStop, ttsWarmUp, type TtsState } from "./api";
+import { cancelAi, clipboardText, copyText, listenVoice, summarizeLink, summaryState, ttsSpeak, ttsStop, ttsWarmUp, type TtsState, type SummaryState, type SummaryDelta, type SummaryStatus } from "./api";
 import { listen } from "./events";
 import { renderMarkdown } from "./markdown";
 import { openExternal } from "./oriel";
@@ -9,17 +9,7 @@ import { openExternal } from "./oriel";
 // (src/main.zig's summarize_link): the stage, the page it found and the
 // markdown so far — the page can miss events while it loads, so it also
 // picks the state up through `summary_state`.
-interface SummaryState {
-  state: string;
-  title: string;
-  chars: number;
-  message: string;
-  markdown: string;
-  /** The page's readable text (the read-aloud's whole-page source). */
-  page_text?: string;
-}
-
-const EMPTY: SummaryState = { state: "", title: "", chars: 0, message: "", markdown: "" };
+const EMPTY: SummaryState = { state: "", title: "", chars: 0, message: "", markdown: "", thinking: "", thinking_requested: false, revision: 0 };
 
 const STAGE: Record<string, string> = {
   fetching: "Fetching the page…",
@@ -53,9 +43,10 @@ interface ReaderSettings {
   size: number;
   font: "serif" | "sans";
   spacing: "comfortable" | "compact";
+  showThinking: boolean;
 }
 
-const READER_DEFAULTS: ReaderSettings = { size: 17, font: "serif", spacing: "comfortable" };
+const READER_DEFAULTS: ReaderSettings = { size: 17, font: "serif", spacing: "comfortable", showThinking: false };
 
 function loadReaderSettings(): ReaderSettings {
   try {
@@ -64,10 +55,38 @@ function loadReaderSettings(): ReaderSettings {
       size: typeof saved?.size === "number" && Number.isFinite(saved.size) ? Math.max(14, Math.min(24, saved.size)) : 17,
       font: saved?.font === "sans" ? "sans" : "serif",
       spacing: saved?.spacing === "compact" ? "compact" : "comfortable",
+      showThinking: saved?.showThinking === true,
     };
   } catch {
     return READER_DEFAULTS;
   }
+}
+
+// Render at a bounded cadence during continuous output. A trailing debounce
+// can postpone every update until the model stops sending chunks.
+function useStreamingMarkdown(source: string): string {
+  const latest = useRef(source);
+  const timer = useRef<number | null>(null);
+  const [html, setHtml] = useState("");
+  useEffect(() => {
+    latest.current = source;
+    if (!source) {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = null;
+      setHtml("");
+    } else if (timer.current === null) {
+      timer.current = window.setTimeout(() => {
+        timer.current = null;
+        setHtml(renderMarkdown(latest.current));
+      }, 90);
+    }
+  }, [source]);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  }, []);
+  // Hide/reset immediately, even before the effect clears the previous HTML.
+  return source ? html : "";
 }
 
 export default function Summary() {
@@ -83,9 +102,11 @@ export default function Summary() {
   // events may lag behind it).
   const [pending, setPending] = useState(false);
   const [state, setState] = useState<SummaryState>(EMPTY);
-  const stateRef = useRef(state);
   const [markdown, setMarkdown] = useState("");
-  const [html, setHtml] = useState("");
+  const [thinking, setThinking] = useState("");
+  const summary = markdown.trim();
+  const html = useStreamingMarkdown(summary);
+  const thinkingHtml = useStreamingMarkdown(reader.showThinking ? thinking : "");
   const [copied, setCopied] = useState(false);
   const bodyRef = useRef<HTMLElement>(null);
   // The built-in voice: the read-aloud controls below listen to its state.
@@ -101,35 +122,62 @@ export default function Summary() {
   // (listeners attach after the first status was broadcast).
   useEffect(() => {
     const ups: Promise<unknown>[] = [];
+    type Update = { kind: "status"; data: SummaryStatus } | { kind: "delta"; data: SummaryDelta };
+    const waiting: Update[] = [];
+    let ready = false;
+    let active = true;
+    let revision = 0;
+    const apply = (update: Update) => {
+      if (!active || update.data.revision <= revision) return;
+      revision = update.data.revision;
+      if (update.kind === "delta") {
+        const append = update.data.channel === "thinking" ? setThinking : setMarkdown;
+        append((text) => text + update.data.text);
+      } else {
+        const s = update.data;
+        if (s.page_text !== undefined) pageTextRef.current = s.page_text || "";
+        setState((previous) => ({ ...previous, ...s }));
+        if (s.state === "fetching") {
+          setMarkdown("");
+          setThinking("");
+        }
+      }
+    };
+    const receive = (update: Update) => {
+      if (!active) return;
+      if (ready) apply(update);
+      else waiting.push(update);
+    };
     ups.push(
-      listen<SummaryState>("ghostpen://summary-status", (e) => {
-        stateRef.current = e.payload;
-        if (e.payload.page_text !== undefined) pageTextRef.current = e.payload.page_text || "";
-        setState(e.payload);
-        // A fresh run resets the body (the picker-up never does: it only
-        // fills a page that started empty).
-        if (e.payload.state === "fetching") setMarkdown("");
-      }),
+      listen<SummaryStatus>("ghostpen://summary-status", (e) => receive({ kind: "status", data: e.payload })),
     );
     ups.push(
-      listen<string>("ghostpen://summary-chunk", (e) => {
-        setMarkdown((m) => m + e.payload);
-      }),
+      listen<SummaryDelta>("ghostpen://summary-chunk", (e) => receive({ kind: "delta", data: e.payload })),
     );
     ups.push(listenVoice(setVoice));
     // The reader opened: load the voice now so Read starts sooner.
     ttsWarmUp().catch(() => {});
-    summaryState()
+    Promise.all(ups).then(() => summaryState())
       .then((s) => {
+        if (!active) return;
         pageTextRef.current = s.page_text || "";
-        if (!stateRef.current.state && s.state) {
-          stateRef.current = s;
-          setState(s);
-          setMarkdown(s.markdown || "");
-        }
+        setState(s);
+        setMarkdown(s.markdown);
+        setThinking(s.thinking);
+        revision = s.revision;
+        ready = true;
+        // A snapshot includes events emitted before its lock was acquired.
+        // Replay only newer ones, avoiding dropped or duplicated text.
+        for (const update of waiting) apply(update);
+        waiting.length = 0;
       })
-      .catch(() => {});
+      .catch(() => {
+        ready = true;
+        for (const update of waiting) apply(update);
+        waiting.length = 0;
+      });
     return () => {
+      active = false;
       Promise.allSettled(ups).then((all) => {
         for (const r of all) if (r.status === "fulfilled") (r.value as () => void)();
       });
@@ -146,13 +194,6 @@ export default function Summary() {
       .catch(() => {});
   }, []);
 
-  // The markdown goes through the renderer a beat after it lands: the
-  // summary can be long, and chunk-by-chunk parsing is waste.
-  useEffect(() => {
-    const t = window.setTimeout(() => setHtml(renderMarkdown(markdown)), 90);
-    return () => window.clearTimeout(t);
-  }, [markdown]);
-
   // While it writes, follow the bottom — but never drag the user back after
   // they scrolled up to read.
   useEffect(() => {
@@ -160,7 +201,13 @@ export default function Summary() {
     if (!el || state.state !== "writing") return;
     const chasing = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
     if (chasing) el.scrollTop = el.scrollHeight;
-  }, [html, state.state]);
+  }, [html, thinkingHtml, state.state]);
+
+  // Revealing a section above the answer must bring it into view, even if
+  // the reader finished at the bottom of a long summary.
+  useEffect(() => {
+    if (reader.showThinking && bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [reader.showThinking]);
 
   // Esc: stop the model (its answer so far stays); the window's close
   // button hides it.
@@ -180,7 +227,7 @@ export default function Summary() {
     if (!URL_SHAPE.test(u) || running) return;
     setPending(true);
     try {
-      await summarizeLink(u, level);
+      await summarizeLink(u, level, reader.showThinking);
     } catch {
       // The failure is in the window's body already (summarize_link reports
       // there, not here).
@@ -204,10 +251,10 @@ export default function Summary() {
           <button
             className={`summary-copy ${copied ? "done" : ""}`}
             title="Copy the whole summary (Markdown)"
-            disabled={!markdown}
+            disabled={!summary}
             onClick={async () => {
               try {
-                await copyText(markdown);
+                await copyText(summary);
                 setCopied(true);
                 window.setTimeout(() => setCopied(false), 1600);
               } catch {
@@ -221,8 +268,8 @@ export default function Summary() {
           <button
             className="summary-copy summary-speak"
             title={voicePlaying ? "Stop the built-in voice" : "Read the summary through the built-in voice"}
-            disabled={!markdown && !voicePlaying}
-            onClick={() => speak(markdown)}
+            disabled={!summary && !voicePlaying}
+            onClick={() => speak(summary)}
           >
             {voicePlaying ? "■ Stop" : "🔊 Read summary"}
           </button>
@@ -305,6 +352,16 @@ export default function Summary() {
             <button className="summary-reader-reset" onClick={() => setReader(READER_DEFAULTS)}>Reset</button>
           </div>
         </details>
+        <label className="summary-thinking-switch" title="Show received thinking and request it for the next summary">
+          <input
+            type="checkbox"
+            role="switch"
+            checked={reader.showThinking}
+            onChange={(e) => setReader((r) => ({ ...r, showThinking: e.target.checked }))}
+          />
+          <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
+          <span>Show thinking</span>
+        </label>
         <div className="summary-font-size" role="group" aria-label="Font size">
           <button aria-label="Decrease font size" disabled={reader.size <= 14} onClick={() => setReader((r) => ({ ...r, size: Math.max(14, r.size - 1) }))}>A<span>−</span></button>
           <output aria-live="polite" aria-label="Current font size">{reader.size}px</output>
@@ -312,54 +369,69 @@ export default function Summary() {
         </div>
       </div>
       <main className="summary-body" ref={bodyRef}>
-        {state.state === "error" ? (
+        {state.state === "error" && (
           <div className="summary-error" role="alert">
             <span className="summary-eyebrow">Let's try again</span>
             <h2>We couldn't read this link.</h2>
             <p className="summary-error-title">{state.message || "Check the URL and try summarizing again."}</p>
             {state.title ? <p className="hint">{state.title}</p> : null}
           </div>
-        ) : (
-          <>
-            {running && (
-              <div className="summary-status" role="status" aria-live="polite">
-                <div className="spinner" />
-                <div className="summary-status-text">
-                  <span className="summary-stage">{STAGE[state.state] || "Working…"}</span>
-                  {state.title ? <span className="summary-title">{state.title}</span> : null}
-                  {state.chars > 0 && (state.state === "reading" || state.state === "writing") ? (
-                    <span className="summary-chars">{state.chars.toLocaleString()} characters read</span>
-                  ) : null}
-                </div>
-                <button className="summary-stop" onClick={() => cancelAi().catch(() => {})}>Stop</button>
-              </div>
+        )}
+        {running && state.state !== "error" && (
+          <div className="summary-status" role="status" aria-live="polite">
+            <div className="spinner" />
+            <div className="summary-status-text">
+              <span className="summary-stage">{STAGE[state.state] || "Working…"}</span>
+              {state.title ? <span className="summary-title">{state.title}</span> : null}
+              {state.chars > 0 && (state.state === "reading" || state.state === "writing") ? (
+                <span className="summary-chars">{state.chars.toLocaleString()} characters read</span>
+              ) : null}
+            </div>
+            <button className="summary-stop" onClick={() => cancelAi().catch(() => {})}>Stop</button>
+          </div>
+        )}
+        {reader.showThinking && (
+          <section className="summary-thinking" aria-label="Model thinking">
+            <h2>Thinking</h2>
+            {thinkingHtml ? (
+              <div className="md" onClick={openLink} dangerouslySetInnerHTML={{ __html: thinkingHtml }} />
+            ) : (
+              <p className="summary-thinking-empty" role="status">
+                {!state.state || (pending && state.state === "ready")
+                  ? "Thinking will be requested when you summarize."
+                  : !state.thinking_requested
+                    ? "Thinking wasn't requested for this summary. Summarize again with Show thinking on to request it."
+                    : state.state === "ready" || state.state === "error"
+                      ? "This response didn't include thinking, even though it was requested."
+                      : "Waiting for the model's thinking…"}
+              </p>
             )}
-            {html ? (
-              <div className="summary-paper">
-                <div className="summary-paper-meta">
-                  <span className="summary-eyebrow">The essentials</span>
-                  <span>{running ? "Writing…" : "Ready to read"}</span>
-                </div>
-                {state.title && <h2 className="summary-document-title">{state.title}</h2>}
-                <article className="md" onClick={openLink} dangerouslySetInnerHTML={{ __html: html }} />
-              </div>
-            ) : running ? null : (
-              <div className="summary-empty">
-                <div className="summary-illustration" aria-hidden="true">
-                  <div className="summary-mini-page"><span /><i /><i /><i /><b /><i /><i /></div>
-                  <span className="summary-illustration-badge"><Icon name="concise" /></span>
-                </div>
-                <span className="summary-eyebrow">From the page to the point</span>
-                <h2>Big ideas. Less noise.</h2>
-                <p>Drop in a link and we'll bring the key ideas,<br className="summary-empty-break" /> useful details, and takeaways into focus.</p>
-                <div className="summary-empty-note"><Icon name="link" /> Articles, essays, and webpages</div>
-              </div>
-            )}
-          </>
+          </section>
+        )}
+        {html ? (
+          <div className="summary-paper">
+            <div className="summary-paper-meta">
+              <span className="summary-eyebrow">The essentials</span>
+              <span>{running ? "Writing…" : "Ready to read"}</span>
+            </div>
+            {state.title && <h2 className="summary-document-title">{state.title}</h2>}
+            <article className="md" onClick={openLink} dangerouslySetInnerHTML={{ __html: html }} />
+          </div>
+        ) : running || state.state === "error" ? null : (
+          <div className="summary-empty">
+            <div className="summary-illustration" aria-hidden="true">
+              <div className="summary-mini-page"><span /><i /><i /><i /><b /><i /><i /></div>
+              <span className="summary-illustration-badge"><Icon name="concise" /></span>
+            </div>
+            <span className="summary-eyebrow">From the page to the point</span>
+            <h2>Big ideas. Less noise.</h2>
+            <p>Drop in a link and we'll bring the key ideas,<br className="summary-empty-break" /> useful details, and takeaways into focus.</p>
+            <div className="summary-empty-note"><Icon name="link" /> Articles, essays, and webpages</div>
+          </div>
         )}
       </main>
       <footer className="summary-footer">
-        <span><span className={`summary-status-dot ${running ? "busy" : ""}`} />{running ? "Making sense of your source" : markdown ? "Your reading, distilled" : "A fresh perspective starts here"}</span>
+        <span><span className={`summary-status-dot ${running ? "busy" : ""}`} />{running ? "Making sense of your source" : summary ? "Your reading, distilled" : "A fresh perspective starts here"}</span>
         <span>{running ? "Esc to stop" : "Made with GhostPen"}</span>
       </footer>
     </div>

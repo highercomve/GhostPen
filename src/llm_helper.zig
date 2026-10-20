@@ -95,6 +95,7 @@ const Request = struct {
     max_tokens: u32 = 2048,
     temperature: f32 = 0.2,
     think: bool = false,
+    channels: bool = false,
     seed: u32 = 42,
     /// Base64 image (PNG, JPEG, ...), for models with a vision projector.
     image: []const u8 = "",
@@ -1090,13 +1091,17 @@ const Engine = struct {
         // markers can be found); `sent` bytes of its visible part went out.
         var out: std.ArrayList(u8) = .empty;
         var filter: chat_format.ReasoningFilter = .init(self.format, req.think);
+        if (req.channels) {
+            const r = chat_format.reasoning(self.format);
+            send(.{ .id = req.id, .format = self.format, .initial_thinking = req.think and r != null and r.?.opened_by_prompt });
+        }
         var sent: usize = 0;
         var generated: usize = 0;
         var last_stat_ms: u64 = 0;
         var cancelled = false;
         // The grammar binds to the answer: from the start, or (thinking) once
         // the reasoning block is over.
-        var answering = filter.visible(out.items) != null;
+        var answering = if (req.channels and grammar == null) true else filter.visible(out.items) != null;
         while (generated < budget) {
             if (cancel.load(.acquire)) {
                 cancelled = true;
@@ -1114,8 +1119,11 @@ const Engine = struct {
                 const m = c.llama_token_to_piece(self.vocab, tok, big.ptr, @intCast(big.len), 0, true);
                 if (m > 0) try out.appendSlice(arena, big[0..@intCast(m)]);
             }
-            if (filter.visible(out.items)) |vis| {
-                answering = true;
+            if (req.channels and out.items.len > @import("ai_stream.zig").max_bytes)
+                return fail(req.id, "{s}", .{@import("ai_stream.zig").limit_message});
+            const filtered = if (req.channels and grammar == null) null else filter.visible(out.items);
+            if (filtered != null) answering = true;
+            if (if (req.channels) out.items else filtered) |vis| {
                 const upto = chat_format.completeUtf8(vis);
                 if (upto > sent) {
                     send(.{ .id = req.id, .delta = try chat_format.validUtf8(arena, vis[sent..upto]) });
@@ -1137,7 +1145,7 @@ const Engine = struct {
                 sendStat(req.id, n_prompt, prompt_ms, generated, gen_ms);
             }
         }
-        if (filter.visible(out.items)) |vis| if (vis.len > sent) send(.{ .id = req.id, .delta = try chat_format.validUtf8(arena, vis[sent..]) });
+        if (if (req.channels) out.items else filter.visible(out.items)) |vis| if (vis.len > sent) send(.{ .id = req.id, .delta = try chat_format.validUtf8(arena, vis[sent..]) });
         const gen_ms: u64 = @intCast(@max(gen_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
         return self.finish(req.id, n_prompt, generated, prompt_ms, gen_ms, !cancelled and generated >= budget, cancelled);
     }

@@ -51,40 +51,45 @@ pub fn summaryPrompt(arena: std.mem.Allocator, level: Level) ![]const u8 {
         \\Work only from the document you are given: never invent facts,
         \\numbers or names, and when the document doesn't say something, say
         \\so in one short sentence instead of filling the gap.
-        \\Answer ONLY the summary itself, in clean Markdown, in this shape:
+        \\Answer ONLY the summary itself, in clean Markdown.
+        \\Start with an opening paragraph (2-3 sentences): what this is and
+        \\what makes it worth reading. The opening is prose, not a list item.
     ;
     const etiquette =
+        \\Section headings must begin at the start of their own line with
+        \\`## `, never with a bullet or indentation (never `- ## Details`).
+        \\Start each bullet with `- ` followed by its text. Use bullets only
+        \\for list items, not for headings or whole sections.
+        \\Separate headings, lists, and paragraphs with blank lines.
+        \\Do not wrap the summary in a code fence.
         \\Use **bold** sparingly, only for the few names worth scanning for.
         \\No preamble ("Here is..."), no closing question to the reader.
     ;
     const shape: []const u8 = switch (level) {
         .brief =>
-        \\- An opening paragraph (2-3 sentences): what this is and what
-        \\  makes it worth reading — the whole thing in a nutshell.
-        \\- A `## Key points` heading with 3-5 bullets, one line each, only
-        \\  the concrete facts (names, numbers, prices, dates).
+        \\After the opening, write the heading `## Key points` on its own line.
+        \\Under it, write 3-5 bullets, one line each, only the concrete facts
+        \\(names, numbers, prices, dates).
         \\Nothing else: no Details section, no quotes, no closing.
         ,
         .standard =>
-        \\- An opening paragraph (2-3 sentences): what this is and what makes
-        \\  it worth reading.
-        \\- A `## Key points` heading with a compact bulleted list, one line
-        \\  per point, the concrete facts.
-        \\- A `## Details` heading with 2-5 short paragraphs (or short
-        \\  sub-lists) following the document's own order.
-        \\- At most two quoted sentences, as `> quote` lines, when a line is
-        \\  worth reading exactly as written.
+        \\After the opening, write the heading `## Key points` on its own line.
+        \\Under it, write a compact bulleted list, one line per point, with
+        \\the concrete facts.
+        \\Then write the heading `## Details` on its own line.
+        \\Under it, write 2-5 short paragraphs (or short sub-lists) following
+        \\the document's own order.
+        \\Include at most two quoted sentences, as `> quote` lines, when a
+        \\line is worth reading exactly as written.
         ,
         .detailed =>
-        \\- An opening paragraph (2-3 sentences): what this is and what makes
-        \\  it worth reading.
-        \\- A `## Key points` heading with a compact bulleted list (5-8
-        \\  points, one line each), the concrete facts.
-        \\- A `## Details` heading with 4-8 short paragraphs (or short
-        \\  sub-lists) following the document's own order, keeping its
-        \\  numbers, prices, dates and names.
-        \\- Up to three quoted sentences, as `> quote` lines, when a line is
-        \\  worth reading exactly as written.
+        \\After the opening, write the heading `## Key points` on its own line.
+        \\Under it, write 5-8 bullets, one line per point, with the concrete facts.
+        \\Then write the heading `## Details` on its own line.
+        \\Under it, write 4-8 short paragraphs (or short sub-lists) following
+        \\the document's own order, keeping its numbers, prices, dates and names.
+        \\Include up to three quoted sentences, as `> quote` lines, when a
+        \\line is worth reading exactly as written.
         ,
     };
     return std.fmt.allocPrint(arena, "{s}\n{s}\n{s}", .{ honesty, shape, etiquette });
