@@ -1,0 +1,72 @@
+name: Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'zine.ziggy'
+      - '.github/workflows/cloudflare.yml'
+      - 'scripts/site-for-cloudflare.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: cloudflare-pages
+  cancel-in-progress: false
+
+env:
+  PROJECT: ghostpen
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Zine
+        run: |
+          curl -sL -o /tmp/zine.tar.xz https://github.com/kristoff-it/zine/releases/download/v0.14.0/x86_64-linux-musl.tar.xz
+          tar xJf /tmp/zine.tar.xz -C /tmp/
+          chmod +x /tmp/zine
+          echo "/tmp" >> "$GITHUB_PATH"
+
+      # The download buttons read this snapshot instead of calling GitHub's
+      # API from every visitor's browser (60 requests/hour per IP). The
+      # Release workflow runs this workflow again after each release.
+      - name: Cache the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
+              --jq '{tag_name, assets:[.assets[]|{name,size,browser_download_url}]}' > /tmp/release.json; then
+            mv /tmp/release.json site/assets/release.json
+          else
+            echo "::warning::Could not read the latest release: keeping the committed site/assets/release.json."
+          fi
+          cat site/assets/release.json
+
+      - name: Serve from ghostpen.foreachdeveloper.com
+        run: scripts/site-for-cloudflare.sh ghostpen GhostPen
+
+      - name: Build site
+        run: zine release
+
+      - name: Skip without Cloudflare credentials
+        if: env.HAS_TOKEN != 'true'
+        run: echo "::notice::CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID is not set; skipping deploy."
+
+      # The Pages project is created on the first deploy if it doesn't exist.
+      - name: Deploy
+        if: env.HAS_TOKEN == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          command: pages deploy public --project-name=${{ env.PROJECT }} --branch=main --commit-dirty=true
