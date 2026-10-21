@@ -28,7 +28,7 @@ jobs:
       CUDA_ARCHS: 75,86,89,120a
     steps:
       - name: Tools
-        run: pacman -Syu --noconfirm --needed git github-cli jq libarchive binutils zstd
+        run: pacman -Syu --noconfirm --needed git github-cli jq libarchive binutils zstd diffutils
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
