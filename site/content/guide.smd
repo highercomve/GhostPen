@@ -6,7 +6,7 @@
 .layout = "page.shtml",
 ---
 
-# Install
+# [Install]($heading.id('install'))
 
 Download the file for your system from the [download section](https://ghostpen.foreachdeveloper.com/#download)
 or the [GitHub releases](https://github.com/highercomve/GhostPen/releases).
@@ -35,7 +35,7 @@ or the [GitHub releases](https://github.com/highercomve/GhostPen/releases).
 GhostPen starts in the tray (menu bar on macOS). Its menu has Dictation,
 Captions, Meetings, Playground and Settings.
 
-# Set up your AI
+# [Set up your AI]($heading.id('set-up-your-ai'))
 
 GhostPen needs a model to talk to. In **Settings → AI Profiles**, a
 profile runs on one of two things:
@@ -51,7 +51,7 @@ profile runs on one of two things:
 You can keep several profiles and switch between them; the menu shows
 which one is active.
 
-## Built-in models
+## [Built-in models]($heading.id('built-in-models'))
 
 | Model | Size | Good for |
 | --- | --- | --- |
@@ -71,9 +71,9 @@ the CPU. **Runner** settings: the context window (8k tokens by default),
 the GPU on or off, and how long the model stays loaded after its last use
 (10 minutes; it loads again in a few seconds).
 
-# Use it
+# [Use it]($heading.id('use-it'))
 
-## In any app
+## [In any app]($heading.id('in-any-app'))
 
 1. Select text.
 2. Press `Ctrl+Shift+A` (or click the tray icon).
@@ -88,16 +88,12 @@ or to stop an answer the built-in model is still writing.
 Your own actions (**Settings → Custom Actions**) appear in the menu and
 the Playground next to the built-in ones.
 
-## Playground
+## [Playground]($heading.id('playground'))
 
 A window to try actions on text you paste, with the answer streaming in.
 Open it from the tray or the flask icon in the menu.
 
-```=html
-<a id="link-summaries"></a>
-```
-
-## Link summaries
+## [Link summaries]($heading.id('link-summaries'))
 
 Select a webpage link, open GhostPen, and choose **Summarize link**, or paste
 the URL into the Summary window. Pick **Brief**, **Standard**, or **Detailed**
@@ -110,7 +106,7 @@ spacing.
 thinking on the next summary and reveals any the model returns. Some models
 do not expose it. Copy, Read summary, and exports use the answer itself.
 
-### Export a summary
+### [Export a summary]($heading.id('export-a-summary'))
 
 1. Open **Export** in the reader toolbar.
 2. Choose **PDF** for a formatted document, or **Markdown (.md)** for editable
@@ -123,7 +119,7 @@ readable. A heading stays with its first panel. PDF diagrams use a light
 palette, even if your reader is in dark mode. Invalid diagrams keep their
 readable source instead of stopping the export.
 
-## Live captions
+## [Live captions]($heading.id('live-captions'))
 
 `Ctrl+Shift+L` shows subtitles for what
 your computer plays, transcribed on your machine by whisper. Pick the
@@ -132,18 +128,14 @@ a GPU) and download it once. Captions can be translated to English by
 whisper, or to any language by your AI profile. On macOS, captions need a
 loopback device such as BlackHole to hear the system audio.
 
-```=html
-<a id="meetings"></a>
-```
-
-## Meetings
+## [Meetings]($heading.id('meetings'))
 
 Keep a conversation's audio, speaker-labelled transcript, clean text, summary,
 and saved questions together. Transcription and speaker detection run on your
 computer; proofreading, summaries, and questions use the active AI profile.
 Choose a Built-in profile to keep that work on your device too.
 
-### Record and revisit
+### [Record and revisit]($heading.id('record-and-revisit'))
 
 Turn on **🎙 Meeting** in the captions bar, then **Start**. The captions
 also record what your computer plays and your microphone (shown as
@@ -161,7 +153,7 @@ them by themselves. **Copy** gives the clean text, Markdown or subtitles;
 **Redo** proofreads or finds the speakers again; right-click a meeting to
 rename or delete it.
 
-### Summaries and questions
+### [Summaries and questions]($heading.id('summaries-and-questions'))
 
 The **Summary** tab writes an overview, key points, decisions and action
 items with your AI profile (a long meeting is read in parts first), and
@@ -169,7 +161,7 @@ under it you can ask your own questions, such as *What did Alex say about
 me?* Answers cite the times they come from and are saved with the
 meeting; **🔊 Read** reads the summary or an answer aloud.
 
-### Recording setup
+### [Recording setup]($heading.id('recording-setup'))
 
 Use a headset if you can: through speakers the microphone hears the call
 too. GhostPen drops those lines (same words, same moment), but a headset
@@ -177,13 +169,13 @@ keeps your track clean. The speaker model (WeSpeaker, 26 MB) downloads the
 first time a meeting is saved; **Settings → Speech → Meetings** has the
 options.
 
-## Dictation
+## [Dictation]($heading.id('dictation'))
 
 `Ctrl+Shift+D`, speak, then
 `Enter`. The transcript is proofread by your AI profile (turn
 **Polish** off for the raw text) and copied to the clipboard.
 
-## Read aloud
+## [Read aloud]($heading.id('read-aloud'))
 
 GhostPen reads text aloud with a natural voice ([Kokoro](https://huggingface.co/hexgrad/Kokoro-82M))
 that runs on your computer: nothing is sent anywhere.
@@ -217,7 +209,7 @@ ghostpen --say "Good morning" --lang es --voice ef_dora
 The binaries that read aloud include espeak-ng (GPL-3.0-or-later) for
 pronunciation; GhostPen's own code stays MIT.
 
-## Text from images
+## [Text from images]($heading.id('text-from-images'))
 
 Copy an image (a screenshot) and trigger GhostPen: **Extract text** reads
 it with a vision model through your profile, and the text becomes the
@@ -227,7 +219,7 @@ model has an image projector, downloaded with it (or **Add image support**
 in Settings → Built-in models for one you already have), and GhostPen runs
 it on your GPU.
 
-# Hotkeys
+# [Hotkeys]($heading.id('hotkeys'))
 
 The three hotkeys are set in **Settings → Behaviour**. On Wayland they go
 through the desktop's GlobalShortcuts portal, which asks you to confirm
@@ -246,7 +238,7 @@ Hyprland, for example:
 bind = CTRL SHIFT, A, exec, ghostpen --trigger
 ```
 
-# Command line
+# [Command line]($heading.id('command-line'))
 
 `ghostpen-cli` runs an action from a terminal with the same settings:
 
@@ -264,7 +256,7 @@ ghostpen logs
 ghostpen logs --follow
 ```
 
-# Where things are
+# [Where things are]($heading.id('where-things-are'))
 
 | | Linux | Windows | macOS |
 | --- | --- | --- | --- |
@@ -277,7 +269,7 @@ ghostpen logs --follow
 Settings from the earlier Rust/Tauri GhostPen are imported on the first
 start, and its downloaded whisper models are reused.
 
-# Build from source
+# [Build from source]($heading.id('build-from-source'))
 
 GhostPen is built with [Oriel](https://oriel.foreachdeveloper.com/):
 
