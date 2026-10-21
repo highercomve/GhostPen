@@ -1,10 +1,10 @@
 .zine_version = "0.14.0",
 .site = .simple(.{
     .title = "GhostPen",
-    .host_url = "https://highercomve.github.io",
+    .host_url = "https://ghostpen.foreachdeveloper.com",
     .content_dir_path = "site/content",
     .layouts_dir_path = "site/layouts",
     .assets_dir_path = "site/assets",
-    .url_path_prefix = "GhostPen",
+    .url_path_prefix = "",
     .static_assets = [],
 }),

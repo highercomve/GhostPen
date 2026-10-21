@@ -8,7 +8,7 @@
 
 # Install
 
-Download the file for your system from the [download section](https://highercomve.github.io/GhostPen/#download)
+Download the file for your system from the [download section](https://ghostpen.foreachdeveloper.com/#download)
 or the [GitHub releases](https://github.com/highercomve/GhostPen/releases).
 
 - **Linux**: the `.deb` (Debian, Ubuntu) and `.rpm` (Fedora, openSUSE)
@@ -279,7 +279,7 @@ start, and its downloaded whisper models are reused.
 
 # Build from source
 
-GhostPen is built with [Oriel](https://highercomve.github.io/Oriel/):
+GhostPen is built with [Oriel](https://oriel.foreachdeveloper.com/):
 
 ```
 git clone https://github.com/highercomve/GhostPen

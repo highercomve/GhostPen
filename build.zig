@@ -111,7 +111,7 @@ pub fn build(b: *std.Build) void {
             .summary = "AI text editing anywhere on your desktop",
             .description = "Select text in any app, press a hotkey and pick an action (proofread, rewrite, translate, ...): the result is pasted back in place. Also a Playground, live captions and voice dictation. Works with any OpenAI-compatible endpoint, or runs AI models itself (llama.cpp, whisper.cpp) on the GPU.",
             .license = "MIT",
-            .homepage = "https://highercomve.github.io/GhostPen/",
+            .homepage = "https://ghostpen.foreachdeveloper.com/",
             .version = version,
             // Windows: `oriel package -Dwinget-url=<release download URL>` writes
             // the WinGet manifests (zig-out/package/winget) the release submits.

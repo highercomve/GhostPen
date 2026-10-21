@@ -1,6 +1,6 @@
 # GhostPen on Oriel
 
-**[Website and downloads](https://highercomve.github.io/GhostPen/)** · [Releases](https://github.com/highercomve/GhostPen/releases) · [Changelog](CHANGELOG.md) · The earlier Rust/Tauri version: [ghostpen-tauri](https://github.com/highercomve/ghostpen-tauri)
+**[Website and downloads](https://ghostpen.foreachdeveloper.com/)** · [Releases](https://github.com/highercomve/GhostPen/releases) · [Changelog](CHANGELOG.md) · The earlier Rust/Tauri version: [ghostpen-tauri](https://github.com/highercomve/ghostpen-tauri)
 
 GhostPen, AI-driven text editing anywhere on your desktop, ported from Tauri
 (Rust) to [Oriel](https://github.com/highercomve/Oriel) (Zig): the first full
@@ -19,7 +19,7 @@ Studio, OpenAI, OpenRouter, Groq, …; the default is a local Ollama with
 `gemma4:e4b`), or GhostPen runs a downloaded model itself: see
 [Built-in models](#built-in-models).
 
-**Downloads** ([website](https://highercomve.github.io/GhostPen/#download),
+**Downloads** ([website](https://ghostpen.foreachdeveloper.com/#download),
 [releases](https://github.com/highercomve/GhostPen/releases)). The
 AppImage, the Windows installer and the macOS app update themselves
 (Settings → About & updates); deb and rpm installs say when a new version is out.

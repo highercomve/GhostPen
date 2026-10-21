@@ -383,7 +383,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           body_path: release-notes.md
 
-  # Rebuild the sites so their cached release.json lists the new downloads. A
+  # Rebuild the site so its cached release.json lists the new downloads. A
   # release published with GITHUB_TOKEN doesn't trigger other workflows, but
   # a workflow_dispatch does.
   site:
@@ -393,9 +393,8 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Rebuild the sites
+      - name: Rebuild the site
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
           gh workflow run cloudflare.yml --repo "$GITHUB_REPOSITORY" --ref main

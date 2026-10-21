@@ -7,7 +7,6 @@ on:
       - 'site/**'
       - 'zine.ziggy'
       - '.github/workflows/cloudflare.yml'
-      - 'scripts/site-for-cloudflare.sh'
   workflow_dispatch:
 
 permissions:
@@ -50,9 +49,6 @@ jobs:
             echo "::warning::Could not read the latest release: keeping the committed site/assets/release.json."
           fi
           cat site/assets/release.json
-
-      - name: Serve from ghostpen.foreachdeveloper.com
-        run: scripts/site-for-cloudflare.sh ghostpen GhostPen
 
       - name: Build site
         run: zine release
