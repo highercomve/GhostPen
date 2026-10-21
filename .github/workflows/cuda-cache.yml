@@ -1,0 +1,88 @@
+# A cache saved on main is reusable by subsequent release tags. Reuse a
+# completed release build instead of compiling the same CUDA kernels again.
+name: Warm CUDA cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Release run containing the completed dist-linux-cuda artifact
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cuda-cache-main
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 20
+    env:
+      CUDA_ARCHS: 75,86,89,120a
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm --needed git github-cli jq libarchive binutils zstd
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: CUDA library cache key
+        shell: bash
+        run: bash .github/scripts/cuda-cache-key.sh
+      - name: CUDA library cache
+        id: cuda-cache
+        uses: actions/cache@v4
+        with:
+          path: cuda-cache/libggml-cuda.so
+          key: ${{ env.CUDA_CACHE_KEY }}
+      - name: Verify seed build compatibility
+        if: steps.cuda-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$RUNNER_TEMP/source-run.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '.repository.full_name == $repo and .event == "push" and .path == ".github/workflows/release.yml"' "$RUNNER_TEMP/source-run.json"
+          source_sha=$(jq -r '.head_sha' "$RUNNER_TEMP/source-run.json")
+          source_tag=$(jq -r '.head_branch' "$RUNNER_TEMP/source-run.json")
+          gh api "repos/$GITHUB_REPOSITORY/contents/build.zig.zon?ref=$source_sha" --jq .content | base64 -d > "$RUNNER_TEMP/source-build.zig.zon"
+          cmp build.zig.zon "$RUNNER_TEMP/source-build.zig.zon"
+          # The source run must have saved this exact toolkit/architecture
+          # key. Never relabel a library built against another CUDA version.
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$CUDA_CACHE_KEY" --paginate --jq '.actions_caches[] | select(.key == env.CUDA_CACHE_KEY) | .ref' > "$RUNNER_TEMP/source-cache-refs"
+          grep -Fx "refs/tags/$source_tag" "$RUNNER_TEMP/source-cache-refs" || grep -Fx "refs/heads/refs/tags/$source_tag" "$RUNNER_TEMP/source-cache-refs"
+      - name: Download completed CUDA packages
+        if: steps.cuda-cache.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-linux-cuda
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: seed
+      - name: Extract and validate the CUDA library
+        if: steps.cuda-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find seed -maxdepth 1 -type f -name '*-cuda.deb')
+          test "${#packages[@]}" = 1
+          data_member=$(ar t "${packages[0]}" | awk '/^data\.tar\./ {print}')
+          test -n "$data_member"
+          mkdir -p "$RUNNER_TEMP/cuda-seed"
+          ar p "${packages[0]}" "$data_member" | bsdtar -xf - -C "$RUNNER_TEMP/cuda-seed"
+          mapfile -t libraries < <(find -L "$RUNNER_TEMP/cuda-seed" -type f -name libggml-cuda.so)
+          test "${#libraries[@]}" = 1
+          install -Dm644 "${libraries[0]}" cuda-cache/libggml-cuda.so
+          readelf -h cuda-cache/libggml-cuda.so | grep -E 'Machine:.*X86-64'
+          readelf -d cuda-cache/libggml-cuda.so | grep NEEDED
+          sha256sum cuda-cache/libggml-cuda.so

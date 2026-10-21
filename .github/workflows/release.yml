@@ -116,26 +116,14 @@ jobs:
       # changes with Oriel's ggml, the GPU list or the CUDA version: it is
       # cached under those, and the toolkit is only installed to rebuild it.
       - name: CUDA library cache key
-        run: |
-          # What the library is built from: Oriel's pinned llama.cpp (ggml)
-          # and the CUDA parts of its ggml build script (nvcc flags, sources),
-          # not the Oriel version or its other backends.
-          zig build --fetch >/dev/null
-          ORIEL_DIR=$(ls -d zig-pkg/oriel-$(sed -n 's/.*\.hash = "oriel-\([^"]*\)".*/\1/p' build.zig.zon))
-          CUDA_PARTS='/^pub const CudaOptions/,/^};/{print} /^fn cudaArchArgs/,/^}/{print} /^fn isComputeCapability/,/^}/{print} /^fn addCudaBackend/,/^}/{print} /^const cuda_sources/,/^};/{print}'
-          # Comments and error reporting don't change the library: left out,
-          # so a reworded message doesn't rebuild it.
-          GGML_KEY=$( { grep -A2 '\.llama = ' "$ORIEL_DIR/build.zig.zon"; awk "$CUDA_PARTS" "$ORIEL_DIR/build/ggml.zig" | grep -v -E '^\s*//|buildFail|panic\(' ; } | sha256sum | cut -c1-16)
-          echo "GGML_KEY=$GGML_KEY" >> "$GITHUB_ENV"
-          # Cache keys can't contain commas.
-          echo "CUDA_ARCHS_KEY=${CUDA_ARCHS//,/_}" >> "$GITHUB_ENV"
-          echo "CUDA_VERSION=$(pacman -Si cuda | sed -n 's/^Version *: *//p')" >> "$GITHUB_ENV"
+        shell: bash
+        run: bash .github/scripts/cuda-cache-key.sh
       - name: CUDA library cache
         id: cuda-cache
         uses: actions/cache@v4
         with:
           path: cuda-cache/libggml-cuda.so
-          key: ggml-cuda-${{ env.GGML_KEY }}-${{ env.CUDA_ARCHS_KEY }}-cuda-${{ env.CUDA_VERSION }}
+          key: ${{ env.CUDA_CACHE_KEY }}
       - name: Build libggml-cuda.so (cache miss)
         if: steps.cuda-cache.outputs.cache-hit != 'true'
         run: |
