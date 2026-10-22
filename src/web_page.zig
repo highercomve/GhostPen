@@ -1,6 +1,7 @@
-//! A web page for the summarizer: fetch a URL and pull the readable text
-//! out of the HTML (no rendering, no dependencies: the articles the menu's
-//! "Summarize link" reads are plain HTML).
+//! A web page (or a local file) for the summarizer: fetch a URL or read a
+//! file and pull the readable text out of the HTML (no rendering, no
+//! dependencies: the articles the menu's "Summarize link" reads are plain
+//! HTML).
 //!
 //! The extraction is deliberately dumber than a reader mode: scripts,
 //! styles, chrome (nav/header/footer/aside) and attributes are dropped,
@@ -47,7 +48,7 @@ pub fn parseLevel(level: ?[]const u8) Level {
 /// uses are the ones the renderer handles: headings, lists, quotes, bold.
 pub fn summaryPrompt(arena: std.mem.Allocator, level: Level) ![]const u8 {
     const honesty =
-        \\You summarize web documents for a reader who clicked a link.
+        \\You summarize documents for a reader who opened a link or a file.
         \\Work only from the document you are given: never invent facts,
         \\numbers or names, and when the document doesn't say something, say
         \\so in one short sentence instead of filling the gap.
@@ -126,6 +127,74 @@ pub fn read(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, url: [
 fn diagFail(arena: std.mem.Allocator, diag: *Diag, comptime fmt: []const u8, args: anytype) Error {
     diag.message = std.fmt.allocPrint(arena, fmt, args) catch return error.OutOfMemory;
     return error.AiFailed;
+}
+
+/// A local file as a document (the summarize box takes paths too):
+/// `file://…`, `~/…`, absolute and relative paths all read. Plain text,
+/// Markdown and code go through as they are; an HTML file still extracts;
+/// binary files are refused. The title comes from the file's name, or the
+/// `# heading` at the top of a document.
+pub fn readPath(io: std.Io, arena: std.mem.Allocator, home: ?[]const u8, raw: []const u8, diag: *Diag) Error!Page {
+    var path = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.startsWith(u8, path, "file://")) path = path["file://".len..];
+    if (std.mem.startsWith(u8, path, "~/") or std.mem.eql(u8, path, "~")) {
+        const dir = home orelse
+            return diagFail(arena, diag, "That starts with ~, but there is no home directory to expand it with.", .{});
+        path = std.fmt.allocPrint(arena, "{s}{s}", .{ dir, path[1..] }) catch return error.OutOfMemory;
+    }
+    if (path.len == 0) return diagFail(arena, diag, "No file path to summarize.", .{});
+
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return diagFail(arena, diag, "That file doesn't exist on this machine: check the path.", .{}),
+        error.AccessDenied => return diagFail(arena, diag, "That file can't be read (permission denied).", .{}),
+        error.IsDir => return diagFail(arena, diag, "That path is a folder, not a file.", .{}),
+        else => return diagFail(arena, diag, "That file can't be read ({s}).", .{@errorName(err)}),
+    };
+    defer file.close(io);
+
+    var read_buf: std.Io.Writer.Allocating = .init(arena);
+    var rbuf: [256 * 1024]u8 = undefined;
+    var r = file.reader(io, &rbuf);
+    if (r.interface.stream(&read_buf.writer, .limited(max_html_bytes))) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        error.WriteFailed => return error.OutOfMemory,
+        error.ReadFailed => return diagFail(arena, diag, "That file can't be read (I/O error).", .{}),
+    }
+    const body = read_buf.written();
+    if (body.len == 0) return diagFail(arena, diag, "That file is empty.", .{});
+
+    // An HTML file (a saved page) shapes down like one from the network.
+    const name = std.fs.path.basename(path);
+    if (std.ascii.endsWithIgnoreCase(name, ".html") or std.ascii.endsWithIgnoreCase(name, ".htm") or
+        std.ascii.endsWithIgnoreCase(name, ".xhtml"))
+    {
+        return extract(arena, body) catch return diagFail(arena, diag, "Could not read the page's text.", .{});
+    }
+    if (std.mem.indexOfScalar(u8, body[0..@min(body.len, 8192)], 0) != null) {
+        return diagFail(arena, diag, "That file looks binary: summaries read text documents (Markdown, code, logs).", .{});
+    }
+
+    // The file's name without its extension, or a top `# heading`.
+    const stem = if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot|
+        (if (dot > 0) name[0..dot] else name)
+    else
+        name;
+    var title: []const u8 = stem;
+    if (std.mem.startsWith(u8, body, "# ")) {
+        if (std.mem.indexOfScalar(u8, body, '\n')) |eol| {
+            const heading = std.mem.trim(u8, body[2..eol], " \t");
+            if (heading.len > 0) title = heading;
+        }
+    }
+
+    // Capped like a page, cut at a line's end.
+    var text = std.mem.trim(u8, body, "\n \t\r");
+    if (text.len > max_text_bytes) {
+        const head = text[0..max_text_bytes];
+        text = if (std.mem.lastIndexOfScalar(u8, head, '\n')) |cut| head[0..cut] else head;
+        text = std.mem.trim(u8, text, "\n ");
+    }
+    return .{ .title = title, .text = text };
 }
 
 const Timeout = struct {
@@ -622,4 +691,59 @@ test "entities decode, unknown ones stay" {
     w.end = 0;
     _ = try decode("&weirdname; &notreally &#xzz &#38;", &w);
     try std.testing.expectEqualStrings("&weirdname; &notreally &#xzz &", buf[0..w.end]);
+}
+
+test "readPath: a markdown file reads with its heading as the title" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "plan.md", .data =
+    \\# Secret rotation plan
+    \\
+    \\1. Rotate the client key.
+    \\2. Add a budget rule.
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const p = try std.fs.path.join(std.testing.allocator, &.{ path_buf[0..n], "plan.md" });
+    defer std.testing.allocator.free(p);
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    var diag: Diag = .{};
+    const page = try readPath(io, arena_state.allocator(), "/home/testing", p, &diag);
+    try std.testing.expectEqualStrings("Secret rotation plan", page.title);
+    try std.testing.expect(std.mem.indexOf(u8, page.text, "Rotate the client key.") != null);
+    try std.testing.expectEqualStrings("", diag.message);
+}
+
+test "readPath: ~/ expands through the home, binary and missing files say why" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "page.htm", .data =
+    \\<!DOCTYPE html><html><head><title>Saved</title></head><body><p>one</p><script>x</script></body></html>
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "blob.bin", .data = "text" ++ [_]u8{0} ++ "more" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // `~/page.htm` with the tmp dir standing in for the home.
+    var diag: Diag = .{};
+    const page = try readPath(io, a, path_buf[0..n], "~/page.htm", &diag);
+    try std.testing.expectEqualStrings("Saved", page.title);
+    try std.testing.expectEqualStrings("one", page.text);
+
+    const blob = try std.fs.path.join(std.testing.allocator, &.{ path_buf[0..n], "blob.bin" });
+    defer std.testing.allocator.free(blob);
+    var diag2: Diag = .{};
+    try std.testing.expectError(error.AiFailed, readPath(io, a, "/home/testing", blob, &diag2));
+    try std.testing.expectEqualStrings("That file looks binary: summaries read text documents (Markdown, code, logs).", diag2.message);
+
+    var diag3: Diag = .{};
+    try std.testing.expectError(error.AiFailed, readPath(io, a, "/home/testing", try std.fmt.allocPrint(a, "{s}/gone.md", .{path_buf[0..n]}), &diag3));
+    try std.testing.expectEqualStrings("That file doesn't exist on this machine: check the path.", diag3.message);
 }

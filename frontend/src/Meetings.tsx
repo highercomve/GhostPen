@@ -1,6 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { listen } from "./events";
 import { renderMarkdown } from "./markdown";
+import { renderDiagrams } from "./diagrams";
+import { Icon } from "./icons";
+import MeetingRecorder from "./MeetingRecorder";
+import MeetingNotes, { flushMeetingNotes } from "./MeetingNotes";
+import { MeetingChatProgressView, StatsForNerds } from "./MeetingChatDiagnostics";
 import {
   copyText,
   meetingsDelete,
@@ -11,12 +16,14 @@ import {
   meetingsReleaseAudio,
   meetingsReprocess,
   meetingsAsk,
+  meetingsChatStatus,
   listenVoice,
   ttsSpeak,
   ttsStop,
   ttsWarmUp,
   type TtsState,
   type MeetingNote,
+  type MeetingChatProgress,
   meetingsUpdate,
   meetingsVoices,
   meetingsRememberVoice,
@@ -180,14 +187,17 @@ function SpokenWords({ text, fraction }: { text: string; fraction: number }) {
 export default function Meetings() {
   const [list, setList] = useState<MeetingSummary[]>([]);
   const [query, setQuery] = useState("");
+  const queryRef = useRef(query);
+  useEffect(() => { queryRef.current = query; }, [query]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [progress, setProgress] = useState<Record<string, MeetingProgress>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [tab, setTab] = useState<"transcript" | "final" | "summary">("transcript");
+  const [tab, setTab] = useState<"transcript" | "final" | "summary" | "notes" | "chat">("transcript");
   const [find, setFind] = useState("");
   const [loadingList, setLoadingList] = useState(true);
+  const detailRequest = useRef(0);
 
   // The player.
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -214,6 +224,13 @@ export default function Meetings() {
   const [askDraft, setAskDraft] = useState("");
   const [askReplace, setAskReplace] = useState<MeetingNote | null>(null);
   const [asking, setAsking] = useState<{ prompt: string; note: string }[]>([]);
+  const [liveAnswer, setLiveAnswer] = useState<{ prompt: string; text: string } | null>(null);
+  const [chatProgress, setChatProgress] = useState<MeetingChatProgress | null>(null);
+  const activePrompt = liveAnswer?.prompt ?? chatProgress?.prompt;
+  const pendingAnswers = activePrompt && !asking.some((a) => a.prompt === activePrompt)
+    ? [{ prompt: activePrompt, note: "" }, ...asking] : asking;
+  const chatHistoryRef = useRef<HTMLDivElement>(null);
+  const chatAtBottom = useRef(true);
   const [confirmNote, setConfirmNote] = useState<string | null>(null);
   // Read aloud (the built-in voice, as the link summary's): what is being read.
   const [voice, setVoice] = useState<TtsState>({ phase: "idle", message: "", progress: 0, voice: "" });
@@ -231,7 +248,7 @@ export default function Meetings() {
 
   // ---- data ----
 
-  const refreshList = useCallback(async (q = query) => {
+  const refreshList = useCallback(async (q = queryRef.current) => {
     try {
       setList(await meetingsList(q));
     } catch (e) {
@@ -239,18 +256,27 @@ export default function Meetings() {
     } finally {
       setLoadingList(false);
     }
-  }, [query]);
+  }, []);
 
   const loadDetail = useCallback(async (id: string) => {
+    const request = ++detailRequest.current;
     try {
       const d = await meetingsGet(id);
+      if (request !== detailRequest.current) return;
       setDetail(d);
       setError(null);
     } catch (e) {
+      if (request !== detailRequest.current) return;
       setDetail(null);
       setError(String(e));
     }
   }, []);
+
+  const recordingSelected = useCallback((id: string) => {
+    setQuery("");
+    setSelected(id);
+    void refreshList("");
+  }, [refreshList]);
 
   useEffect(() => {
     const t = window.setTimeout(() => refreshList(query), 200);
@@ -263,6 +289,8 @@ export default function Meetings() {
   }, [list, selected]);
 
   useEffect(() => {
+    detailRequest.current++;
+    setDetail(null);
     setEditingLine(null);
     setRenaming(null);
     setConfirmDelete(false);
@@ -282,22 +310,58 @@ export default function Meetings() {
       const p = e.payload;
       setProgress((prev) => ({ ...prev, [p.id]: p }));
       setList((prev) => {
-        if (!prev.some((m) => m.id === p.id)) {
-          refreshList();
-          return prev;
-        }
         return prev.map((m) => (m.id === p.id ? { ...m, state: p.state } : m));
       });
       if (p.id === selectedRef.current && (p.state === "ready" || p.state === "error" || p.progress === 0)) {
         loadDetail(p.id);
-        if (p.state === "ready" || p.state === "error") setAsking([]);
+        if (p.state === "ready" || p.state === "error") { setAsking([]); setLiveAnswer(null); setChatProgress(null); }
       }
-      if (p.state === "ready" || p.state === "error") refreshList();
+      if (p.progress === 0 || p.state === "ready" || p.state === "error") refreshList();
     });
     return () => {
       un.then((f) => f());
     };
   }, [loadDetail, refreshList]);
+
+  useEffect(() => {
+    const un = listen<{ id: string; prompt: string; text: string; reset: boolean }>("ghostpen://meeting-answer", (e) => {
+      const p = e.payload;
+      if (p.id !== selectedRef.current) return;
+      setLiveAnswer((prev) => ({ prompt: p.prompt, text: p.reset ? p.text : (prev?.prompt === p.prompt ? prev.text : "") + p.text }));
+    });
+    return () => { un.then((f) => f()); };
+  }, []);
+
+  useEffect(() => { setLiveAnswer(null); }, [selected]);
+
+  useEffect(() => {
+    setChatProgress(null);
+    if (!selected) return;
+    let active = true;
+    let eventSeen = false;
+    const un = listen<MeetingChatProgress>("ghostpen://meeting-chat-progress", (e) => {
+      if (!active || e.payload.id !== selected) return;
+      eventSeen = true;
+      setChatProgress(e.payload);
+    });
+    void meetingsChatStatus(selected).then((status) => { if (active && !eventSeen) setChatProgress(status); }).catch(() => {});
+    return () => { active = false; un.then((f) => f()); };
+  }, [selected]);
+
+  useEffect(() => {
+    const history = chatHistoryRef.current;
+    if (tab === "chat" && history && chatAtBottom.current) history.scrollTop = history.scrollHeight;
+  }, [tab, meeting?.notes, liveAnswer, asking, chatProgress]);
+
+  useEffect(() => { chatAtBottom.current = true; }, [selected, tab]);
+
+  // Mermaid fences (a summary or an answer may have them) render once their
+  // document is final: while an answer still streams the nodes change every
+  // chunk, which would redraw the whole diagram per token.
+  useEffect(() => {
+    if (liveAnswer?.text) return;
+    void renderDiagrams(document.querySelector(".mt-main"));
+  }, [tab, meeting?.summary, meeting?.notes, liveAnswer, chatProgress]);
 
   // Hidden window: stop playing and serving the audio; shown again: reload.
   useEffect(() => {
@@ -399,7 +463,7 @@ export default function Meetings() {
 
   const lines = useMemo<MeetingSegment[]>(() => {
     if (!meeting) return [];
-    if (tab === "summary") return [];
+    if (tab !== "transcript" && tab !== "final") return [];
     return byStart(tab === "final" ? meeting.final : meeting.segments);
   }, [meeting, tab]);
 
@@ -603,13 +667,14 @@ export default function Meetings() {
 
   const askAbout = async (prompt: string, note = "") => {
     if (!detail || !prompt.trim()) return;
+    const pending = { prompt: prompt.trim(), note };
     try {
+      await flushMeetingNotes(detail.id, detail.folder);
+      if (selectedRef.current === detail.id) setAsking((a) => [...a, pending]);
       await meetingsAsk(detail.id, prompt.trim(), note);
-      setAsking((a) => [...a, { prompt: prompt.trim(), note }]);
-      setAskDraft("");
-      setAskReplace(null);
+      if (selectedRef.current === detail.id) { setAskDraft(""); setAskReplace(null); }
     } catch (e) {
-      setError(String(e));
+      if (selectedRef.current === detail.id) { setAsking((a) => a.filter((item) => item !== pending)); setError(String(e)); }
     }
   };
 
@@ -687,14 +752,15 @@ export default function Meetings() {
     <div className="meetings" onClick={() => { setSpeakerMenu(null); setLineMenu(null); setMenuOpen(null); setCtxMenu(null); }}>
       <aside className="mt-side">
         <div className="mt-side-head">
-          <h1>Meetings</h1>
-          <button className="mt-icon-btn" title="Open the meetings folder" onClick={() => meetingsOpenFolder().catch((e) => setError(String(e)))}>
-            📁
+          <h2>Conversations</h2>
+          <button className="mt-icon-btn" aria-label="Open the meetings folder" title="Open the meetings folder" onClick={() => meetingsOpenFolder().catch((e) => setError(String(e)))}>
+            <Icon name="folder" />
           </button>
         </div>
         <input
           className="mt-search"
           type="search"
+          aria-label="Search meetings"
           placeholder="Search titles, speakers, words…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -705,9 +771,7 @@ export default function Meetings() {
             <div className="mt-empty">
               {query ? "No meeting matches." : (
                 <>
-                  No meetings yet.
-                  <br />
-                  Turn on <b>🎙 Meeting</b> in the captions bar, then Start: when you stop, the meeting is saved here.
+                  Your saved conversations will appear here. Record a meeting to begin.
                 </>
               )}
             </div>
@@ -730,7 +794,7 @@ export default function Meetings() {
               >
                 <span className="mt-item-title">{m.title || "Meeting"}</span>
                 <span className="mt-item-meta">
-                  {m.startedLocal} · {duration(m.durationMs)}
+                  {m.startedLocal} · {st === "recording" ? "In progress" : duration(m.durationMs)}
                   {st !== "ready" && (
                     <span className={`mt-badge ${st}`}>
                       {STATE_LABEL[st] ?? st}
@@ -794,14 +858,19 @@ export default function Meetings() {
       })()}
 
       <main className="mt-main">
+        <MeetingRecorder onRecorded={recordingSelected} />
         {error && (
-          <div className="mt-error" onClick={() => setError(null)} title="Dismiss">
-            ⚠ {error}
+          <div className="mt-error" role="alert">
+            {error}<button aria-label="Dismiss error" onClick={() => setError(null)}>×</button>
           </div>
         )}
         {notice && <div className="mt-notice">{notice}</div>}
 
-        {!meeting && !error && <div className="mt-placeholder">{list.length ? "Pick a meeting." : ""}</div>}
+        {!meeting && !error && <div className="mt-placeholder">
+          <span className="mt-empty-symbol"><Icon name="mic" /></span>
+          <h2>{selected ? "Opening your meeting…" : "No meetings yet"}</h2>
+          <p>{selected ? "Loading the recording and transcript." : "Choose Record meeting to start."}</p>
+        </div>}
 
         {meeting && detail && (
           <>
@@ -839,7 +908,7 @@ export default function Meetings() {
                   </h2>
                 )}
                 <div className="mt-meta">
-                  {meeting.startedLocal} · {duration(meeting.durationMs)}
+                  {meeting.startedLocal} · {state === "recording" ? "Recording in progress" : duration(meeting.durationMs)}
                   {meeting.language && meeting.language !== "auto" ? ` · ${meeting.language}` : ""}
                   {meeting.model ? ` · whisper ${meeting.model}` : ""}
                 </div>
@@ -894,7 +963,7 @@ export default function Meetings() {
               <div className="mt-progress">
                 <span>
                   {STATE_LABEL[state] ?? state}…
-                  {state === "recording" ? " Stop the captions to save it." : ""}
+                  {state === "recording" ? " Audio is being saved. Transcription begins after Stop and save." : ""}
                 </span>
                 <div className="mt-bar">
                   <div className="mt-bar-fill" style={{ width: `${Math.round((liveState?.progress ?? live?.progress ?? 0) * 100)}%` }} />
@@ -975,8 +1044,14 @@ export default function Meetings() {
                 <button role="tab" aria-selected={tab === "summary"} className={tab === "summary" ? "active" : ""} onClick={() => setTab("summary")}>
                   Summary
                 </button>
+                <button role="tab" aria-selected={tab === "notes"} className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>
+                  Notes
+                </button>
+                <button role="tab" aria-selected={tab === "chat"} className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
+                  Chat
+                </button>
               </div>
-              {tab !== "summary" && <div className="mt-find">
+              {(tab === "transcript" || tab === "final") && <div className="mt-find">
                 <input
                   id="mt-find"
                   type="search"
@@ -993,10 +1068,12 @@ export default function Meetings() {
                 />
                 {find.trim() && <span className="mt-find-count">{matches.length}</span>}
               </div>}
-              {tab !== "summary" && (
-                <label className="mt-follow" title="Scroll to the line being played">
-                  <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> Follow
-                </label>
+              {(tab === "transcript" || tab === "final") && (
+                <button className="mt-follow mt-follow-switch" role="switch" aria-checked={follow} aria-label="Follow playback"
+                  title="Scroll to the line being played" onClick={() => setFollow(!follow)}>
+                  <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
+                  <span>Follow</span>
+                </button>
               )}
               {tab === "summary" && meeting.summary && (
                 <div className="mt-summary-actions">
@@ -1006,6 +1083,8 @@ export default function Meetings() {
                 </div>
               )}
             </div>
+
+            <MeetingNotes key={detail.folder} id={detail.id} folder={detail.folder} initial={detail.personalNotes ?? ""} hidden={tab !== "notes"} />
 
             {tab === "summary" && (
               <div className="mt-summary">
@@ -1028,8 +1107,46 @@ export default function Meetings() {
                   </div>
                 )}
 
-                <section className="mt-ask">
-                  <h3>Ask about this meeting</h3>
+              </div>
+            )}
+
+            {tab === "chat" && (
+              <div className="mt-chat">
+                <section className="mt-chat-shell" aria-label="Meeting chat">
+                  <div className="mt-chat-history" role="log" aria-label="Conversation history" ref={chatHistoryRef}
+                    onScroll={(e) => { const el = e.currentTarget; chatAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
+                  {(meeting.notes ?? []).map((n) => (
+                    <article key={n.id} className="mt-note">
+                      <div className="mt-note-head">
+                        <div className="mt-note-q">{n.prompt}</div>
+                      </div>
+                      <div className="mt-summary-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(n.answer) }} />
+                      <div className="mt-note-foot">
+                        <div className="mt-note-actions">
+                          <ReadButton id={n.id} text={`${n.prompt}\n\n${n.answer}`} className="mt-link" />
+                          <button className="mt-link" onClick={() => copyText(`## ${n.prompt}\n\n${n.answer}`).then(() => flash("Answer copied"))}>Copy</button>
+                          <button className="mt-link" onClick={() => { setAskReplace(n); setAskDraft(n.prompt); }}>Edit</button>
+                          <button className="mt-link" onClick={() => askAbout(n.prompt, n.id)}>Ask again</button>
+                          {confirmNote === n.id ? (
+                            <button className="mt-link danger" onClick={() => deleteNote(n.id)}>Delete for good</button>
+                          ) : (
+                            <button className="mt-link danger" disabled={!editable} onClick={() => setConfirmNote(n.id)}>Delete</button>
+                          )}
+                        </div>
+                        <div className="mt-note-meta">{n.askedAt ? new Date(n.askedAt).toLocaleString() : ""}</div>
+                      </div>
+                      <StatsForNerds stats={n.stats} />
+                    </article>
+                  ))}
+                  {pendingAnswers.map((a, i) => (
+                    <article key={`pending-${i}`} className="mt-note pending">
+                      <div className="mt-note-q">{a.prompt}</div>
+                      <MeetingChatProgressView progress={chatProgress?.prompt === a.prompt ? chatProgress : null} writing={liveAnswer?.prompt === a.prompt && !!liveAnswer.text} />
+                      {liveAnswer?.prompt === a.prompt && liveAnswer.text && <div className="mt-summary-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(liveAnswer.text) }} />}
+                    </article>
+                  ))}
+                  </div>
+                  <div className="mt-chat-composer">
                   <form
                     className="mt-ask-form"
                     onSubmit={(e) => {
@@ -1039,10 +1156,12 @@ export default function Meetings() {
                   >
                     <textarea
                       className="mt-ask-input"
+                      aria-label="Ask a question about this meeting…"
+                      maxLength={4000}
                       rows={2}
                       value={askDraft}
                       placeholder="Ask a question about this meeting…"
-                      disabled={!meeting.segments.length || meeting.state === "recording"}
+                      disabled={meeting.state === "recording"}
                       onChange={(e) => setAskDraft(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
@@ -1055,12 +1174,12 @@ export default function Meetings() {
                         }
                       }}
                     />
-                    <button className="mt-btn mt-ask-go" type="submit" disabled={!askDraft.trim()}>
-                      {askReplace ? "Ask again" : "Ask"}
+                    <button className="mt-btn mt-ask-go" type="submit" disabled={!askDraft.trim() || meeting.state === "recording"}>
+                      {askReplace ? "Ask again" : "Send"}
                     </button>
                   </form>
                   {askReplace && <div className="mt-hint">Replaces the answer to “{askReplace.prompt}”. Esc to cancel.</div>}
-                  {!askDraft && !askReplace && (
+                  {!askDraft && !askReplace && !meeting.notes?.length && !pendingAnswers.length && (
                     <div className="mt-ask-suggest">
                       {MEETING_QUESTIONS.map((q) => (
                         <button key={q} className="mt-chip" onClick={() => setAskDraft(q)}>
@@ -1070,41 +1189,13 @@ export default function Meetings() {
                     </div>
                   )}
 
-                  {asking.map((a, i) => (
-                    <article key={`pending-${i}`} className="mt-note pending">
-                      <div className="mt-note-q">{a.prompt}</div>
-                      <div className="mt-hint">
-                        <span className="spinner mt-note-spin" /> Reading the meeting
-                        {state === "asking" && liveState && liveState.progress > 0 ? ` (${Math.round(liveState.progress * 100)}%)` : ""}…
-                      </div>
-                    </article>
-                  ))}
-                  {[...(meeting.notes ?? [])].reverse().map((n) => (
-                    <article key={n.id} className="mt-note">
-                      <div className="mt-note-head">
-                        <div className="mt-note-q">{n.prompt}</div>
-                        <div className="mt-note-actions">
-                          <ReadButton id={n.id} text={`${n.prompt}\n\n${n.answer}`} className="mt-link" />
-                          <button className="mt-link" onClick={() => copyText(`## ${n.prompt}\n\n${n.answer}`).then(() => flash("Answer copied"))}>Copy</button>
-                          <button className="mt-link" onClick={() => { setAskReplace(n); setAskDraft(n.prompt); }}>Edit</button>
-                          <button className="mt-link" onClick={() => askAbout(n.prompt, n.id)}>Ask again</button>
-                          {confirmNote === n.id ? (
-                            <button className="mt-link danger" onClick={() => deleteNote(n.id)}>Delete for good</button>
-                          ) : (
-                            <button className="mt-link danger" disabled={!editable} onClick={() => setConfirmNote(n.id)}>Delete</button>
-                          )}
-                        </div>
-                      </div>
-                      <div className="mt-note-meta">{n.askedAt ? new Date(n.askedAt).toLocaleString() : ""}</div>
-                      <div className="mt-summary-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(n.answer) }} />
-                    </article>
-                  ))}
+                  </div>
                 </section>
               </div>
             )}
 
             <div
-              hidden={tab === "summary"}
+              hidden={tab !== "transcript" && tab !== "final"}
               className="mt-lines"
               ref={linesRef}
               onWheel={() => (userScrolledAt.current = Date.now())}

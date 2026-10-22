@@ -2,6 +2,34 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.3.9] - 2026-10-22
+
+### Added
+
+- Record a meeting straight from the Meetings window (**Record meeting** /
+  **Stop and save**), without the live captions overlay. Earlier meetings stay
+  browsable while one records.
+- A **Notes** tab per meeting: your own notebook with Markdown preview,
+  saved automatically to `notes.md` and kept when the meeting is reprocessed.
+- Meeting **Chat** asks across the transcript, clean text, personal notes,
+  summary and earlier questions, shows its progress, and has a "stats for
+  nerds" panel (tokens, prefill and generation speed, load and queue time).
+- The tray icon shows a red dot while a meeting is recording.
+- Summarize files on this machine as well as links: `~/notes.md`, absolute
+  and relative paths and `file://` URLs.
+
+### Changed
+
+- The meeting notebook uses the reader's paper-and-ink design.
+- The built-in model reuses the meeting it has already read for follow-up
+  questions, including recurrent/hybrid models (one bounded snapshot), so
+  later answers start sooner.
+
+### Fixed
+
+- When the GPU fails, its error is kept for the message and the CPU fallback
+  instead of being buried under later warnings.
+
 ## [0.3.8] - 2026-10-20
 
 ### Added

@@ -8,6 +8,7 @@ test {
     _ = @import("models.zig");
     _ = @import("chat_format.zig");
     _ = @import("local_llm.zig");
+    _ = @import("llm_helper.zig");
     _ = @import("llm_models.zig");
     _ = @import("stt_server.zig");
     _ = @import("model_server.zig");
@@ -17,5 +18,6 @@ test {
     _ = @import("wav.zig");
     _ = @import("meeting_store.zig");
     _ = @import("meetings.zig");
+    _ = @import("captions.zig");
     _ = @import("voices.zig");
 }

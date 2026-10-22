@@ -148,8 +148,10 @@ pub const Recording = struct {
     /// was recorded. Frees `r`.
     pub fn end(r: *Recording) void {
         active_mutex.lockUncancelable(main.io);
-        if (active == r) active = null;
+        const was = active == r;
+        if (was) active = null;
         active_mutex.unlock(main.io);
+        if (was) main.refreshTrayIcon();
         defer {
             gpa.free(r.id);
             gpa.free(r.root);
@@ -193,7 +195,10 @@ pub fn markStopped(r: *Recording) void {
     const was = active == r;
     if (was) active = null;
     active_mutex.unlock(main.io);
-    if (was) emitState(r.id, "saving", 0, "");
+    if (was) {
+        emitState(r.id, "saving", 0, "");
+        main.refreshTrayIcon();
+    }
 }
 
 /// Start a meeting: its folder, meeting.json and the tracks' files. The
@@ -224,16 +229,16 @@ pub fn begin(mic: bool) !*Recording {
 
     const r = try gpa.create(Recording);
     errdefer gpa.destroy(r);
+    const owned_id = try gpa.dupe(u8, id);
+    errdefer gpa.free(owned_id);
+    const owned_root = try gpa.dupe(u8, root);
+    errdefer gpa.free(owned_root);
     r.* = .{
-        .id = try gpa.dupe(u8, id),
-        .root = try gpa.dupe(u8, root),
+        .id = owned_id,
+        .root = owned_root,
         .start = std.Io.Clock.Timestamp.now(main.io, .awake),
         .started_ms = started_ms,
     };
-    errdefer {
-        gpa.free(r.id);
-        gpa.free(r.root);
-    }
     r.others.writer = try wav.Writer.create(main.io, try store.path(arena, root, id, store.others_track), rate);
     if (mic) r.me.writer = wav.Writer.create(main.io, try store.path(arena, root, id, store.me_track), rate) catch |err| blk: {
         log.warn("meeting {s}: no microphone track ({s})", .{ id, @errorName(err) });
@@ -242,6 +247,7 @@ pub fn begin(mic: bool) !*Recording {
     active_mutex.lockUncancelable(main.io);
     active = r;
     active_mutex.unlock(main.io);
+    main.refreshTrayIcon();
     log.info("meeting {s}: recording{s}", .{ id, if (mic) " (with the microphone)" else "" });
     return r;
 }
@@ -266,6 +272,13 @@ pub fn recordingStatus(arena: std.mem.Allocator) !?RecordingStatus {
     return .{ .id = try arena.dupe(u8, r.id), .seconds = r.elapsedSeconds() };
 }
 
+/// A meeting is recording now (Stop not pressed yet).
+pub fn isRecording() bool {
+    active_mutex.lockUncancelable(main.io);
+    defer active_mutex.unlock(main.io);
+    return active != null;
+}
+
 fn isActive(id: []const u8) bool {
     active_mutex.lockUncancelable(main.io);
     defer active_mutex.unlock(main.io);
@@ -283,6 +296,7 @@ const Job = struct {
     step: Step,
     prompt: []u8 = &.{},
     note: []u8 = &.{},
+    queuedAt: std.Io.Timestamp,
 
     fn init(root: []const u8, id: []const u8, step: Step, prompt: []const u8, note: []const u8) !Job {
         const owned_root = try gpa.dupe(u8, root);
@@ -292,7 +306,7 @@ const Job = struct {
         const owned_prompt = try gpa.dupe(u8, prompt);
         errdefer gpa.free(owned_prompt);
         const owned_note = try gpa.dupe(u8, note);
-        return .{ .root = owned_root, .id = owned_id, .step = step, .prompt = owned_prompt, .note = owned_note };
+        return .{ .root = owned_root, .id = owned_id, .step = step, .prompt = owned_prompt, .note = owned_note, .queuedAt = std.Io.Clock.awake.now(main.io) };
     }
 
     fn deinit(j: Job) void {
@@ -411,10 +425,16 @@ fn runSteps(arena: std.mem.Allocator, root: []const u8, id: []const u8, m: *Meet
     const step = job.step;
     const s = try main.shared.get(main.io, arena);
     if (step == .ask) {
-        if (m.segments.len == 0) return oriel.ipc.fail("Nothing to ask about: the meeting has no transcript.", .{});
+        var chat: ChatRun = .{ .arena = arena, .id = id, .prompt = job.prompt, .began = job.queuedAt };
+        defer clearChatStatus();
+        chat.totals.queueMs = chat.elapsed();
+        chat.publish(.loading_conversation, null);
         setState(arena, root, id, m, "asking", 0);
-        const answer = try askMeeting(arena, id, m.*, s, job.prompt);
-        m.notes = try withNote(arena, m.notes, job.note, job.prompt, answer);
+        const answer = try askMeeting(arena, root, id, m.*, s, job.prompt, &chat);
+        var stats = chat.snapshot();
+        stats.elapsedMs = chat.elapsed();
+        m.notes = try withNote(arena, m.notes, job.note, job.prompt, answer, stats);
+        chat.publish(.complete, null);
         return;
     }
     if (step == .summary) {
@@ -768,6 +788,24 @@ fn summaryBudget(s: main.Settings) usize {
     return std.math.clamp((ctx -| 1500) * 3, 2000, 20_000);
 }
 
+/// Chat can read a long meeting directly when the selected local model has
+/// room. The summary's 20k-character cap forced unnecessary map/reduce calls.
+fn questionBudget(s: main.Settings) usize {
+    if (!s.activeProfile().isLocal()) return summaryBudget(s);
+    return std.math.clamp((@as(usize, s.localLlm.ctxTokens) -| 4096) * 2, 2000, 256_000);
+}
+
+test "meeting chat uses the selected local context without enlarging unknown remote contexts" {
+    var s: main.Settings = .{};
+    try std.testing.expectEqual(@as(usize, 6000), questionBudget(s));
+    s.profiles = &.{.{ .id = "local", .name = "Local", .provider = "local", .model = "test" }};
+    s.activeProfileId = "local";
+    s.localLlm.ctxTokens = 131072;
+    try std.testing.expect(questionBudget(s) > 200_000);
+    s.localLlm.ctxTokens = 4096;
+    try std.testing.expectEqual(@as(usize, 2000), questionBudget(s));
+}
+
 /// The meeting's summary (Markdown). A meeting too long for one request is
 /// taken in parts: notes on each, then the summary of the notes (notes
 /// that still don't fit are condensed again, a few rounds at most).
@@ -800,19 +838,122 @@ fn summarize(arena: std.mem.Allocator, id: []const u8, m: Meeting, s: main.Setti
 /// The user's question over the meeting: the answer at once when the
 /// meeting fits one request, else notes on what each part has on it
 /// (parts with nothing are skipped), then the answer from the notes.
-fn askMeeting(arena: std.mem.Allocator, id: []const u8, m: Meeting, s: main.Settings, prompt: []const u8) ![]const u8 {
-    const budget = summaryBudget(s);
-    const parts = try store.summaryParts(arena, m, budget);
-    if (parts.len == 1) return ask(arena, s, store.ask_system, try store.askPrompt(arena, m, prompt, parts[0]));
+const ChatRun = struct {
+    arena: std.mem.Allocator,
+    id: []const u8,
+    prompt: []const u8,
+    began: std.Io.Timestamp,
+    totals: ai.telemetry.Stats = .{},
+    active: ai.telemetry.Stats = .{},
+    part: usize = 0,
+    parts: usize = 0,
+
+    fn elapsed(self: *ChatRun) u64 {
+        return @intCast(@max(self.began.durationTo(std.Io.Clock.awake.now(main.io)).toMilliseconds(), 0));
+    }
+
+    fn snapshot(self: *ChatRun) ai.telemetry.Stats {
+        var stats = ai.telemetry.combine(self.totals, self.active);
+        stats.elapsedMs = self.elapsed();
+        return stats;
+    }
+
+    fn observer(self: *ChatRun) ai.telemetry.Observer {
+        return .{ .context = self, .callback = report };
+    }
+
+    fn report(context: *anyopaque, progress: ai.telemetry.Progress) void {
+        const self: *ChatRun = @ptrCast(@alignCast(context));
+        self.active = progress.stats;
+        self.active.model = self.arena.dupe(u8, progress.stats.model) catch "";
+        self.active.backend = self.arena.dupe(u8, progress.stats.backend) catch "";
+        if (progress.stage == .complete) {
+            self.totals = ai.telemetry.combine(self.totals, self.active);
+            self.active = .{};
+        }
+        self.publish(if (progress.stage == .complete) .loading_conversation else progress.stage, progress.prefilledTokens);
+    }
+
+    fn publish(self: *ChatRun, stage: ai.telemetry.Stage, processed: ?u64) void {
+        const status: ChatStatus = .{
+            .id = self.id,
+            .prompt = self.prompt,
+            .stage = stage,
+            .stats = self.snapshot(),
+            .prefilledTokens = processed,
+            .prefillTotalTokens = self.active.promptTokens,
+            .part = self.part,
+            .parts = self.parts,
+        };
+        chat_status_mutex.lockUncancelable(main.io);
+        chat_status = status;
+        chat_status_mutex.unlock(main.io);
+        events.emit(.@"ghostpen://meeting-chat-progress", status);
+    }
+};
+
+pub const ChatStatus = struct {
+    id: []const u8,
+    prompt: []const u8,
+    stage: ai.telemetry.Stage,
+    stats: ai.telemetry.Stats,
+    prefilledTokens: ?u64 = null,
+    prefillTotalTokens: ?u64 = null,
+    part: usize = 0,
+    parts: usize = 0,
+};
+var chat_status_mutex: std.Io.Mutex = .init;
+var chat_status: ?ChatStatus = null;
+
+fn clearChatStatus() void {
+    chat_status_mutex.lockUncancelable(main.io);
+    defer chat_status_mutex.unlock(main.io);
+    chat_status = null;
+}
+
+fn askMeeting(arena: std.mem.Allocator, root: []const u8, id: []const u8, m: Meeting, s: main.Settings, prompt: []const u8, chat: *ChatRun) ![]const u8 {
+    const personal_notes = try store.loadPersonalNotes(main.io, arena, root, id);
+    var budget = questionBudget(s);
+    // A runner can shrink its actual context to fit memory. Tokenization also
+    // varies by language/model: retry smaller groups only for context errors.
+    for (0..8) |_| {
+        return answerMeetingParts(arena, id, m, s, prompt, personal_notes, budget, chat) catch |err| {
+            if (err != error.CommandFailed or budget <= 2000) return err;
+            const why = oriel.ipc.errorText(err);
+            if (!contextTooLong(why)) return err;
+            budget = @max(budget / 2, 2000);
+            log.info("meeting {s}: context limit reached; retrying chat with {d}-character groups", .{ id, budget });
+            continue;
+        };
+    }
+    return oriel.ipc.fail("The meeting could not fit the model's context. Raise its context size in Settings.", .{});
+}
+
+fn contextTooLong(message: []const u8) bool {
+    return std.mem.indexOf(u8, message, "context") != null and
+        (std.mem.indexOf(u8, message, "too long") != null or
+            std.mem.indexOf(u8, message, "context_length_exceeded") != null or
+            std.mem.indexOf(u8, message, "maximum context length") != null);
+}
+
+fn answerMeetingParts(arena: std.mem.Allocator, id: []const u8, m: Meeting, s: main.Settings, prompt: []const u8, personal_notes: []const u8, budget: usize, chat: *ChatRun) ![]const u8 {
+    const parts = try store.questionParts(arena, m, personal_notes, budget);
+    log.info("meeting {s}: chat reads {d} source group(s), {d}-character budget", .{ id, parts.len, budget });
+    if (parts.len == 0) return oriel.ipc.fail("Nothing to ask about yet. Add notes or transcribe the meeting first.", .{});
+    chat.parts = if (parts.len > 1) parts.len + 1 else 1;
+    chat.part = 1;
+    chat.totals.conversationMs = chat.elapsed() -| chat.totals.queueMs;
+    if (parts.len == 1) return answerMeeting(arena, id, m, s, prompt, parts[0], chat);
     const total: f64 = @floatFromInt(parts.len + 1);
     var notes: std.ArrayList([]const u8) = .empty;
     for (parts, 0..) |part, i| {
-        const body = try std.fmt.allocPrint(arena, "Part {d} of {d} of the meeting:\n\n{s}", .{ i + 1, parts.len, part });
-        const n = try ask(arena, s, store.ask_part_system, try store.askPrompt(arena, m, prompt, body));
+        chat.part = i + 1;
+        const body = try std.fmt.allocPrint(arena, "Source part {d} of {d} of the meeting:\n\n{s}", .{ i + 1, parts.len, part });
+        const n = try askObserved(arena, s, store.ask_part_system, try store.askPrompt(arena, m, prompt, body), chat.observer());
         if (!store.isNone(n)) try notes.append(arena, n);
         emitState(id, "asking", @as(f64, @floatFromInt(i + 1)) / total, "");
     }
-    if (notes.items.len == 0) return ask(arena, s, store.ask_system, try store.askPrompt(arena, m, prompt, "(No part of the meeting had anything on this request.)"));
+    if (notes.items.len == 0) return answerMeeting(arena, id, m, s, prompt, "(No part of the meeting had anything on this request.)", chat);
     var current = notes.items;
     var round: usize = 0;
     while (round < 4) : (round += 1) {
@@ -820,14 +961,37 @@ fn askMeeting(arena: std.mem.Allocator, id: []const u8, m: Meeting, s: main.Sett
         if (groups.len == 1) break;
         var next: std.ArrayList([]const u8) = .empty;
         for (groups) |g| {
-            const n = try ask(arena, s, store.ask_part_system, try store.askPrompt(arena, m, prompt, g));
+            const n = try askObserved(arena, s, store.ask_part_system, try store.askPrompt(arena, m, prompt, g), chat.observer());
             if (!store.isNone(n)) try next.append(arena, n);
         }
         current = next.items;
     }
     const groups = try store.groupNotes(arena, current, budget);
     const body = try std.fmt.allocPrint(arena, "Notes on the meeting's parts, in order:\n\n{s}", .{if (groups.len > 0) groups[0] else "(none)"});
-    return ask(arena, s, store.ask_system, try store.askPrompt(arena, m, prompt, body));
+    return answerMeeting(arena, id, m, s, prompt, body, chat);
+}
+
+fn answerMeeting(arena: std.mem.Allocator, id: []const u8, m: Meeting, s: main.Settings, prompt: []const u8, body: []const u8, chat: *ChatRun) ![]const u8 {
+    chat.part = chat.parts;
+    const Emit = struct {
+        id: []const u8,
+        prompt: []const u8,
+        chat: *ChatRun,
+        fn chunk(self: *@This(), text: []const u8) void {
+            if (self.chat.totals.firstTokenMs == null) self.chat.totals.firstTokenMs = self.chat.elapsed();
+            events.emit(.@"ghostpen://meeting-answer", .{ .id = self.id, .prompt = self.prompt, .text = text, .reset = false });
+        }
+    };
+    var emit: Emit = .{ .id = id, .prompt = prompt, .chat = chat };
+    events.emit(.@"ghostpen://meeting-answer", .{ .id = id, .prompt = prompt, .text = "", .reset = true });
+    var diag: ai.Diag = .{};
+    return ai.completeStream(main.io, gpa, arena, .{
+        .profile = s.activeProfile(),
+        .system = store.ask_system,
+        .user = .{ .text = try store.askPrompt(arena, m, prompt, body) },
+        .observer = chat.observer(),
+    }, &emit, Emit.chunk, &diag) catch |err|
+        return if (err == error.AiFailed) oriel.ipc.fail("{s}", .{diag.message}) else err;
 }
 
 /// The saved notes whose ids are in `kept` (the page's list after a
@@ -847,7 +1011,7 @@ fn keptNotes(arena: std.mem.Allocator, saved: []const store.Note, kept: []const 
 
 /// The notes with this answer: replacing note `replace` (asked again), else
 /// a new note at the end.
-fn withNote(arena: std.mem.Allocator, notes: []const store.Note, replace: []const u8, prompt: []const u8, answer: []const u8) ![]const store.Note {
+fn withNote(arena: std.mem.Allocator, notes: []const store.Note, replace: []const u8, prompt: []const u8, answer: []const u8, stats: ?ai.telemetry.Stats) ![]const store.Note {
     const now = std.Io.Clock.real.now(main.io).toMilliseconds();
     var out: std.ArrayList(store.Note) = .empty;
     var replaced = false;
@@ -855,19 +1019,23 @@ fn withNote(arena: std.mem.Allocator, notes: []const store.Note, replace: []cons
     for (notes) |n| {
         if (n.id.len > 1 and n.id[0] == 'n') max = @max(max, std.fmt.parseInt(usize, n.id[1..], 10) catch 0);
         if (replace.len > 0 and std.mem.eql(u8, n.id, replace)) {
-            try out.append(arena, .{ .id = n.id, .prompt = prompt, .answer = answer, .askedAt = now });
+            try out.append(arena, .{ .id = n.id, .prompt = prompt, .answer = answer, .askedAt = now, .stats = stats });
             replaced = true;
         } else try out.append(arena, n);
     }
-    if (!replaced) try out.append(arena, .{ .id = try std.fmt.allocPrint(arena, "n{d}", .{max + 1}), .prompt = prompt, .answer = answer, .askedAt = now });
+    if (!replaced) try out.append(arena, .{ .id = try std.fmt.allocPrint(arena, "n{d}", .{max + 1}), .prompt = prompt, .answer = answer, .askedAt = now, .stats = stats });
     return out.items;
 }
 
 /// One request to the active profile; the answer trimmed, a ```markdown
 /// fence the model wrapped it in taken off.
 fn ask(arena: std.mem.Allocator, s: main.Settings, system: []const u8, user: []const u8) ![]const u8 {
+    return askObserved(arena, s, system, user, null);
+}
+
+fn askObserved(arena: std.mem.Allocator, s: main.Settings, system: []const u8, user: []const u8, observer: ?ai.telemetry.Observer) ![]const u8 {
     var diag: ai.Diag = .{};
-    const answer = ai.complete(main.io, gpa, arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = user } }, &diag) catch |err|
+    const answer = ai.complete(main.io, gpa, arena, .{ .profile = s.activeProfile(), .system = system, .user = .{ .text = user }, .observer = observer }, &diag) catch |err|
         return if (err == error.AiFailed) oriel.ipc.fail("{s}", .{diag.message}) else err;
     var t = std.mem.trim(u8, answer, " \t\r\n");
     if (std.mem.startsWith(u8, t, "```")) {
@@ -1052,9 +1220,35 @@ pub const Detail = struct {
     audio: []const u8,
     folder: []const u8,
     busy: bool,
+    personalNotes: []const u8,
 };
 
+var notes_mutex: std.Io.Mutex = .init;
+
 pub const Commands = struct {
+    pub fn meetings_chat_status(arena: std.mem.Allocator, args: struct { id: []const u8 }) !?ChatStatus {
+        chat_status_mutex.lockUncancelable(main.io);
+        defer chat_status_mutex.unlock(main.io);
+        var status = chat_status orelse return null;
+        if (!std.mem.eql(u8, status.id, args.id)) return null;
+        status.id = try arena.dupe(u8, status.id);
+        status.prompt = try arena.dupe(u8, status.prompt);
+        status.stats.model = try arena.dupe(u8, status.stats.model);
+        status.stats.backend = try arena.dupe(u8, status.stats.backend);
+        return status;
+    }
+    pub fn meetings_recording_status(arena: std.mem.Allocator) !@import("captions.zig").MeetingCaptureStatus {
+        return @import("captions.zig").meetingStatus(arena);
+    }
+
+    pub fn meetings_start_recording(arena: std.mem.Allocator) !?RecordingStatus {
+        return @import("captions.zig").startMeeting(arena);
+    }
+
+    pub fn meetings_stop_recording(_: std.mem.Allocator) void {
+        @import("captions.zig").stopMeeting();
+    }
+
     pub fn open_meetings(_: std.mem.Allocator) void {
         main.showWindow("meetings", false);
     }
@@ -1090,7 +1284,17 @@ pub const Commands = struct {
             .audio = audio,
             .folder = try std.fs.path.join(arena, &.{ root, args.id }),
             .busy = busyWith(args.id) or isActive(args.id),
+            .personalNotes = try store.loadPersonalNotes(main.io, arena, root, args.id),
         };
+    }
+
+    pub fn meetings_save_notes(arena: std.mem.Allocator, args: struct { id: []const u8, text: []const u8 }) !void {
+        const root = try rootDir(arena);
+        notes_mutex.lockUncancelable(main.io);
+        defer notes_mutex.unlock(main.io);
+        _ = try loadOrFail(arena, root, args.id);
+        store.savePersonalNotes(main.io, arena, root, args.id, args.text) catch |err|
+            return oriel.ipc.fail("Could not save your notes ({s}).", .{@errorName(err)});
     }
 
     /// The page's edits: title, speakers (names, merges), lines (text,
@@ -1138,7 +1342,9 @@ pub const Commands = struct {
         const root = try rootDir(arena);
         const m = try loadOrFail(arena, root, args.id);
         if (std.mem.eql(u8, m.state, "recording")) return oriel.ipc.fail("Wait until the meeting is saved.", .{});
-        if (m.segments.len == 0) return oriel.ipc.fail("Nothing to ask about: the meeting has no transcript.", .{});
+        const personal_notes = try store.loadPersonalNotes(main.io, arena, root, args.id);
+        if (m.segments.len == 0 and m.final.len == 0 and m.summary.len == 0 and m.notes.len == 0 and personal_notes.len == 0)
+            return oriel.ipc.fail("Nothing to ask about yet. Add notes or transcribe the meeting first.", .{});
         const prompt = std.mem.trim(u8, args.prompt, " \t\r\n");
         if (prompt.len == 0) return oriel.ipc.fail("Write what you want to know.", .{});
         if (prompt.len > 4000) return oriel.ipc.fail("That request is too long.", .{});

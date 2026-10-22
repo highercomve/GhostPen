@@ -81,16 +81,21 @@ pub fn settingsChanged() void {
 pub fn isRunning() bool {
     mutex.lockUncancelable(main.io);
     defer mutex.unlock(main.io);
-    return if (session) |s| s.running.load(.acquire) else false;
+    // Keep Stop available after a capture error until teardown saves any
+    // recorded audio. A failed source must not strand an owned session.
+    return if (session) |s| s.mode == .captions else false;
 }
 
-/// A start in progress (device pick, model load): a second toggle is ignored.
-var starting: std.atomic.Value(bool) = .init(false);
+const CaptureMode = enum { captions, meeting };
+// Capture ownership, including startup and teardown, is guarded by mutex.
+var starting: ?CaptureMode = null;
+var stopping = false;
 /// Bumped by every stop, even with no session yet: a start that sees it
 /// change (Esc while the model loads) tears its session down.
 var cancel_gen: std.atomic.Value(u64) = .init(0);
 
 const Session = struct {
+    mode: CaptureMode,
     running: std.atomic.Value(bool) = .init(true),
     /// 0 opening the audio source, 1 open, 2 failed (start() waits for it).
     opened: std.atomic.Value(u8) = .init(0),
@@ -123,7 +128,7 @@ const Session = struct {
     speaker_model: []u8 = &.{},
 
     /// All fields owned; on failure nothing leaks.
-    fn create(source: [:0]const u8, c: @import("settings.zig").Captions) !*Session {
+    fn create(source: [:0]const u8, c: @import("settings.zig").Captions, mode: CaptureMode) !*Session {
         const s = try gpa.create(Session);
         errdefer gpa.destroy(s);
         const src = try gpa.dupeZ(u8, source);
@@ -136,6 +141,7 @@ const Session = struct {
         // Tauri clamps to ≥ 1 s; the buffer holds at most 60 s.
         const seconds = std.math.clamp(if (std.math.isNan(c.chunkSeconds)) 5.0 else c.chunkSeconds, 1.0, 60.0);
         s.* = .{
+            .mode = mode,
             .source = src,
             .model = model,
             .language = lang,
@@ -174,14 +180,14 @@ const Session = struct {
         s.buf_mutex.lockUncancelable(main.io);
         defer s.buf_mutex.unlock(main.io);
         if (s.rec) |r| r.writeOthers(part);
-        appendTo(&s.samples, part);
+        if (s.mode == .captions) appendTo(&s.samples, part);
     }
 
     fn appendMic(s: *Session, part: []const f32) void {
         s.buf_mutex.lockUncancelable(main.io);
         defer s.buf_mutex.unlock(main.io);
         if (s.rec) |r| r.writeMe(part);
-        appendTo(&s.mic_samples, part);
+        if (s.mode == .captions) appendTo(&s.mic_samples, part);
     }
 
     fn appendTo(list: *std.ArrayList(f32), part: []const f32) void {
@@ -219,7 +225,7 @@ const Session = struct {
             s.opened.store(1, .release);
             return models.feedTestAudio(main.io, &s.running, s, append);
         }
-        var stream = audio.Stream.open(s.source, "GhostPen captions", rate) catch |err| {
+        var stream = audio.Stream.open(s.source, if (s.mode == .meeting) "GhostPen meeting" else "GhostPen captions", rate) catch |err| {
             log.warn("open audio source: {s}", .{@errorName(err)});
             s.running.store(false, .release);
             s.opened.store(2, .release);
@@ -383,18 +389,68 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
+fn acquireStart(mode: CaptureMode) !u64 {
+    mutex.lockUncancelable(main.io);
+    defer mutex.unlock(main.io);
+    if (starting != null or stopping or session != null)
+        return oriel.ipc.fail("Audio capture is already active or finishing. Stop it before starting a new recording.", .{});
+    starting = mode;
+    return cancel_gen.load(.acquire);
+}
+
+fn releaseStart() void {
+    mutex.lockUncancelable(main.io);
+    starting = null;
+    mutex.unlock(main.io);
+}
+
+fn prepareMeeting(sess: *Session, s: @import("settings.zig").Settings, arena: std.mem.Allocator) !void {
+    const with_mic = s.meetings.mic and models.test_audio == null;
+    const rec = meetings.begin(with_mic) catch |err| return oriel.ipc.fail("Could not create the meeting's folder ({s}).", .{@errorName(err)});
+    sess.rec = rec;
+    // Live labels when the speaker model is already here (never a download mid-meeting).
+    if (sess.mode == .captions and speakers.available and s.meetings.speakers and s.meetings.liveSpeakers) {
+        const model = if (s.meetings.speakerModel.len > 0) s.meetings.speakerModel else speakers.default_model;
+        if (speakers.isDownloaded(arena, model)) {
+            sess.speaker_model = try gpa.dupe(u8, model);
+            const path = meetings.voicesPath(arena) catch "";
+            sess.known_voices = (voices.load(main.io, sess.known.allocator(), path) catch voices.File{}).voices;
+        }
+    }
+    if (with_mic) {
+        sess.mic = true;
+        sess.mic_source = dictation.pickMicrophone(s.dictation.device) catch |err| blk: {
+            log.warn("meeting microphone \"{s}\": {s}", .{ s.dictation.device, @errorName(err) });
+            emitError("Microphone \"{s}\" not found: recording system audio only.", .{s.dictation.device});
+            meetings.dropMic(rec);
+            sess.mic = false;
+            break :blk null;
+        };
+    }
+}
+
+fn openSession(sess: *Session) !void {
+    sess.capture_thread = try std.Thread.spawn(.{}, Session.captureLoop, .{sess});
+    if (sess.mic) sess.mic_thread = try std.Thread.spawn(.{}, Session.micLoop, .{sess});
+    // Fail the start (like the Tauri app) when the source doesn't open.
+    var waited: u32 = 0;
+    while (sess.opened.load(.acquire) == 0 and waited < 3000) : (waited += 20) {
+        main.io.sleep(.fromMilliseconds(20), .awake) catch break;
+    }
+    if (sess.opened.load(.acquire) != 1) return oriel.ipc.fail("Could not open the audio source \"{s}\".", .{sess.source.?});
+    if (sess.mode == .captions) sess.worker_thread = try std.Thread.spawn(.{}, Session.workerLoop, .{sess});
+}
+
 /// Start a session; returns the device name (in `arena`). Slow work (device
 /// list, model load, opening the source) runs without holding `mutex`.
 /// error.Cancelled: a stop came meanwhile, nothing is capturing.
-fn start(arena: std.mem.Allocator) ![]const u8 {
-    if (isRunning()) return oriel.ipc.fail("Captions are already running.", .{});
-    if (starting.swap(true, .acq_rel)) return oriel.ipc.fail("Captions are already starting.", .{});
-    defer starting.store(false, .release);
-    const gen = cancel_gen.load(.acquire);
+fn start(arena: std.mem.Allocator, mode: CaptureMode) ![]const u8 {
+    const gen = try acquireStart(mode);
+    defer releaseStart();
 
     const s = try main.shared.get(main.io, arena);
     const c = s.captions;
-    if (!models.isDownloaded(main.io, gpa, c.model))
+    if (mode == .captions and !models.isDownloaded(main.io, gpa, c.model))
         return oriel.ipc.fail("Whisper model \"{s}\" isn't downloaded yet. Download it in Settings → Captions.", .{c.model});
 
     const source = if (models.test_audio != null) try gpa.dupeZ(u8, "test-audio") else pickSource(c.device) catch |err| return switch (@as(anyerror, err)) {
@@ -406,46 +462,17 @@ fn start(arena: std.mem.Allocator) ![]const u8 {
         else => oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)}),
     };
     defer gpa.free(source);
-    models.ensure(main.io, gpa, c.model) catch |err| return oriel.ipc.fail("Could not load the whisper model \"{s}\" ({s}).", .{ c.model, @errorName(err) });
+    if (mode == .captions)
+        models.ensure(main.io, gpa, c.model) catch |err| return oriel.ipc.fail("Could not load the whisper model \"{s}\" ({s}).", .{ c.model, @errorName(err) });
 
-    const sess = try Session.create(source, c);
+    const sess = try Session.create(source, c, mode);
     // A meeting that fails to start records under a second: destroy()
     // removes its folder again.
     errdefer sess.destroy();
     translate_live.store(c.aiTranslate, .release);
-    if (meeting_live.load(.acquire)) {
-        const with_mic = s.meetings.mic and models.test_audio == null;
-        const rec = meetings.begin(with_mic) catch |err| return oriel.ipc.fail("Could not create the meeting's folder ({s}).", .{@errorName(err)});
-        sess.rec = rec;
-        // Live labels when the speaker model is already here (never a download mid-meeting).
-        if (speakers.available and s.meetings.speakers and s.meetings.liveSpeakers) {
-            const model = if (s.meetings.speakerModel.len > 0) s.meetings.speakerModel else speakers.default_model;
-            if (speakers.isDownloaded(arena, model)) {
-                sess.speaker_model = try gpa.dupe(u8, model);
-                const path = meetings.voicesPath(arena) catch "";
-                sess.known_voices = (voices.load(main.io, sess.known.allocator(), path) catch voices.File{}).voices;
-            }
-        }
-        if (with_mic) {
-            sess.mic = true;
-            sess.mic_source = dictation.pickMicrophone(s.dictation.device) catch |err| blk: {
-                log.warn("meeting microphone \"{s}\": {s}", .{ s.dictation.device, @errorName(err) });
-                emitError("Microphone \"{s}\" not found: recording system audio only.", .{s.dictation.device});
-                meetings.dropMic(rec);
-                sess.mic = false;
-                break :blk null;
-            };
-        }
-    }
-    sess.capture_thread = try std.Thread.spawn(.{}, Session.captureLoop, .{sess});
-    if (sess.mic) sess.mic_thread = try std.Thread.spawn(.{}, Session.micLoop, .{sess});
-    // Fail the start (like the Tauri app) when the source doesn't open.
-    var waited: u32 = 0;
-    while (sess.opened.load(.acquire) == 0 and waited < 3000) : (waited += 20) {
-        main.io.sleep(.fromMilliseconds(20), .awake) catch break;
-    }
-    if (sess.opened.load(.acquire) == 2) return oriel.ipc.fail("Could not open the audio source \"{s}\".", .{source});
-    sess.worker_thread = try std.Thread.spawn(.{}, Session.workerLoop, .{sess});
+    if (mode == .meeting or meeting_live.load(.acquire)) try prepareMeeting(sess, s, arena);
+    try openSession(sess);
+    const result = try arena.dupe(u8, source);
 
     mutex.lockUncancelable(main.io);
     if (cancel_gen.load(.acquire) != gen) {
@@ -453,32 +480,99 @@ fn start(arena: std.mem.Allocator) ![]const u8 {
         mutex.unlock(main.io);
         return error.Cancelled;
     }
-    const old = session;
     session = sess;
     mutex.unlock(main.io);
-    if (old) |o| o.destroy();
-    events.emit(.@"ghostpen://captions-started", .{});
-    return arena.dupe(u8, source);
+    if (mode == .captions) events.emit(.@"ghostpen://captions-started", .{});
+    return result;
 }
 
 /// Stop the running session. The threads are joined off the calling thread,
 /// so the UI never waits for a transcription in flight.
-fn stop() void {
+fn stop(mode: CaptureMode) void {
     mutex.lockUncancelable(main.io);
-    _ = cancel_gen.fetchAdd(1, .acq_rel);
+    if (starting == mode) _ = cancel_gen.fetchAdd(1, .acq_rel);
     const s = session orelse {
         mutex.unlock(main.io);
         return;
     };
+    if ((mode == .captions and s.mode != .captions) or (mode == .meeting and s.rec == null)) {
+        mutex.unlock(main.io);
+        return;
+    }
+    _ = cancel_gen.fetchAdd(1, .acq_rel);
     session = null;
+    stopping = true;
     mutex.unlock(main.io);
     s.running.store(false, .release);
     // Not recording any more for the overlay; destroy() still closes the tracks.
     if (s.rec) |r| meetings.markStopped(r);
-    if (std.Thread.spawn(.{}, Session.destroy, .{s})) |t| t.detach() else |err| {
+    if (std.Thread.spawn(.{}, finishStop, .{s})) |t| t.detach() else |err| {
         log.warn("cannot spawn the stop thread ({s}): stopping on this one", .{@errorName(err)});
-        s.destroy();
+        finishStop(s);
     }
+}
+
+fn finishStop(s: *Session) void {
+    s.destroy();
+    mutex.lockUncancelable(main.io);
+    stopping = false;
+    mutex.unlock(main.io);
+}
+
+pub const MeetingCaptureStatus = struct {
+    starting: bool,
+    stopping: bool,
+    captions_running: bool,
+    recording: ?meetings.RecordingStatus,
+};
+
+pub fn meetingStatus(arena: std.mem.Allocator) !MeetingCaptureStatus {
+    mutex.lockUncancelable(main.io);
+    defer mutex.unlock(main.io);
+    return .{
+        .starting = starting == .meeting,
+        .stopping = stopping,
+        .captions_running = starting == .captions or (if (session) |s| s.mode == .captions else false),
+        .recording = if (session != null) try meetings.recordingStatus(arena) else null,
+    };
+}
+
+pub fn startMeeting(arena: std.mem.Allocator) !?meetings.RecordingStatus {
+    _ = start(arena, .meeting) catch |err| return if (err == error.Cancelled) null else err;
+    return meetings.recordingStatus(arena);
+}
+
+pub fn stopMeeting() void {
+    stop(.meeting);
+}
+
+test "recording-only capture does not buffer audio for live transcription" {
+    main.io = std.testing.io;
+    const settings: @import("settings.zig").Captions = .{};
+    const recorder = try Session.create("test", settings, .meeting);
+    defer recorder.destroy();
+    recorder.append(&.{ 0.1, 0.2, 0.3 });
+    recorder.appendMic(&.{ 0.4, 0.5 });
+    try std.testing.expectEqual(@as(usize, 0), recorder.samples.items.len);
+    try std.testing.expectEqual(@as(usize, 0), recorder.mic_samples.items.len);
+    const captions = try Session.create("test", settings, .captions);
+    defer captions.destroy();
+    captions.append(&.{ 0.1, 0.2, 0.3 });
+    captions.appendMic(&.{ 0.4, 0.5 });
+    try std.testing.expectEqual(@as(usize, 3), captions.samples.items.len);
+    try std.testing.expectEqual(@as(usize, 2), captions.mic_samples.items.len);
+}
+
+test "capture startup is exclusive and cancellation respects its owner" {
+    main.io = std.testing.io;
+    const gen = try acquireStart(.meeting);
+    defer releaseStart();
+    try std.testing.expectError(error.CommandFailed, acquireStart(.captions));
+    try std.testing.expectError(error.CommandFailed, acquireStart(.meeting));
+    stop(.captions);
+    try std.testing.expectEqual(gen, cancel_gen.load(.acquire));
+    stop(.meeting);
+    try std.testing.expect(cancel_gen.load(.acquire) != gen);
 }
 
 /// Show the overlay with its controls (leave ghost mode), at the bottom.
@@ -492,7 +586,10 @@ pub fn open() void {
 
 /// The `--captions` hotkey: stop and hide when running, else show and start.
 pub fn toggle() void {
-    if (starting.load(.acquire)) return;
+    mutex.lockUncancelable(main.io);
+    const blocked = starting != null or stopping or (if (session) |s| s.mode == .meeting else false);
+    mutex.unlock(main.io);
+    if (blocked) return;
     if (isRunning()) {
         const t = std.Thread.spawn(.{}, stopAndHide, .{}) catch return;
         t.detach();
@@ -504,7 +601,7 @@ pub fn toggle() void {
 }
 
 fn stopAndHide() void {
-    stop();
+    stop(.captions);
     App.runOnMain({}, struct {
         fn hide(_: void) void {
             if (App.getWindow("captions")) |w| w.hide();
@@ -515,7 +612,7 @@ fn stopAndHide() void {
 fn startFromToggle() void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    _ = start(arena.allocator()) catch |err| {
+    _ = start(arena.allocator(), .captions) catch |err| {
         if (err == error.Cancelled) return;
         const msg = if (err == error.CommandFailed) oriel.ipc.errorText(err) else @errorName(err);
         events.emit(.@"ghostpen://caption-error", msg);
@@ -582,7 +679,7 @@ pub const Commands = struct {
 
     /// "" when a stop came during the start (quietly not capturing).
     pub fn captions_start(arena: std.mem.Allocator) ![]const u8 {
-        const device = start(arena) catch |err| return if (err == error.Cancelled) "" else err;
+        const device = start(arena, .captions) catch |err| return if (err == error.Cancelled) "" else err;
         App.runOnMain({}, struct {
             fn show(_: void) void {
                 const w = App.ensureWindow("captions") catch |err| return log.err("captions window: {s}", .{@errorName(err)});
@@ -593,7 +690,7 @@ pub const Commands = struct {
     }
 
     pub fn captions_stop(_: std.mem.Allocator) void {
-        stop();
+        stop(.captions);
     }
 
     pub fn captions_set_click_through(_: std.mem.Allocator, args: struct { enable: bool }) void {

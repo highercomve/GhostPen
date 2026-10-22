@@ -120,6 +120,28 @@ Keep the recording, speaker-labelled transcript, clean text, summary, and saved
 questions together. Play the audio while following individual words, jump to a
 line, or ask for decisions and action items with timestamps you can revisit.
 
+Open **Meetings** and choose **Record meeting** to capture system audio and
+the microphone configured in Settings without showing live captions. Choose
+**Stop and save** when finished: the existing save flow prepares the transcript,
+speaker labels, clean text, and optional summary. Recording continues if you
+hide the window; reopen Meetings to stop it. A recording does not require
+Whisper to be loaded, but transcription after stopping needs the configured
+model downloaded. Live captions and recording share audio capture, so stop
+one before starting the other.
+
+The meeting notebook uses the same paper-and-ink reader design as link
+summaries, with saved conversations beside the transcript, summary, and
+questions. You can browse earlier meetings while recording a new one.
+
+The **Notes** tab is your own notebook for each meeting. Write during recording
+or afterwards; notes save automatically, with Markdown preview and a manual
+**Save notes** button. They are stored as `notes.md` in the meeting folder and
+kept when you rerun transcription or summarization.
+
+Use the meeting's **Chat** tab to ask questions across its transcript, clean
+text, personal notes, summary, and earlier questions. Latest note edits are
+saved before asking. Answers distinguish personal notes from spoken content.
+
 Turn on **🎙 Meeting** in the captions bar, then Start: the captions also
 record what your computer plays and your microphone ("Me"). Stop saves the
 meeting in `Documents/GhostPen/Meetings/<date>_<time>/`: the whole audio is
@@ -365,6 +387,7 @@ npm --prefix frontend test # Summary component: channels, toggle, Copy/TTS, snap
 zig build test            # AI client, settings, images, models
 tests/e2e.sh              # headless: select → trigger → Proofread → pasted; Playground streaming
 tests/e2e-audio.sh        # headless: captions overlay, dictation → proofread → clipboard
+RECORD_ONLY=1 tests/e2e-meetings.sh # Meetings recorder → transcript, summary, playback
 ```
 
 The Summary regression fixture in `src/fixtures/summary-gemma4-e4b.json` records

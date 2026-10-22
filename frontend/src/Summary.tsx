@@ -20,7 +20,9 @@ const STAGE: Record<string, string> = {
   error: "Couldn't summarize this link",
 };
 
-const URL_SHAPE = /^https?:\/\/\S+$/i;
+// What the box takes: web links (http/https/file) or files on this
+// machine (~/words.md, /home/me/doc, ./relative, ../back).
+const TARGET_SHAPE = /^(?:https?:\/\/\S+|file:\/\/\S+|(?:~\/|\.\.\/|\.\/|\/)\S*)$/;
 
 // The summary's links open in the browser, never inside this window
 // (markdown.ts only writes http(s) hrefs).
@@ -211,7 +213,7 @@ export default function Summary() {
     clipboardText()
       .then((t) => {
         const u = t.trim();
-        if (URL_SHAPE.test(u)) setUrl(u);
+        if (TARGET_SHAPE.test(u)) setUrl(u);
       })
       .catch(() => {});
   }, []);
@@ -248,11 +250,11 @@ export default function Summary() {
   }, []);
 
   const running = pending || (state.state !== "" && state.state !== "ready" && state.state !== "error");
-  const canGo = URL_SHAPE.test(url.trim()) && !running;
+  const canGo = TARGET_SHAPE.test(url.trim()) && !running;
 
   const go = async () => {
     const u = url.trim();
-    if (!URL_SHAPE.test(u) || running) return;
+    if (!TARGET_SHAPE.test(u) || running) return;
     setPending(true);
     try {
       await summarizeLink(u, level, reader.showThinking);
@@ -332,7 +334,7 @@ export default function Summary() {
       </header>
 
       <details className="summary-source" open={!html}>
-        <summary hidden={!html}><Icon name="link" /> Summarize another link <span>+</span></summary>
+        <summary hidden={!html}><Icon name="link" /> Summarize another link or file <span>+</span></summary>
         <form
           className="summary-bar"
           onSubmit={(e) => {
@@ -340,14 +342,14 @@ export default function Summary() {
             void go();
           }}
         >
-          <label className="summary-label" htmlFor="summary-url">Start with a link</label>
+          <label className="summary-label" htmlFor="summary-url">Start with a link or a file</label>
           <div className="summary-url-field">
             <Icon name="link" />
             <input
               id="summary-url"
               className="summary-url"
-              type="url"
-              placeholder="Paste an article or webpage URL…"
+              type="text"
+              placeholder="Paste an article URL or a file path (~/notes.md)…"
               value={url}
               disabled={running}
               spellCheck={false}

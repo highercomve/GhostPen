@@ -567,6 +567,22 @@ export interface MeetingNote {
   answer: string;
   /** Milliseconds since the epoch. */
   askedAt: number;
+  stats?: MeetingChatStats | null;
+}
+
+export interface MeetingChatStats {
+  model: string; backend: string; contextTokens: number;
+  elapsedMs: number; queueMs: number; conversationMs: number; loadMs: number;
+  prefillMs: number | null; generationMs: number | null;
+  promptTokens: number | null; evaluatedTokens: number | null; cachedTokens: number | null; generatedTokens: number | null;
+  firstTokenMs: number | null; requests: number;
+}
+export interface MeetingChatProgress {
+  id: string; prompt: string;
+  stage: "loading_conversation" | "waiting" | "loading_model" | "prefilling" | "generating" | "complete";
+  stats: MeetingChatStats;
+  prefilledTokens: number | null; prefillTotalTokens: number | null;
+  part: number; parts: number;
 }
 
 export interface Meeting {
@@ -612,6 +628,8 @@ export interface MeetingDetail {
   folder: string;
   /** Being recorded or processed: not editable yet. */
   busy: boolean;
+  /** Personal Markdown notes, independent of AI questions and answers. */
+  personalNotes?: string;
 }
 
 /** Payload of `ghostpen://meeting`: the save pipeline's progress (0–1 within the state). */
@@ -626,9 +644,20 @@ export type MeetingEdit = Partial<Pick<Meeting, "title" | "speakers" | "segments
 export type MeetingExport = "transcript" | "final" | "srt" | "text" | "summary";
 
 export const openMeetings = () => invoke<void>("open_meetings");
+export interface MeetingRecordingStatus {
+  starting: boolean;
+  stopping: boolean;
+  captions_running: boolean;
+  recording: { id: string; seconds: number } | null;
+}
+export const meetingsRecordingStatus = () => invoke<MeetingRecordingStatus>("meetings_recording_status");
+export const meetingsStartRecording = () => invoke<MeetingRecordingStatus["recording"]>("meetings_start_recording");
+export const meetingsStopRecording = () => invoke<void>("meetings_stop_recording");
 export const meetingsList = (query = "") => invoke<MeetingSummary[]>("meetings_list", { query });
 export const meetingsGet = (id: string) => invoke<MeetingDetail>("meetings_get", { id });
 export const meetingsUpdate = (id: string, edit: MeetingEdit) => invoke<Meeting>("meetings_update", { id, ...edit });
+export const meetingsSaveNotes = (id: string, text: string) => invoke<void>("meetings_save_notes", { id, text });
+export const meetingsChatStatus = (id: string) => invoke<MeetingChatProgress | null>("meetings_chat_status", { id });
 export const meetingsDelete = (id: string) => invoke<void>("meetings_delete", { id });
 /** Run a step again: "transcribe" (and what follows), "speakers" or "proofread". */
 export const meetingsReprocess = (id: string, step: "transcribe" | "speakers" | "proofread" | "summary") =>

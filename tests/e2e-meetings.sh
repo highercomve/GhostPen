@@ -12,6 +12,8 @@
 # RECORD_SECONDS=how long to record it (default 10), EXPECT_SPEAKERS=n to
 # check the count, and TRUTH="s1 s2 s1 …" (the speaker of each line, in
 # order) to check who said what.
+# RECORD_ONLY=1 exercises Record meeting / Stop and save in Meetings,
+# without the captions overlay or any live transcription.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 oriel_repo="${ORIEL_REPO:-$here/../oriel}"
@@ -30,7 +32,7 @@ if [ -n "${SPEAKER_MODEL:-}" ]; then
 fi
 audio="${TEST_AUDIO:-$here/tests/speech.wav}"
 meetings="$tmp/Meetings"
-printf '{"settings":{"activeProfileId":"m","profiles":[{"id":"m","name":"Mock","baseUrl":"http://127.0.0.1:18766/v1","model":"mock","temperature":0.2}],"captions":{"model":"tiny","chunkSeconds":3},"meetings":{"enabled":true,"dir":"%s","proofread":true,"summary":true,"speakers":%s}}}' "$meetings" "$([ -n "${SPEAKER_MODEL:-}" ] && echo true || echo false)" \
+printf '{"settings":{"activeProfileId":"m","profiles":[{"id":"m","name":"Mock","baseUrl":"http://127.0.0.1:18766/v1","model":"mock","temperature":0.2}],"captions":{"model":"tiny","chunkSeconds":3},"meetings":{"enabled":%s,"dir":"%s","proofread":true,"summary":true,"speakers":%s}}}' "$([ "${RECORD_ONLY:-0}" = 1 ] && echo false || echo true)" "$meetings" "$([ -n "${SPEAKER_MODEL:-}" ] && echo true || echo false)" \
   > "$XDG_CONFIG_HOME/dev.ghostpen.Oriel/settings.json"
 python3 "$here/tests/mock_openai.py" 18766 & mock=$!
 app="$here/zig-out/bin/ghostpen"
@@ -39,11 +41,26 @@ sleep 4
 fail=0
 check() { if eval "$2"; then echo "ok: $1"; else echo "FAIL: $1"; fail=1; fi; }
 
-"$app" --captions; sleep "${RECORD_SECONDS:-10}"
+if [ "${RECORD_ONLY:-0}" = 1 ]; then
+  "$app" --meetings
+  sleep 2
+  window=$(xdotool search --onlyvisible --name 'GhostPen Meetings' | tail -1)
+  # The default 1040x760 Meetings window: Record / Stop in the reader header.
+  xdotool mousemove --window "$window" 930 70 click 1
+else
+  "$app" --captions
+fi
+sleep "${RECORD_SECONDS:-10}"
 import -window root "$out/meeting-recording.png"
 id=$(ls "$meetings" 2>/dev/null | head -1)
 check "a meeting folder while recording ($id)" '[ -n "$id" ] && [ -f "$meetings/$id/others.wav" ]'
-"$app" --captions   # stop → save
+if [ "${RECORD_ONLY:-0}" = 1 ]; then
+  check "the captions overlay stayed hidden" '! xdotool search --onlyvisible --name "GhostPen Captions" >/dev/null 2>&1'
+  check "no live Whisper helper during recording" '! ps --ppid "$pid" -o args= | grep -q -- "--whisper-helper"'
+  xdotool mousemove --window "$window" 930 70 click 1
+else
+  "$app" --captions   # stop → save
+fi
 for _ in $(seq 180); do
   # Saved, and the test question (GHOSTPEN_TEST_ASK) answered after it.
   grep -q '"state": "ready"\|"state": "error"' "$meetings/$id/meeting.json" 2>/dev/null &&

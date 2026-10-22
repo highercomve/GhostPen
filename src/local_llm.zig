@@ -63,6 +63,7 @@ pub const Chat = struct {
     /// The context this request needs, when more than `Config.ctx`: the
     /// runner restarts with it (and keeps it until it stops).
     ctx: ?u32 = null,
+    observer: ?@import("ai_observer.zig").Observer = null,
 };
 
 pub const Result = struct {
@@ -211,6 +212,7 @@ fn chatImpl(
     diag: *[]const u8,
 ) Error!Result {
     const s = &chat_slot;
+    if (req.observer) |o| o.emit(.{ .stage = .waiting });
     s.mutex.lockUncancelable(io);
     defer s.mutex.unlock(io);
     s.busy.store(true, .release);
@@ -237,7 +239,17 @@ fn chatImpl(
     }
     var ccfg = chatConfig(cfg);
     if (req.ctx) |n| ccfg.ctx = @max(ccfg.ctx, n);
+    const reused = if (s.runner) |r| std.mem.eql(u8, r.key, try keyOf(arena, ccfg)) and r.requested_ctx >= ccfg.ctx else false;
+    if (!reused) if (req.observer) |o| o.emit(.{ .stage = .loading_model, .stats = .{ .model = std.fs.path.basename(ccfg.model) } });
+    const load_began = std.Io.Clock.awake.now(io);
     const r = try ensure(io, s, gpa, arena, ccfg, diag);
+    var observed: @import("ai_observer.zig").Stats = .{
+        .model = std.fs.path.basename(ccfg.model),
+        .backend = r.gpu,
+        .contextTokens = r.ctx,
+        .loadMs = if (reused) 0 else @intCast(@max(load_began.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0)),
+    };
+    if (req.observer) |o| o.emit(.{ .stage = .prefilling, .stats = observed });
     metrics.requestStarted(io, std.fs.path.basename(ccfg.model), r.gpu, r.ctx);
     const id = r.next_id;
     r.next_id += 1;
@@ -306,6 +318,9 @@ fn chatImpl(
         gen_tokens: u64 = 0,
         prompt_ms: u64 = 0,
         gen_ms: u64 = 0,
+        cached_tokens: u64 = 0,
+        processed_tokens: ?u64 = null,
+        stage: ?[]const u8 = null,
         // A `request`'s answer: what each token added, then the message.
         reasoning: ?[]const u8 = null,
         content: ?[]const u8 = null,
@@ -360,6 +375,14 @@ fn chatImpl(
                 .gen_tokens = msg.gen_tokens,
                 .gen_ms = msg.gen_ms,
             });
+            observed.promptTokens = msg.prompt_tokens;
+            observed.cachedTokens = msg.cached_tokens;
+            observed.evaluatedTokens = (msg.processed_tokens orelse msg.prompt_tokens) -| msg.cached_tokens;
+            observed.prefillMs = msg.prompt_ms;
+            observed.generatedTokens = msg.gen_tokens;
+            observed.generationMs = msg.gen_ms;
+            const prefilling = if (msg.stage) |stage| std.mem.eql(u8, stage, "prefilling") else false;
+            if (req.observer) |o| o.emit(.{ .stage = if (prefilling) .prefilling else .generating, .stats = observed, .prefilledTokens = msg.processed_tokens });
             continue;
         }
         if (msg.delta) |d| {
@@ -381,6 +404,14 @@ fn chatImpl(
             }
         }
         if (msg.done) {
+            observed.promptTokens = msg.prompt_tokens;
+            observed.cachedTokens = msg.cached_tokens;
+            observed.evaluatedTokens = msg.prompt_tokens -| msg.cached_tokens;
+            observed.prefillMs = msg.prompt_ms;
+            observed.generatedTokens = msg.gen_tokens;
+            observed.generationMs = msg.gen_ms;
+            observed.requests = 1;
+            if (req.observer) |o| o.emit(.{ .stage = .complete, .stats = observed, .prefilledTokens = msg.prompt_tokens });
             if (channels) (if (msg.cancelled or msg.truncated) normalized.cancel(ctx, on_chunk) else normalized.finish(ctx, on_chunk)) catch |err| {
                 if (err == error.OutOfMemory) return error.OutOfMemory;
                 diag.* = ai_stream.limit_message;
@@ -544,9 +575,35 @@ fn tail(io: std.Io, s: *Slot, arena: std.mem.Allocator) []const u8 {
     s.tail_mutex.lockUncancelable(io);
     defer s.tail_mutex.unlock(io);
     const t = std.mem.trim(u8, s.tail_buf[0..s.tail_len], " \t\r\n");
-    // The last line is usually the one that explains.
-    const last = if (std.mem.lastIndexOfScalar(u8, t, '\n')) |i| t[i + 1 ..] else t;
-    return arena.dupe(u8, last) catch "";
+    return arena.dupe(u8, diagnosticLine(t)) catch "";
+}
+
+fn gpuLoadError(text: []const u8) bool {
+    for ([_][]const u8{ "CUDA error", "out of memory", "cudaMalloc", "Metal", "GGML_ASSERT(buffer)", "failed to allocate", "ErrorOutOfDeviceMemory" }) |marker| {
+        if (std.mem.indexOf(u8, text, marker) != null) return true;
+    }
+    return false;
+}
+
+/// A crash reporter may append unrelated warnings after the actual failure.
+/// Preserve the GPU failure so both the user and the CPU fallback see it.
+fn diagnosticLine(text: []const u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var last: []const u8 = "";
+    var gpu: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        if (line.len > 0) last = line;
+        if (gpuLoadError(line)) gpu = line;
+    }
+    return gpu orelse last;
+}
+
+test "GPU fallback survives trailing crash reporter warnings" {
+    const diagnostic = diagnosticLine("cudaMalloc failed: out of memory\nGGML_ASSERT(buffer) failed\nwarning: terminal does not support styling\n");
+    try std.testing.expect(gpuLoadError(diagnostic));
+    try std.testing.expectEqualStrings("GGML_ASSERT(buffer) failed", diagnostic);
+    try std.testing.expectEqualStrings("unsupported model file", diagnosticLine("loading\nunsupported model file\n"));
+    try std.testing.expect(!gpuLoadError("unsupported model file"));
 }
 
 /// The slot's runner for `cfg`, started (and the model loaded) if needed.
@@ -677,11 +734,7 @@ fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator,
                 "The built-in model took more than 10 minutes to load and was stopped."
             else
                 std.fmt.allocPrint(arena, "The built-in model could not be loaded{s}{s}", .{ if (why.len > 0) ": " else ".", why }) catch "The built-in model could not be loaded.";
-            const gpu_error = std.mem.indexOf(u8, why, "CUDA error") != null or std.mem.indexOf(u8, why, "out of memory") != null or
-                std.mem.indexOf(u8, why, "cudaMalloc") != null or std.mem.indexOf(u8, why, "Metal") != null or
-                // An allocation that failed (GPU memory taken by another app).
-                std.mem.indexOf(u8, why, "GGML_ASSERT(buffer)") != null or std.mem.indexOf(u8, why, "failed to allocate") != null or
-                std.mem.indexOf(u8, why, "ErrorOutOfDeviceMemory") != null;
+            const gpu_error = gpuLoadError(why);
             if (cfg.gpu and gpu_error and !deadline.timed_out.load(.acquire)) return error.GpuFailed;
             return error.LocalFailed;
         };

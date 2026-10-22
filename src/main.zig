@@ -183,6 +183,8 @@ pub const Events = struct {
     /// A meeting's save pipeline (src/meetings.zig): its state and progress
     /// (0–1 within the state); `message` an error or a note.
     @"ghostpen://meeting": struct { id: []const u8, state: []const u8, progress: f64, message: []const u8 },
+    @"ghostpen://meeting-answer": struct { id: []const u8, prompt: []const u8, text: []const u8, reset: bool },
+    @"ghostpen://meeting-chat-progress": meetings.ChatStatus,
 };
 
 /// The typed emitter for `Events` (any thread).
@@ -624,18 +626,20 @@ fn imageFail(err: anyerror) error{CommandFailed} {
 
 pub const Commands = struct {
     pub const async_commands = .{
-        "get_selection",           "extract_image_text",   "process_ai_action",       "process_ai_custom",
-        "process_text",            "process_text_stream",  "fetch_models",            "captions_start",
-        "captions_download_model", "dictation_start",      "captions_list_devices",   "dictation_list_devices",
-        "llm_models_status",       "llm_download_model",   "llm_delete_model",        "llm_unload",
-        "menu_dismissed",          "update_check",         "update_install",          "whisper_models_status",
-        "whisper_download_model",  "whisper_delete_model", "summarize_link",          "summary_state",
-        "export_summary",          "tts_speak",            "tts_state",               "tts_catalog",
-        "tts_download",            "tts_delete",           "tts_warm_up",             "paste_result",
-        "meetings_list",           "meetings_get",         "meetings_update",         "meetings_delete",
-        "meetings_reprocess",      "meetings_export",      "meetings_open_folder",    "meetings_release_audio",
-        "meetings_folder",         "meetings_voices",      "meetings_remember_voice", "meetings_forget_voice",
-        "meetings_ask",
+        "get_selection",            "extract_image_text",      "process_ai_action",         "process_ai_custom",
+        "process_text",             "process_text_stream",     "fetch_models",              "captions_start",
+        "captions_download_model",  "dictation_start",         "captions_list_devices",     "dictation_list_devices",
+        "llm_models_status",        "llm_download_model",      "llm_delete_model",          "llm_unload",
+        "menu_dismissed",           "update_check",            "update_install",            "whisper_models_status",
+        "whisper_download_model",   "whisper_delete_model",    "summarize_link",            "summary_state",
+        "export_summary",
+        "tts_speak",                "tts_state",               "tts_catalog",               "tts_download",
+        "tts_delete",               "tts_warm_up",             "paste_result",              "meetings_list",
+        "meetings_get",             "meetings_update",         "meetings_delete",           "meetings_reprocess",
+        "meetings_export",          "meetings_open_folder",    "meetings_release_audio",    "meetings_folder",
+        "meetings_voices",          "meetings_remember_voice", "meetings_forget_voice",     "meetings_ask",
+        "meetings_start_recording", "meetings_stop_recording", "meetings_recording_status", "meetings_save_notes",
+        "meetings_chat_status",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -873,8 +877,9 @@ pub const Commands = struct {
         return out;
     }
 
-    /// Read a URL (menu selection), summarize its document with the active
-    /// profile and stream the answer to the summary window as Markdown.
+    /// Read a URL or a file on this machine (menu selection), summarize its
+    /// document with the active profile and stream the answer to the
+    /// summary window as Markdown.
     /// Failures of the page or the model report to the window, not the menu
     /// (the menu is already behind the window the user is looking at).
     pub fn summarize_link(arena: std.mem.Allocator, args: struct { url: []const u8, level: ?[]const u8 = null, thinking: bool = false }) !void {
@@ -896,7 +901,18 @@ pub const Commands = struct {
         showWindow("summary", true);
 
         var diag: web_page.Diag = .{};
-        const page = web_page.read(io, gpa, arena, url, &diag) catch |err| blk: {
+        // A web link fetches; anything else (file://, ~/x, /x, ./x, .md …)
+        // is a path on this machine. A bare "//host/x" was meant as a link.
+        const is_http = std.mem.startsWith(u8, url, "http://") or std.mem.startsWith(u8, url, "https://");
+        if (!is_http and std.mem.startsWith(u8, url, "//")) {
+            summarySet("error", url, 0, "Links need a scheme (https://…), or give a file path (~/docs/report.md).");
+            log.warn("summarize: {s}: needs a scheme", .{url});
+            return;
+        }
+        const page = (if (is_http)
+            web_page.read(io, gpa, arena, url, &diag)
+        else
+            web_page.readPath(io, arena, environ_map.get(if (builtin.os.tag == .windows) "USERPROFILE" else "HOME"), url, &diag)) catch |err| blk: {
             const msg: []const u8 = switch (err) {
                 error.AiFailed => diag.message,
                 error.OutOfMemory => "Out of memory reading the page.",
@@ -1147,9 +1163,14 @@ pub const Commands = struct {
     pub const dictation_set_proofread = dictation.Commands.dictation_set_proofread;
     pub const captions_set_meeting = captions.Commands.captions_set_meeting;
     pub const open_meetings = meetings.Commands.open_meetings;
+    pub const meetings_recording_status = meetings.Commands.meetings_recording_status;
+    pub const meetings_start_recording = meetings.Commands.meetings_start_recording;
+    pub const meetings_stop_recording = meetings.Commands.meetings_stop_recording;
     pub const meetings_list = meetings.Commands.meetings_list;
     pub const meetings_get = meetings.Commands.meetings_get;
     pub const meetings_update = meetings.Commands.meetings_update;
+    pub const meetings_save_notes = meetings.Commands.meetings_save_notes;
+    pub const meetings_chat_status = meetings.Commands.meetings_chat_status;
     pub const meetings_delete = meetings.Commands.meetings_delete;
     pub const meetings_reprocess = meetings.Commands.meetings_reprocess;
     pub const meetings_export = meetings.Commands.meetings_export;
@@ -1222,6 +1243,32 @@ var tray: ?*oriel.tray.Tray = null;
 /// white on a dark one). A coloured icon reads as a blob there.
 const tray_mono_png = @embedFile("assets/tray-mono.png");
 
+/// The tray glyph with a red dot: a meeting is recording. In colour on
+/// macOS too (a template image would lose the red).
+const tray_recording_png = @embedFile("assets/tray-recording.png");
+
+/// The usual tray icon, set by `setup` (the app's icon is only there in
+/// the app's build, not the tests').
+var tray_idle_icon: oriel.tray.Icon = .{ .template_png = tray_mono_png };
+
+fn trayIcon(recording: bool) oriel.tray.Icon {
+    return if (recording) .{ .png = tray_recording_png } else tray_idle_icon;
+}
+
+/// Show on the tray icon whether a meeting is recording (any thread: the
+/// icon is set on the main one, from the state at that point, so calls
+/// that land out of order still end on the right icon).
+pub fn refreshTrayIcon() void {
+    App.runOnMain({}, struct {
+        fn run(_: void) void {
+            const t = tray orelse return;
+            const recording = meetings.isRecording();
+            t.setIcon(trayIcon(recording)) catch |err| log.warn("tray icon: {s}", .{@errorName(err)});
+            t.setTooltip(if (recording) "GhostPen: recording a meeting" else "GhostPen") catch {};
+        }
+    }.run);
+}
+
 fn onTrayMenu(id: []const u8, _: ?bool) void {
     const eql = std.mem.eql;
     if (eql(u8, id, "show")) {
@@ -1287,16 +1334,17 @@ fn setup() !void {
     };
     for (windows) |w| App.registerWindow(w) catch |err| log.err("window {s}: {s}", .{ w.label, @errorName(err) });
 
+    tray_idle_icon = switch (builtin.os.tag) {
+        // macOS: a template image follows the menu bar's light/dark
+        // theme without any detection on our side.
+        .macos => .{ .template_png = tray_mono_png },
+        else => .{ .png = app.build.icon.? },
+    };
     tray = oriel.tray.Tray.create(gpa, .{
         .id = settings_mod.app_id,
         .title = "GhostPen",
         .tooltip = "GhostPen",
-        .icon = switch (builtin.os.tag) {
-            // macOS: a template image follows the menu bar's light/dark
-            // theme without any detection on our side.
-            .macos => .{ .template_png = tray_mono_png },
-            else => .{ .png = app.build.icon.? },
-        },
+        .icon = trayIcon(false),
         .menu = &.{
             .{ .item = .{ .id = "show", .label = "Show menu" } },
             .{ .item = .{ .id = "dictate", .label = "Dictation" } },

@@ -11,6 +11,7 @@ const settings = @import("settings.zig");
 const local_llm = @import("local_llm.zig");
 const chat_format = @import("chat_format.zig");
 pub const channels = @import("ai_stream.zig");
+pub const telemetry = @import("ai_observer.zig");
 
 pub const Profile = settings.Profile;
 
@@ -88,7 +89,9 @@ pub const Request = struct {
     profile: Profile,
     system: []const u8,
     user: UserContent,
+    observer: ?telemetry.Observer = null,
 };
+const EndpointUsage = struct { prompt_tokens: ?u64 = null, completion_tokens: ?u64 = null };
 
 /// The request body (`thinking` toggles the backend's reasoning phase, both
 /// spellings: llama.cpp/vLLM `chat_template_kwargs.enable_thinking`, Ollama `think`).
@@ -235,16 +238,24 @@ fn truncate(s: []const u8, max: usize) []const u8 {
 
 /// One non-streamed completion; the reasoning blocks are stripped.
 fn postCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, thinking: bool, diag: *Diag) Error![]const u8 {
+    if (req.observer) |o| o.emit(.{ .stage = .waiting, .stats = .{ .model = req.profile.model, .backend = req.profile.name } });
     const body = try buildBody(arena, req, thinking, false);
     var out: Capped = .{ .arena = arena };
     out.init();
     const status = exchange(io, gpa, arena, .POST, try endpoint(arena, req.profile.baseUrl, "/chat/completions"), req.profile.apiKey, body, &out.writer, diag) catch |err|
         return out.failure(err, diag);
     if (status.class() != .success) return apiError(arena, diag, status, out.list.items);
-    const Resp = struct { choices: []const struct { message: struct { content: ?[]const u8 = null } } };
+    const Resp = struct { usage: ?EndpointUsage = null, choices: []const struct { message: struct { content: ?[]const u8 = null } } };
     const parsed = std.json.parseFromSliceLeaky(Resp, arena, out.list.items, .{ .ignore_unknown_fields = true }) catch
         return failFmt(arena, diag, "Parse error: unexpected response from the endpoint", .{});
     const content = if (parsed.choices.len > 0) parsed.choices[0].message.content orelse "" else "";
+    if (req.observer) |o| o.emit(.{ .stage = .complete, .stats = .{
+        .model = req.profile.model,
+        .backend = req.profile.name,
+        .requests = 1,
+        .promptTokens = if (parsed.usage) |usage| usage.prompt_tokens else null,
+        .generatedTokens = if (parsed.usage) |usage| usage.completion_tokens else null,
+    } });
     return stripReasoning(arena, content);
 }
 
@@ -264,6 +275,7 @@ fn localCompletion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator,
         .think = thinking,
         .max_tokens = max_tokens,
         .image = image,
+        .observer = req.observer,
     }, ctx, on_chunk, &message) catch |err| switch (err) {
         error.LocalFailed => return fail(diag, message),
         error.OutOfMemory => return error.OutOfMemory,
@@ -312,11 +324,15 @@ pub fn completeStream(
 ) Error![]const u8 {
     const Forward = struct {
         ctx: @TypeOf(ctx),
+        observer: ?telemetry.Observer,
+        model: []const u8,
+        backend: []const u8,
         fn chunk(self: *@This(), delta: channels.Delta) void {
+            if (delta.channel == .answer and delta.text.len > 0) if (self.observer) |o| o.emit(.{ .stage = .generating, .stats = .{ .model = self.model, .backend = self.backend } });
             if (delta.channel == .answer) on_chunk(self.ctx, delta.text);
         }
     };
-    var forward: Forward = .{ .ctx = ctx };
+    var forward: Forward = .{ .ctx = ctx, .observer = if (req.profile.isLocal()) null else req.observer, .model = req.profile.model, .backend = req.profile.name };
     return completeStreamChannels(io, gpa, arena, req, false, &forward, Forward.chunk, diag);
 }
 
@@ -347,6 +363,7 @@ pub fn completeStreamChannels(
             .temperature = req.profile.temperature,
             .think = thinking,
             .max_tokens = max_tokens,
+            .observer = req.observer,
         }, ctx, on_chunk, &message) catch |err| switch (err) {
             error.LocalFailed => return fail(diag, message),
             error.OutOfMemory => return error.OutOfMemory,
@@ -355,6 +372,7 @@ pub fn completeStreamChannels(
         return checked(std.mem.trim(u8, res.text, " \t\r\n"), req, diag);
     }
     const body = try buildBody(arena, req, thinking, true);
+    if (req.observer) |o| o.emit(.{ .stage = .waiting, .stats = .{ .model = req.profile.model, .backend = req.profile.name } });
     var sink: SseSink(@TypeOf(ctx), on_chunk) = .{ .arena = arena, .ctx = ctx };
     sink.init();
     const status = exchange(io, gpa, arena, .POST, try endpoint(arena, req.profile.baseUrl, "/chat/completions"), req.profile.apiKey, body, &sink.writer, diag) catch |err| {
@@ -370,6 +388,14 @@ pub fn completeStreamChannels(
     if (sink.oom) return error.OutOfMemory;
     if (sink.too_large) return fail(diag, too_large);
     if (status.class() != .success) return apiError(arena, diag, status, sink.raw.items);
+
+    if (req.observer) |o| o.emit(.{ .stage = .complete, .stats = .{
+        .model = req.profile.model,
+        .backend = req.profile.name,
+        .requests = 1,
+        .promptTokens = if (sink.usage) |usage| usage.prompt_tokens else null,
+        .generatedTokens = if (sink.usage) |usage| usage.completion_tokens else null,
+    } });
 
     const out = std.mem.trim(u8, sink.normalized.answer.items, " \t\r\n");
     return checked(out, req, diag);
@@ -387,6 +413,7 @@ fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, channels.Delta) void)
         /// The start of the body, for error messages.
         raw: std.ArrayList(u8) = .empty,
         done: bool = false,
+        usage: ?EndpointUsage = null,
         oom: bool = false,
         /// A line or the whole body went past its cap.
         too_large: bool = false,
@@ -482,12 +509,13 @@ fn SseSink(comptime Ctx: type, comptime on_chunk: fn (Ctx, channels.Delta) void)
                 return;
             }
             if (data.len == 0) return;
-            const Chunk = struct { choices: []const struct { delta: struct {
+            const Chunk = struct { usage: ?EndpointUsage = null, choices: []const struct { delta: struct {
                 content: ?[]const u8 = null,
                 reasoning_content: ?[]const u8 = null,
                 reasoning: ?[]const u8 = null,
             } = .{} } = &.{} };
             const parsed = std.json.parseFromSliceLeaky(Chunk, self.arena, data, .{ .ignore_unknown_fields = true }) catch return;
+            if (parsed.usage) |usage| self.usage = usage;
             if (parsed.choices.len == 0) return;
             const delta = parsed.choices[0].delta;
             if (delta.reasoning_content orelse delta.reasoning) |thought| {

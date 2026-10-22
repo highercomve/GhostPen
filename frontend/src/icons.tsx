@@ -15,9 +15,14 @@ export type IconName =
   | "scan"
   | "link"
   | "image"
+  | "mic"
+  | "folder"
   | "download";
+// Recording and library controls use the same 24-grid line icons.
 
 const PATHS: Record<IconName, ReactNode> = {
+  mic: <><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></>,
+  folder: <path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
   // download (arrow into a tray)
   download: (
     <>

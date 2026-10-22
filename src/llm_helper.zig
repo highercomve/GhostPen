@@ -166,8 +166,8 @@ fn sendError(id: u64, message: []const u8) void {
 /// A progress line: the prompt's size after its eval, then the generation's
 /// count so far (the client records them; the request's line ids keep them
 /// apart from deltas and the final line).
-fn sendStat(id: u64, prompt_tokens: usize, prompt_ms: u64, gen_tokens: usize, gen_ms: u64) void {
-    send(.{ .id = id, .prompt_tokens = prompt_tokens, .prompt_ms = prompt_ms, .gen_tokens = gen_tokens, .gen_ms = gen_ms });
+fn sendStat(id: u64, prompt_tokens: usize, prompt_ms: u64, gen_tokens: usize, gen_ms: u64, cached_tokens: usize) void {
+    send(.{ .id = id, .stage = "generating", .prompt_tokens = prompt_tokens, .processed_tokens = prompt_tokens, .cached_tokens = cached_tokens, .prompt_ms = prompt_ms, .gen_tokens = gen_tokens, .gen_ms = gen_ms });
 }
 
 /// The last line of a request (`done` or `error`).
@@ -306,6 +306,8 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
 
     defer if (engine) |*e| {
         e.cached.deinit(gpa);
+        gpa.free(e.checkpoint_state);
+        gpa.free(e.checkpoint_tokens);
         gpa.free(e.specials.texts);
         if (e.templates) |t| t.deinit();
     };
@@ -418,12 +420,18 @@ const ChatModel = struct {
         var plan: Plan = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
         var remembered = if (gpus > 0 and meta.layers > 0) planRemembered(opts, gpus) else null;
         if (remembered) |r| {
-            plan = .{ .ngl = r.ngl, .n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, r.experts) };
             batches = .{ .batch = r.batch, .ubatch = r.ubatch };
-            if (r.ngl >= 999) {
-                std.debug.print("ghostpen-llm: remembered: all layers on the GPU, {d} of {d} blocks' experts in system RAM, prompt batches {d}/{d}\n", .{ r.experts, blocks, r.batch, r.ubatch });
+            const measured = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
+            const safe = limitRemembered(r, measured);
+            if (safe.ngl != r.ngl or safe.experts != r.experts) {
+                remembered = null;
+                std.debug.print("ghostpen-llm: cached split exceeds current GPU memory; reducing GPU allocation\n", .{});
+            }
+            plan = .{ .ngl = safe.ngl, .n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, safe.experts) };
+            if (safe.ngl >= 999) {
+                std.debug.print("ghostpen-llm: remembered: all layers on the GPU, {d} of {d} blocks' experts in system RAM, prompt batches {d}/{d}\n", .{ safe.experts, blocks, safe.batch, safe.ubatch });
             } else {
-                std.debug.print("ghostpen-llm: remembered: {d} layers on the GPU, prompt batches {d}/{d}\n", .{ r.ngl, r.batch, r.ubatch });
+                std.debug.print("ghostpen-llm: remembered: {d} layers on the GPU, prompt batches {d}/{d}\n", .{ safe.ngl, safe.batch, safe.ubatch });
             }
         } else if (gpus > 0) for ([_]Batches{ Batches.ub512, Batches.small }) |try_batches| {
             const alt = planSplit(opts, gpus, blocks, meta.experts != 0, try_batches, &moe_patterns, &moe_overrides);
@@ -490,15 +498,13 @@ const ChatModel = struct {
             std.debug.print("ghostpen-llm: not enough GPU memory, retrying with {d} layers on the GPU\n", .{ngl});
         };
         errdefer c.llama_model_free(model);
-        // The split that just loaded is the one to remember (it measured
-        // itself; a split from the cache is already in the file).
-        if (remembered == null and gpus > 0)
-            planRemember(opts, gpus, .{ .ngl = ngl, .experts = n_overrides, .batch = batches.batch, .ubatch = batches.ubatch });
-
         const ctx = createContext(model, opts, batches, threads) orelse {
             c.llama_model_free(model);
             return null;
         };
+        // Cache only after the context and its GPU buffers also fit.
+        if (remembered == null and gpus > 0)
+            planRemember(opts, gpus, .{ .ngl = ngl, .experts = n_overrides, .batch = batches.batch, .ubatch = batches.ubatch });
 
         // A resident threadpool (what llama-server does): without one, ggml
         // builds a disposable pool — spawns and joins all the threads — for
@@ -786,6 +792,24 @@ const Remembered = struct {
     ubatch: u32,
 };
 
+fn limitRemembered(cached: Remembered, measured: Plan) Remembered {
+    var safe = cached;
+    safe.ngl = @min(cached.ngl, measured.ngl);
+    safe.experts = @max(cached.experts, measured.n_overrides);
+    return safe;
+}
+
+test "cached GPU split respects current memory for dense and MoE models" {
+    const cached: Remembered = .{ .ngl = 999, .experts = 30, .batch = 512, .ubatch = 512 };
+    const moe = limitRemembered(cached, .{ .ngl = 999, .n_overrides = 39 });
+    try std.testing.expectEqual(@as(usize, 39), moe.experts);
+    try std.testing.expectEqual(@as(i32, 999), moe.ngl);
+    const dense = limitRemembered(.{ .ngl = 32, .experts = 0, .batch = 512, .ubatch = 512 }, .{ .ngl = 17, .n_overrides = 0 });
+    try std.testing.expectEqual(@as(i32, 17), dense.ngl);
+    const conservative = limitRemembered(moe, .{ .ngl = 999, .n_overrides = 30 });
+    try std.testing.expectEqual(moe, conservative);
+}
+
 const max_plan_entries = 64;
 /// Separates the parts of a key (paths never contain one).
 const key_sep = "\x1f";
@@ -1024,6 +1048,11 @@ const Engine = struct {
     /// prefix, so the next request only evaluates its new tail (what makes an
     /// agent's repeated 100k-token context cheap).
     cached: std.ArrayList(c.llama_token) = .empty,
+    /// Recurrent/hybrid models cannot trim their state back to a shared
+    /// prefix. One bounded host-memory snapshot lets them resume safely.
+    checkpoint_state: []u8 = &.{},
+    checkpoint_tokens: []c.llama_token = &.{},
+    request_cached_tokens: usize = 0,
     /// Control-token texts: neutralized in the request's content.
     specials: chat_format.Specials,
 
@@ -1076,6 +1105,7 @@ const Engine = struct {
     }
 
     fn generate(self: *Engine, arena: std.mem.Allocator, request: Request) Error!void {
+        self.request_cached_tokens = 0;
         // The prompt is tokenized with parse_special (for the template's
         // markers): the client's text must not carry any.
         if (request.request.len > 0) return self.answerRequest(arena, request);
@@ -1095,7 +1125,7 @@ const Engine = struct {
         }
         if (n_prompt == 0) return self.finish(req.id, 0, 0, 0, 0, false, true); // cancelled
         const prompt_ms: u64 = @intCast(@max(req_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
-        sendStat(req.id, n_prompt, prompt_ms, 0, 0);
+        sendStat(req.id, n_prompt, prompt_ms, 0, 0, self.request_cached_tokens);
         const gen_start = std.Io.Clock.awake.now(io);
         const budget = @min(@as(usize, req.max_tokens), n_ctx - n_prompt);
 
@@ -1164,7 +1194,7 @@ const Engine = struct {
             const gen_ms: u64 = @intCast(@max(gen_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
             if (gen_ms - last_stat_ms >= 250) {
                 last_stat_ms = gen_ms;
-                sendStat(req.id, n_prompt, prompt_ms, generated, gen_ms);
+                sendStat(req.id, n_prompt, prompt_ms, generated, gen_ms, self.request_cached_tokens);
             }
         }
         if (if (req.channels) out.items else filter.visible(out.items)) |vis| if (vis.len > sent) send(.{ .id = req.id, .delta = try chat_format.validUtf8(arena, vis[sent..]) });
@@ -1192,7 +1222,7 @@ const Engine = struct {
         const n_prompt = try self.evalText(arena, req.id, turn.prompt, n_ctx);
         if (n_prompt == 0) return self.finish(req.id, 0, 0, 0, 0, false, true); // cancelled
         const prompt_ms: u64 = @intCast(@max(req_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
-        sendStat(req.id, n_prompt, prompt_ms, 0, 0);
+        sendStat(req.id, n_prompt, prompt_ms, 0, 0, self.request_cached_tokens);
         const gen_start = std.Io.Clock.awake.now(io);
         const budget = @min(@as(usize, req.max_tokens), n_ctx - n_prompt);
 
@@ -1226,7 +1256,7 @@ const Engine = struct {
             const gen_ms: u64 = @intCast(@max(gen_start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
             if (gen_ms - last_stat_ms >= 250) {
                 last_stat_ms = gen_ms;
-                sendStat(req.id, n_prompt, prompt_ms, generated, gen_ms);
+                sendStat(req.id, n_prompt, prompt_ms, generated, gen_ms, self.request_cached_tokens);
             }
         }
         const final = try turn.finish(self.gpa);
@@ -1327,6 +1357,7 @@ const Engine = struct {
 
     /// Decode `text` (a whole prompt) the same way.
     fn evalText(self: *Engine, arena: std.mem.Allocator, id: u64, text: []const u8, n_ctx: usize) Error!usize {
+        const began = std.Io.Clock.awake.now(io);
         const tokens = try self.tokenize(arena, text);
         if (tokens.len == 0) return fail(id, "Empty prompt.", .{});
         if (tokens.len + 16 > n_ctx)
@@ -1348,23 +1379,65 @@ const Engine = struct {
         if (!c.llama_memory_seq_rm(mem, 0, @intCast(common), -1)) {
             c.llama_memory_clear(mem, true);
             common = 0;
+            if (self.checkpoint_tokens.len < tokens.len and self.checkpoint_tokens.len > 0 and
+                std.mem.startsWith(c.llama_token, tokens, self.checkpoint_tokens) and
+                c.llama_state_seq_set_data(self.ctx, self.checkpoint_state.ptr, self.checkpoint_state.len, 0) == self.checkpoint_state.len)
+            {
+                common = self.checkpoint_tokens.len;
+            } else c.llama_memory_clear(mem, true);
         }
         // The cache holds only the prefix now: a prefill cancelled or failed
         // below must not leave the next request trusting the old tail.
-        self.cached.shrinkRetainingCapacity(common);
+        self.cached.shrinkRetainingCapacity(@min(common, self.cached.items.len));
+        self.request_cached_tokens = common;
+        send(.{ .id = id, .stage = "prefilling", .prompt_tokens = tokens.len, .processed_tokens = common, .cached_tokens = common, .prompt_ms = 0 });
+        const recurrent = c.llama_model_is_recurrent(self.model) or c.llama_model_is_hybrid(self.model);
+        // Leave the changing question and answer tail outside the snapshot.
+        const checkpoint_at = if (recurrent and tokens.len > 1024)
+            ((tokens.len - 512) / self.n_ubatch) * self.n_ubatch
+        else
+            0;
         var pos: usize = common;
+        var last_progress_ms: u64 = 0;
         while (pos < tokens.len) {
-            const n = @min(tokens.len - pos, self.n_ubatch);
+            var n = @min(tokens.len - pos, self.n_ubatch);
+            if (pos < checkpoint_at) n = @min(n, checkpoint_at - pos);
             const rc = c.llama_decode(self.ctx, c.llama_batch_get_one(tokens[pos..].ptr, @intCast(n)));
             if (cancel.load(.acquire)) return 0;
             if (rc != 0) return fail(id, "The built-in model failed to read the prompt (llama_decode {d}).", .{rc});
             pos += n;
+            if (pos == checkpoint_at) self.saveCheckpoint(tokens[0..pos]);
+            const elapsed_ms: u64 = @intCast(@max(began.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), 0));
+            if (elapsed_ms - last_progress_ms >= 250 or pos == tokens.len) {
+                send(.{ .id = id, .stage = "prefilling", .prompt_tokens = tokens.len, .processed_tokens = pos, .cached_tokens = common, .prompt_ms = elapsed_ms });
+                last_progress_ms = elapsed_ms;
+            }
         }
         if (common > 0) log.info("prompt cache: {d} of {d} prompt tokens reused", .{ common, tokens.len });
         // Remember it for the next request (outlives this arena).
         self.cached.clearRetainingCapacity();
         self.cached.appendSlice(self.gpa, tokens) catch {};
         return tokens.len;
+    }
+
+    fn saveCheckpoint(self: *Engine, tokens: []const c.llama_token) void {
+        if (std.mem.eql(c.llama_token, tokens, self.checkpoint_tokens)) return;
+        const size = c.llama_state_seq_get_size(self.ctx, 0);
+        // At most one 512 MiB snapshot; models exceeding it simply re-read.
+        if (size == 0 or size > 512 * 1024 * 1024) return;
+        const state = self.gpa.alloc(u8, size) catch return;
+        if (c.llama_state_seq_get_data(self.ctx, state.ptr, state.len, 0) != size) {
+            self.gpa.free(state);
+            return;
+        }
+        const saved_tokens = self.gpa.dupe(c.llama_token, tokens) catch {
+            self.gpa.free(state);
+            return;
+        };
+        self.gpa.free(self.checkpoint_state);
+        self.gpa.free(self.checkpoint_tokens);
+        self.checkpoint_state = state;
+        self.checkpoint_tokens = saved_tokens;
     }
 
     /// Decode a prompt with an image (through the vision projector); its
@@ -1401,7 +1474,7 @@ const Engine = struct {
         return n_tokens;
     }
 
-    fn finish(_: *Engine, id: u64, prompt_tokens: usize, gen_tokens: usize, prompt_ms: u64, gen_ms: u64, truncated: bool, cancelled: bool) Error!void {
-        sendFinal(.{ .id = id, .done = true, .prompt_tokens = prompt_tokens, .gen_tokens = gen_tokens, .prompt_ms = prompt_ms, .gen_ms = gen_ms, .truncated = truncated, .cancelled = cancelled });
+    fn finish(self: *Engine, id: u64, prompt_tokens: usize, gen_tokens: usize, prompt_ms: u64, gen_ms: u64, truncated: bool, cancelled: bool) Error!void {
+        sendFinal(.{ .id = id, .done = true, .prompt_tokens = prompt_tokens, .cached_tokens = self.request_cached_tokens, .gen_tokens = gen_tokens, .prompt_ms = prompt_ms, .gen_ms = gen_ms, .truncated = truncated, .cancelled = cancelled });
     }
 };
