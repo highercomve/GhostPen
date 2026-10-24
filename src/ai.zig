@@ -19,6 +19,41 @@ pub const Profile = settings.Profile;
 /// file, context, GPU); set by the app and the CLI. Null: no built-in models.
 pub var local_resolver: ?*const fn (arena: std.mem.Allocator, profile: Profile, diag: *Diag) Error!local_llm.Config = null;
 
+/// The device's own model ("system" profiles: Gemini Nano on Android), set
+/// by the app where it exists. `on_text` gets the reply as it grows (null:
+/// not streamed); `png`, an image for it to read. Null: no system model.
+pub var system_generate: ?*const fn (arena: std.mem.Allocator, req: SystemRequest, sink: ?TextSink, diag: *Diag) Error![]const u8 = null;
+
+pub const SystemRequest = struct {
+    system: []const u8,
+    prompt: []const u8,
+    png: ?[]const u8 = null,
+    temperature: f64,
+    max_tokens: u32,
+};
+
+/// Where a streamed reply's pieces go (type-erased: the callers' are generic).
+pub const TextSink = struct {
+    ctx: *anyopaque,
+    on_text: *const fn (ctx: *anyopaque, text: []const u8) void,
+};
+
+fn systemCompletion(arena: std.mem.Allocator, req: Request, sink: ?TextSink, diag: *Diag) Error![]const u8 {
+    const generate = system_generate orelse return fail(diag, "This device has no on-device model GhostPen can use.");
+    const text, const image: ?[]const u8 = switch (req.user) {
+        .text => |t| .{ t, null },
+        .image_with_text => |iw| .{ iw.text, iw.png },
+    };
+    const out = try generate(arena, .{
+        .system = req.system,
+        .prompt = text,
+        .png = image,
+        .temperature = req.profile.temperature,
+        .max_tokens = max_tokens,
+    }, sink, diag);
+    return stripReasoning(arena, out);
+}
+
 /// Total time for one request (the Tauri app's reqwest timeout).
 pub const request_timeout_ms: u32 = 60_000;
 pub const max_tokens = 2048;
@@ -290,6 +325,7 @@ fn ignoreDelta(_: void, _: channels.Delta) void {}
 /// A non-streamed completion from the profile's endpoint or the built-in model.
 fn completion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, thinking: bool, diag: *Diag) Error![]const u8 {
     if (req.profile.isLocal()) return localCompletion(io, gpa, arena, req, thinking, {}, ignoreChunk, diag);
+    if (req.profile.isSystem()) return systemCompletion(arena, req, null, diag);
     return postCompletion(io, gpa, arena, req, thinking, diag);
 }
 
@@ -348,6 +384,17 @@ pub fn completeStreamChannels(
     comptime on_chunk: fn (@TypeOf(ctx), channels.Delta) void,
     diag: *Diag,
 ) Error![]const u8 {
+    if (req.profile.isSystem()) {
+        const Adapter = struct {
+            fn text(c: *anyopaque, t: []const u8) void {
+                const inner: @TypeOf(ctx) = @ptrCast(@alignCast(c));
+                on_chunk(inner, .{ .channel = .answer, .text = t });
+            }
+        };
+        const sink: ?TextSink = if (@typeInfo(@TypeOf(ctx)) == .pointer) .{ .ctx = @ptrCast(@constCast(ctx)), .on_text = Adapter.text } else null;
+        const out = try systemCompletion(arena, req, sink, diag);
+        return checked(std.mem.trim(u8, out, " \t\r\n"), req, diag);
+    }
     if (req.profile.isLocal()) {
         const resolver = local_resolver orelse return fail(diag, "Built-in models aren't available in this build.");
         const cfg = try resolver(arena, req.profile, diag);

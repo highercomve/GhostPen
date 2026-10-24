@@ -29,6 +29,17 @@
   }
 }
 
+:root {
+  /* The app's palette under other names, for the reading pages to take on in
+     single-window mode (single.css) without referring to themselves. */
+  --app-bg: var(--bg);
+  --app-bg-soft: var(--bg-soft);
+  --app-text: var(--text);
+  --app-muted: var(--muted);
+  --app-border: var(--border);
+  --app-accent: var(--accent);
+}
+
 * { box-sizing: border-box; }
 
 html, body, #root { margin: 0; height: 100%; }
@@ -1667,3 +1678,30 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   .mt-ask-form { flex-wrap: wrap; }
   .mt-ask-input { min-width: 160px; }
 }
+
+
+/* Settings → About: what's running. */
+.about-sys { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 20px; margin: 0 0 12px; }
+.about-sys div { display: flex; flex-direction: column; gap: 2px; }
+.about-sys dt { color: var(--muted); font-size: 12px; }
+.about-sys dd { margin: 0; font-size: 13px; word-break: break-word; }
+
+/* Meetings on a phone (or a narrow window): the list, or one meeting. */
+.mt-back { display: none; }
+/* A list row's parts (the round icon shows on Android only: android.css). */
+.mt-item-avatar { display: none; }
+.mt-item-text { display: flex; flex-direction: column; gap: inherit; min-width: 0; }
+@media (max-width: 720px) {
+  .meetings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .meetings .mt-side { border-right: 0; }
+  .meetings.browsing { grid-template-rows: auto minmax(0, 1fr); }
+  .meetings.browsing .mt-main { grid-row: 1; grid-column: 1; overflow: visible; height: auto; min-height: 0; padding-bottom: 0; }
+  .meetings.browsing .mt-side { grid-row: 2; grid-column: 1; }
+  .meetings.opened .mt-main { grid-row: 1; grid-column: 1; }
+  .meetings.browsing .mt-workspace-head h1 { display: none; }
+  .meetings.browsing .mt-main > :not(:first-child) { display: none; }
+  .meetings.opened .mt-side { display: none; }
+  .meetings.opened { grid-template-rows: minmax(0, 1fr); }
+  .meetings.opened .mt-back { display: inline-flex; align-self: flex-start; border: 0; background: transparent; color: var(--accent); font: inherit; font-weight: 500; padding: 8px 0; cursor: pointer; }
+}
+.mt-sheet-scrim { display: none; }

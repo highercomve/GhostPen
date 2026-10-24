@@ -14,6 +14,15 @@ import {
   CAPTION_LANGUAGES,
   PASTE_KEYS,
 } from "./api";
+import { singleWindow } from "./mode";
+
+// As a page of the app window (single-window mode, dictation not floating): a title,
+// room for the text, and the dictations of this session below it.
+const asPage = singleWindow;
+interface Done {
+  at: number;
+  text: string;
+}
 
 // Waveform: a continuous flowing wave (Apple-dictation style), not 36 independent bars each
 // jumping to a random height on every level tick. The mic's ~10 Hz RMS events only set a
@@ -43,6 +52,10 @@ function envelope(i: number): number {
 export default function Dictation() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [text, setText] = useState("");
+  const [recent, setRecent] = useState<Done[]>([]);
+  useEffect(() => {
+    if (asPage && phase === "done" && text.trim()) setRecent((r) => [{ at: Date.now(), text }, ...r].slice(0, 50));
+  }, [phase]);
   // An error that kept the dictation (it couldn't be copied): what failed, shown in the hint;
   // `text` then holds the dictated text, copied with C or a click.
   const [keptError, setKeptError] = useState("");
@@ -169,6 +182,35 @@ export default function Dictation() {
     return () => cancelAnimationFrame(raf);
   }, [phase]);
 
+  // The phone's own speech recognition (Android): oriel.dictation's phrases as they're
+  // heard; the backend sends ghostpen://dictation once it's stopped.
+  const heard = useRef("");
+  useEffect(() => {
+    const show = (partial: string) => {
+      if (phaseRef.current !== "listening") return;
+      setText([heard.current, partial].filter(Boolean).join(" "));
+    };
+    const un1 = listen<{ text: string }>("dictation:partial", (e) => show(e.payload.text));
+    const un2 = listen<{ text: string }>("dictation:final", (e) => {
+      heard.current = [heard.current, e.payload.text.trim()].filter(Boolean).join(" ");
+      show("");
+    });
+    const un3 = listen<{ message: string }>("dictation:error", (e) => {
+      setPhase("error");
+      setText(e.payload.message);
+    });
+    // Stopped on its own (after an error, or the recognizer gave up): finish what was heard.
+    const un4 = listen("dictation:ended", () => {
+      if (phaseRef.current === "listening") dictationStop().catch(() => {});
+    });
+    const un5 = listen("ghostpen://dictation-show", () => {
+      heard.current = "";
+    });
+    return () => {
+      for (const u of [un1, un2, un3, un4, un5]) u.then((f) => f());
+    };
+  }, []);
+
   // Transcript / state updates from the backend.
   useEffect(() => {
     const un = listen<DictationUpdate>("ghostpen://dictation", (e) => {
@@ -294,8 +336,14 @@ export default function Dictation() {
               : "";
 
   return (
-    <div className="dictation">
-      <div className={`dict-pill ${phase}`} data-oriel-drag-region>
+    <div className={`dictation ${asPage ? "page" : ""}`}>
+      {asPage && (
+        <header className="page-head">
+          <h1>Dictation</h1>
+          <p>Speak, then finish: the text is copied (and pasted where you were, when GhostPen can).</p>
+        </header>
+      )}
+      <div className={`dict-pill ${phase}`} data-oriel-drag-region={asPage ? undefined : true}>
         <div className="dict-top">
           {/* tabIndex -1 + focus suppression on every button: a focused button would be
               re-activated by a stray Space/Enter, silently starting a recording. Recording
@@ -409,6 +457,18 @@ export default function Dictation() {
             WebKitGTK window doesn't clear old frames, and size changes leave ghost outlines. */}
         <div className="dict-hint">{hint || " "}</div>
       </div>
+      {asPage && recent.length > 0 && (
+        <section className="dict-recent">
+          <h2>This session</h2>
+          {recent.map((d) => (
+            <div key={d.at} className="dict-recent-item">
+              <span className="dict-recent-time">{new Date(d.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+              <p>{d.text}</p>
+              <button className="btn" onClick={() => copyText(d.text).catch(() => {})}>Copy</button>
+            </div>
+          ))}
+        </section>
+      )}
     </div>
   );
 }

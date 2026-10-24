@@ -10,6 +10,9 @@ import {
   updateInstall,
   updateRestart,
   formatBytes,
+  systemInfo,
+  copyText,
+  type SystemInfo,
 } from "./api";
 
 const KIND_TEXT: Record<string, string> = {
@@ -26,6 +29,8 @@ const KIND_TEXT: Record<string, string> = {
  */
 export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate: (on: boolean) => void }) {
   const [info, setInfo] = useState<AppInfo | null>(null);
+  const [sys, setSys] = useState<SystemInfo | null>(null);
+  const [copied, setCopied] = useState(false);
   const [check, setCheck] = useState<UpdateCheck | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<"" | "checking" | "installing">("");
@@ -33,6 +38,7 @@ export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate:
 
   useEffect(() => {
     appInfo().then(setInfo).catch(() => {});
+    systemInfo().then(setSys).catch(() => {});
     const un = listen<UpdateProgress>("ghostpen://update-progress", (e) => setProgress(e.payload));
     return () => {
       un.then((f) => f());
@@ -72,7 +78,44 @@ export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate:
   const installed = info?.installed_version;
   const pct = progress && progress.total ? Math.min(100, (progress.downloaded / progress.total) * 100) : 0;
 
+  const rows: [string, string][] = sys
+    ? [
+        ["GhostPen", sys.version],
+        ["Oriel", sys.oriel],
+        ["System", [sys.os, sys.os_version].filter(Boolean).join(" ")],
+        ...(sys.device.trim() ? [["Device", sys.device] as [string, string]] : []),
+        ["Architecture", `${sys.arch} (${sys.abi})`],
+        ["Build", sys.build],
+        ["CPU cores", String(sys.cpus)],
+        ...(sys.memory_mb > 0 ? [["Memory", `${(sys.memory_mb / 1024).toFixed(1)} GB`] as [string, string]] : []),
+        ["GPU backend", sys.gpu || "CPU"],
+        ["Window layout", sys.layout === "single" ? "One app window" : "A window per tool"],
+        ["Session", sys.session],
+        ["On-device engines", [sys.system_ai && "Gemini Nano", sys.speech_recognition && "speech recognition", sys.system_voice && "voices"].filter(Boolean).join(", ") || "none"],
+      ]
+    : [];
+  const copyDetails = async () => {
+    await copyText(rows.map(([k, v]) => `${k}: ${v}`).join("\n")).catch(() => {});
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+
   return (
+    <>
+    {sys && (
+      <section className="card">
+        <h2>This build</h2>
+        <dl className="about-sys">
+          {rows.map(([k, v]) => (
+            <div key={k}>
+              <dt>{k}</dt>
+              <dd>{v}</dd>
+            </div>
+          ))}
+        </dl>
+        <button className="btn" type="button" onClick={copyDetails}>{copied ? "Copied ✓" : "Copy details"}</button>
+      </section>
+    )}
     <section className="card">
       <h2>About &amp; updates</h2>
       <div className="about-row">
@@ -134,5 +177,6 @@ export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate:
         <a href="#" onClick={(e) => { e.preventDefault(); if (info) openExternal(info.releases_url); }}>Release notes</a>
       </p>
     </section>
+    </>
   );
 }

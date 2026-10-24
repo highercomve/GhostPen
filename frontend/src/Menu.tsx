@@ -30,6 +30,7 @@ import {
   openPlayground,
   TRANSLATE_LANGUAGES,
 } from "./api";
+import { singleWindow } from "./mode";
 
 type View =
   | { kind: "menu" }
@@ -605,6 +606,13 @@ export default function Menu() {
           </button>
         </span>
       </header>
+
+      {singleWindow && (
+        <header className="page-head">
+          <h1>Actions</h1>
+          <p>What to do with the selected text (or the clipboard’s).</p>
+        </header>
+      )}
 
       {status && (
         <div className="dest" title="Active AI destination">

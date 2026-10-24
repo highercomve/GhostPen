@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const oriel = @import("oriel");
+const builtin = @import("builtin");
 const llm_models = @import("llm_models.zig");
 
 const tts = oriel.tts;
@@ -250,8 +251,38 @@ const Plan = struct {
     options: tts.Options,
 };
 
+/// Settings' `voiceEngine` (the app sets it at start and on every save).
+pub var engine_setting: []const u8 = "auto";
+var engine_buf: [16]u8 = undefined;
+
+pub fn setEngine(engine: []const u8) void {
+    const n = @min(engine.len, engine_buf.len);
+    @memcpy(engine_buf[0..n], engine[0..n]);
+    engine_setting = engine_buf[0..n];
+}
+
+/// The device's own voices read (Android's TextToSpeech): chosen, or "auto"
+/// on a phone with no Kokoro model downloaded yet (nothing to wait for).
+fn useSystemVoice(req: Request) bool {
+    // A voice asked for by name (a sample in Settings → Voices): that one.
+    if (std.mem.eql(u8, req.voice, "system")) return oriel.tts.systemAvailable();
+    if (req.voice.len > 0) return false;
+    if (!oriel.tts.systemAvailable()) return false;
+    if (std.mem.eql(u8, engine_setting, "system")) return true;
+    if (!std.mem.eql(u8, engine_setting, "auto") or !builtin.abi.isAndroid()) return false;
+    for (&tts.models) |*m| if (tts.modelPresent(m)) return false;
+    return true;
+}
+
 fn plan(req: Request) Plan {
     const lang = languageFor(req.text, req.lang);
+    if (useSystemVoice(req)) return .{
+        .lang = lang,
+        .voice = "system",
+        .model_id = "",
+        .voice_id = "",
+        .options = .{ .engine = .system, .lang = lang },
+    };
     const voice = if (req.voice.len > 0) req.voice else voiceFor(lang);
     var model_id: []const u8 = "";
     if (req.model.len > 0) {

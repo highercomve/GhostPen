@@ -7,8 +7,9 @@ const std = @import("std");
 pub const Profile = struct {
     id: []const u8,
     name: []const u8,
-    /// "openai" (an OpenAI-compatible endpoint) or "local" (built-in: GhostPen runs
-    /// the model itself with its embedded llama.cpp; `model` is a catalog id or `file:<path>`).
+    /// "openai" (an OpenAI-compatible endpoint), "local" (built-in: GhostPen runs
+    /// the model itself with its embedded llama.cpp; `model` is a catalog id or `file:<path>`),
+    /// or "system" (the phone's own model: Gemini Nano on Android; `model` unused).
     provider: []const u8 = "openai",
     baseUrl: []const u8 = "",
     apiKey: []const u8 = "",
@@ -17,6 +18,10 @@ pub const Profile = struct {
 
     pub fn isLocal(self: Profile) bool {
         return std.mem.eql(u8, self.provider, "local");
+    }
+
+    pub fn isSystem(self: Profile) bool {
+        return std.mem.eql(u8, self.provider, "system");
     }
 };
 
@@ -64,6 +69,9 @@ pub const Server = struct {
 };
 
 pub const Captions = struct {
+    /// A floating bar over other windows (off, in single-window mode: a
+    /// page of the app window).
+    float: bool = true,
     model: []const u8 = "base",
     language: []const u8 = "auto",
     whisperTranslate: bool = false,
@@ -75,9 +83,15 @@ pub const Captions = struct {
 };
 
 pub const Dictation = struct {
+    /// A floating panel over other windows (off, in single-window mode: a
+    /// page of the app window).
+    float: bool = true,
     language: []const u8 = "auto",
     proofread: bool = true,
     device: []const u8 = "",
+    /// "auto" (Android: the phone's speech recognition when it has one, else
+    /// whisper; elsewhere whisper), "whisper", or "system" (Android's).
+    engine: []const u8 = "auto",
     /// Paste the text at the cursor when finished (off: copy only, to review first).
     paste: bool = true,
 };
@@ -127,10 +141,22 @@ pub const Settings = struct {
     /// Check for updates in the background, and install them where
     /// GhostPen can (Settings → About & updates).
     autoUpdate: bool = true,
+    /// "windows": a window per page (the menu, Settings, Playground, …);
+    /// "single": one app window with the pages in a sidebar. Read at start
+    /// (a change applies on the next one); Android is always "single".
+    interfaceMode: []const u8 = "windows",
+    /// Who reads text aloud: "kokoro" (the voices downloaded in Settings →
+    /// Voices), "system" (the device's own: Android's TextToSpeech), or
+    /// "auto" (Android: the device's until a Kokoro model is downloaded).
+    voiceEngine: []const u8 = "auto",
 
     /// The active profile, or the first one, or the built-in default.
     pub fn showResults(self: Settings) bool {
         return std.mem.eql(u8, self.afterAction, "show");
+    }
+
+    pub fn singleWindow(self: Settings) bool {
+        return std.mem.eql(u8, self.interfaceMode, "single");
     }
 
     pub fn activeProfile(self: Settings) Profile {

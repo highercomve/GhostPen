@@ -41,6 +41,18 @@ const gpa = std.heap.smp_allocator;
 pub var io: std.Io = undefined;
 pub var shared: store.Shared = .init(gpa);
 
+/// One app window ("main") with every page in its sidebar, instead of a
+/// window per page (`interfaceMode`; always on Android). Chosen before
+/// `oriel.main`, from the settings: it picks the main window's options.
+pub var single_window = builtin.abi.isAndroid();
+/// In single-window mode, captions and dictation keep their own floating
+/// windows when these are on (`captions.float`, `dictation.float`).
+var float_captions = true;
+var float_dictation = true;
+/// The page the app window last went to (single-window mode), for a page
+/// that loads after the `ghostpen://navigate` went out.
+var current_route: []const u8 = "/actions";
+
 /// What the menu works on (the clipboard after the trigger's copy), and what
 /// the clipboard held before (restored after pasting). Owned by `gpa`.
 const Content = union(enum) {
@@ -109,6 +121,9 @@ const Status = struct {
     manual_mode: bool,
     active_profile: []const u8,
     active_model: []const u8,
+    /// This desktop lets no app register global shortcuts (no
+    /// GlobalShortcuts portal, e.g. ChromeOS's Linux): bind the commands there.
+    hotkeys_unavailable: bool,
 };
 
 /// `{kind: "empty"} | {kind: "text", text} | {kind: "image", preview, width, height}`.
@@ -149,6 +164,8 @@ const ProcessResult = struct {
 
 pub const Events = struct {
     @"ghostpen://show": struct {},
+    /// Single-window mode: the app window goes to this page ("/settings", …).
+    @"ghostpen://navigate": []const u8,
     @"ghostpen://chunk": []const u8,
     @"ghostpen://done": []const u8,
     @"ghostpen://error": []const u8,
@@ -322,7 +339,7 @@ fn summarySet(state: []const u8, title: []const u8, chars: usize, message: []con
     defer summary_mutex.unlock(io);
     summaryStoreLocked(state, title, chars, message);
     // The live update: the accumulating markdown travels separately.
-    events.emitTo("summary", .@"ghostpen://summary-status", .{
+    events.emitTo(windowFor("summary"), .@"ghostpen://summary-status", .{
         .state = link_summary.state,
         .title = link_summary.title,
         .chars = link_summary.chars,
@@ -457,6 +474,7 @@ pub fn pasteFromWindow(label: []const u8, output: []const u8, s: Settings) !bool
     };
     App.runOnMain(label, Hide.run);
     io.sleep(.fromMilliseconds(150), .awake) catch {};
+    if (!oriel.input.available) return false;
     oriel.input.paste() catch |err| {
         log.warn("dictation: paste failed ({s}); the text is on the clipboard", .{@errorName(err)});
         prev.deinit();
@@ -486,7 +504,8 @@ fn deliver(output: []const u8, s: Settings) !ProcessResult {
         log.warn("deliver: writing the clipboard failed: {s}", .{@errorName(err)});
         return oriel.ipc.fail("Could not write the clipboard ({s}).", .{@errorName(err)});
     };
-    if (!useSynthetic(s)) {
+    // Android has no synthetic input: the result is copied (and shown).
+    if (!oriel.input.available or !useSynthetic(s)) {
         log.info("deliver: {d} chars on the clipboard (manual mode: paste with Ctrl+V)", .{output.len});
         return .{ .output = output, .pasted = false, .manual = true };
     }
@@ -548,7 +567,7 @@ fn triggerWorker() void {
 
     if (useSynthetic(s)) {
         replace(&snapshot, readClipboard());
-        oriel.input.copy() catch |err| log.warn("synthetic copy failed: {s}", .{@errorName(err)});
+        if (oriel.input.available) oriel.input.copy() catch |err| log.warn("synthetic copy failed: {s}", .{@errorName(err)});
         io.sleep(.fromMilliseconds(80), .awake) catch {};
     } else {
         replace(&snapshot, .empty);
@@ -606,12 +625,153 @@ test isText {
     try std.testing.expect(isText("line one\r\n\tindented"));
 }
 
-/// Show (and focus) a window by label, centering the menu.
+const SystemInfo = struct {
+    version: []const u8,
+    oriel: []const u8,
+    os: []const u8,
+    os_version: []const u8 = "",
+    /// The phone's maker and model (Android).
+    device: []const u8 = "",
+    arch: []const u8,
+    abi: []const u8,
+    build: []const u8,
+    cpus: u32,
+    memory_mb: u64 = 0,
+    /// The backend ggml found ("Vulkan", "CUDA", "Metal", "OpenCL") or "CPU".
+    gpu: []const u8 = "",
+    layout: []const u8,
+    session: []const u8,
+    system_ai: bool,
+    system_voice: bool,
+    speech_recognition: bool,
+};
+
+/// MemTotal from /proc/meminfo, in MB (0 when unreadable).
+fn memTotalMb(arena: std.mem.Allocator) u64 {
+    const text = std.Io.Dir.cwd().readFileAlloc(io, "/proc/meminfo", arena, .limited(64 * 1024)) catch return 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "MemTotal:")) continue;
+        var words = std.mem.tokenizeScalar(u8, line["MemTotal:".len..], ' ');
+        const kb = std.fmt.parseInt(u64, words.next() orelse return 0, 10) catch return 0;
+        return kb / 1024;
+    }
+    return 0;
+}
+
+extern "c" fn __system_property_get(name: [*:0]const u8, value: [*]u8) c_int;
+
+/// An Android system property ("" when unset).
+fn systemProperty(arena: std.mem.Allocator, comptime name: [:0]const u8) []const u8 {
+    if (comptime !builtin.abi.isAndroid()) return "";
+    var buf: [92]u8 = undefined; // PROP_VALUE_MAX
+    const n = __system_property_get(name, &buf);
+    if (n <= 0) return "";
+    return arena.dupe(u8, buf[0..@intCast(n)]) catch "";
+}
+
+// ---- the device's own model (oriel.system_ai: Gemini Nano on Android) --------------------
+
+/// The streamed reply's destination, for oriel.system_ai's token callback
+/// (it has no context; it also runs one generate at a time).
+var system_sink: ?ai.TextSink = null;
+var system_busy: std.atomic.Value(bool) = .init(false);
+
+fn systemToken(text: []const u8) void {
+    if (system_sink) |s| s.on_text(s.ctx, text);
+}
+
+fn systemGenerate(arena: std.mem.Allocator, req: ai.SystemRequest, sink: ?ai.TextSink, diag: *ai.Diag) ai.Error![]const u8 {
+    if (comptime !oriel.system_ai.available) unreachable;
+    if (system_busy.swap(true, .acq_rel)) {
+        diag.message = "The on-device model is busy with another request.";
+        return error.AiFailed;
+    }
+    defer system_busy.store(false, .release);
+    system_sink = sink;
+    defer system_sink = null;
+    var one: [1]oriel.system_ai.Image = undefined;
+    const images: []const oriel.system_ai.Image = if (req.png) |png| blk: {
+        one[0] = .{ .bytes = png, .mime = "image/png" };
+        break :blk &one;
+    } else &.{};
+    return oriel.system_ai.generate(arena, .{
+        .system = req.system,
+        .prompt = req.prompt,
+        .images = images,
+        .temperature = @floatCast(req.temperature),
+        .max_tokens = req.max_tokens,
+    }, if (sink != null) &systemToken else null) catch |err| {
+        const st = oriel.system_ai.status();
+        diag.message = switch (err) {
+            error.Unavailable => std.fmt.allocPrint(arena, "This device has no on-device model ({s}).", .{st.reason()}) catch "This device has no on-device model.",
+            error.NotReady => "The on-device model isn't downloaded yet: Settings → AI profile → Download.",
+            error.Busy => "The on-device model is busy with another request.",
+            error.Cancelled => "Cancelled.",
+            error.Timeout => "The on-device model took too long.",
+            error.TooLarge => "Too much text for the on-device model.",
+            else => std.fmt.allocPrint(arena, "The on-device model failed: {s}", .{oriel.system_ai.lastError()}) catch "The on-device model failed.",
+        };
+        return error.AiFailed;
+    };
+}
+
+/// The microphone permission, asked for when it can be (Android, macOS) and
+/// waited on (a worker thread: the system dialog takes as long as the user).
+/// Captions, meetings and dictation all need it: Android's playback capture too.
+pub fn ensureMicrophone() !void {
+    switch (oriel.permissions.status(.microphone)) {
+        .granted => return,
+        .denied => return oriel.ipc.fail("GhostPen isn't allowed to use the microphone: allow it in the system settings (Apps → GhostPen → Permissions).", .{}),
+        .prompt, .unknown => {},
+    }
+    if (oriel.permissions.request(.microphone) == .granted) return;
+    var waited: u32 = 0;
+    while (waited < 120_000) : (waited += 100) {
+        io.sleep(.fromMilliseconds(100), .awake) catch break;
+        switch (oriel.permissions.status(.microphone)) {
+            .granted => return,
+            .denied => return oriel.ipc.fail("GhostPen needs the microphone for this: allow it when asked, or in the system settings.", .{}),
+            .prompt, .unknown => {},
+        }
+    }
+    return oriel.ipc.fail("No answer about the microphone permission.", .{});
+}
+
+/// The window that shows `label`'s page: its own, or in single-window mode
+/// the app window ("main"), except for captions and dictation set to float.
+pub fn windowFor(label: []const u8) []const u8 {
+    if (!single_window) return label;
+    const eql = std.mem.eql;
+    if (eql(u8, label, "captions") and float_captions) return label;
+    if (eql(u8, label, "dictation") and float_dictation) return label;
+    return "main";
+}
+
+/// The app window's route for `label`'s page (`#/<route>` in App.tsx).
+fn routeFor(label: []const u8) []const u8 {
+    const routes = [_]struct { []const u8, []const u8 }{
+        .{ "main", "/actions" },        .{ "settings", "/settings" }, .{ "playground", "/playground" },
+        .{ "meetings", "/meetings" },   .{ "summary", "/summary" },   .{ "captions", "/captions" },
+        .{ "dictation", "/dictation" },
+    };
+    for (routes) |r| if (std.mem.eql(u8, r[0], label)) return r[1];
+    return "/actions";
+}
+
+/// Show (and focus) a window by label, centering the menu. In single-window
+/// mode a page shows in the app window, which goes to it (main thread).
 pub fn showWindow(label: []const u8, center: bool) void {
-    const w = App.ensureWindow(label) catch |err| return log.err("window {s}: {s}", .{ label, @errorName(err) });
-    if (center) w.center();
+    const target = windowFor(label);
+    const w = App.ensureWindow(target) catch |err| return log.err("window {s}: {s}", .{ target, @errorName(err) });
+    const in_app = single_window and std.mem.eql(u8, target, "main");
+    if (center and !in_app) w.center();
     w.show();
     w.focus();
+    if (in_app) {
+        current_route = routeFor(label);
+        events.emitTo("main", .@"ghostpen://navigate", current_route) catch {};
+    }
 }
 
 /// The page's message for an image `image.fitWithin` refused or could not read.
@@ -626,20 +786,19 @@ fn imageFail(err: anyerror) error{CommandFailed} {
 
 pub const Commands = struct {
     pub const async_commands = .{
-        "get_selection",            "extract_image_text",      "process_ai_action",         "process_ai_custom",
-        "process_text",             "process_text_stream",     "fetch_models",              "captions_start",
-        "captions_download_model",  "dictation_start",         "captions_list_devices",     "dictation_list_devices",
-        "llm_models_status",        "llm_download_model",      "llm_delete_model",          "llm_unload",
-        "menu_dismissed",           "update_check",            "update_install",            "whisper_models_status",
-        "whisper_download_model",   "whisper_delete_model",    "summarize_link",            "summary_state",
-        "export_summary",
-        "tts_speak",                "tts_state",               "tts_catalog",               "tts_download",
-        "tts_delete",               "tts_warm_up",             "paste_result",              "meetings_list",
-        "meetings_get",             "meetings_update",         "meetings_delete",           "meetings_reprocess",
-        "meetings_export",          "meetings_open_folder",    "meetings_release_audio",    "meetings_folder",
-        "meetings_voices",          "meetings_remember_voice", "meetings_forget_voice",     "meetings_ask",
-        "meetings_start_recording", "meetings_stop_recording", "meetings_recording_status", "meetings_save_notes",
-        "meetings_chat_status",
+        "get_selection",           "extract_image_text",        "process_ai_action",     "process_ai_custom",
+        "process_text",            "process_text_stream",       "fetch_models",          "captions_start",
+        "captions_download_model", "dictation_start",           "captions_list_devices", "dictation_list_devices",
+        "llm_models_status",       "llm_download_model",        "llm_delete_model",      "llm_unload",
+        "menu_dismissed",          "update_check",              "update_install",        "whisper_models_status",
+        "whisper_download_model",  "whisper_delete_model",      "summarize_link",        "summary_state",
+        "export_summary",          "system_ai_status",          "system_ai_download",    "tts_speak",
+        "tts_state",               "tts_catalog",               "tts_download",          "tts_delete",
+        "tts_warm_up",             "paste_result",              "meetings_list",         "meetings_get",
+        "meetings_update",         "meetings_delete",           "meetings_reprocess",    "meetings_export",
+        "meetings_open_folder",    "meetings_release_audio",    "meetings_folder",       "meetings_voices",
+        "meetings_remember_voice", "meetings_forget_voice",     "meetings_ask",          "meetings_start_recording",
+        "meetings_stop_recording", "meetings_recording_status", "meetings_save_notes",   "meetings_chat_status",
     };
 
     pub fn get_settings(arena: std.mem.Allocator) !Settings {
@@ -656,6 +815,7 @@ pub const Commands = struct {
         }
         captions.settingsChanged();
         dictation.settingsChanged();
+        tts.setEngine(args.settings.voiceEngine);
         const failed = registerHotkeys(arena, args.settings);
         if (failed.len > 0) return oriel.ipc.fail("Settings saved, but a hotkey wasn't registered: {s}", .{failed});
     }
@@ -686,6 +846,7 @@ pub const Commands = struct {
             .manual_mode = !useSynthetic(s),
             .active_profile = p.name,
             .active_model = if (p.isLocal()) localModelName(p.model) else p.model,
+            .hotkeys_unavailable = hotkeys_unavailable.load(.acquire),
         };
     }
 
@@ -844,16 +1005,16 @@ pub const Commands = struct {
         const r = try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
         const Emit = struct {
             fn chunk(_: void, delta: []const u8) void {
-                events.emitTo("playground", .@"ghostpen://chunk", delta) catch {};
+                events.emitTo(windowFor("playground"), .@"ghostpen://chunk", delta) catch {};
             }
         };
         var diag: ai.Diag = .{};
         const final = ai.completeStream(io, gpa, arena, .{ .profile = r.profile, .system = r.system, .user = .{ .text = args.text } }, {}, Emit.chunk, &diag) catch |err| {
             const msg = if (err == error.AiFailed) diag.message else @errorName(err);
-            events.emitTo("playground", .@"ghostpen://error", msg) catch {};
+            events.emitTo(windowFor("playground"), .@"ghostpen://error", msg) catch {};
             return;
         };
-        events.emitTo("playground", .@"ghostpen://done", final) catch {};
+        events.emitTo(windowFor("playground"), .@"ghostpen://done", final) catch {};
     }
 
     // ---- Summarize a link ----
@@ -945,7 +1106,7 @@ pub const Commands = struct {
                 link_summary.markdown = summary_markdown.items;
                 link_summary.thinking = summary_thinking.items;
                 link_summary.revision += 1;
-                events.emitTo("summary", .@"ghostpen://summary-chunk", .{
+                events.emitTo(windowFor("summary"), .@"ghostpen://summary-chunk", .{
                     .channel = delta.channel,
                     .text = delta.text,
                     .revision = link_summary.revision,
@@ -1052,7 +1213,7 @@ pub const Commands = struct {
         const d = try llmDirs(arena);
         const Emit = struct {
             fn progress(_: void, p: llm_models.Progress) void {
-                events.emitTo("settings", .@"ghostpen://llm-download", p) catch {};
+                events.emitTo(windowFor("settings"), .@"ghostpen://llm-download", p) catch {};
             }
         };
         var status: std.http.Status = .ok;
@@ -1141,6 +1302,78 @@ pub const Commands = struct {
         showWindow("settings", false);
     }
 
+    /// Start GhostPen again (a window layout change applies at start).
+    pub fn restart_app(_: std.mem.Allocator) !void {
+        if (comptime builtin.abi.isAndroid()) return oriel.ipc.fail("Not on Android.", .{});
+        const exe = self_exe orelse return oriel.ipc.fail("Can't find GhostPen's program to restart it.", .{});
+        oriel.updater.restart(io, exe) catch |err| return oriel.ipc.fail("Can't restart: {s}", .{@errorName(err)});
+    }
+
+    /// What's running, for Settings → About (and bug reports): versions,
+    /// system, CPU, memory, the GPU backend, the window layout and the
+    /// on-device engines this build has.
+    pub fn system_info(arena: std.mem.Allocator) !SystemInfo {
+        const build_opts = @import("ghostpen_build");
+        var info: SystemInfo = .{
+            .version = build_opts.version,
+            .oriel = build_opts.oriel_version,
+            .os = if (builtin.abi.isAndroid()) "Android" else switch (builtin.os.tag) {
+                .linux => "Linux",
+                .windows => "Windows",
+                .macos => "macOS",
+                else => @tagName(builtin.os.tag),
+            },
+            .arch = @tagName(builtin.cpu.arch),
+            .abi = @tagName(builtin.abi),
+            .build = @tagName(builtin.mode),
+            .cpus = @intCast(std.Thread.getCpuCount() catch 0),
+            .layout = if (single_window) "single" else "windows",
+            .session = if (builtin.abi.isAndroid()) "android" else sessionName(),
+            .system_ai = oriel.system_ai.available,
+            .system_voice = oriel.tts.systemAvailable(),
+            .speech_recognition = builtin.abi.isAndroid() and oriel.dictation.available,
+        };
+        if (builtin.os.tag == .linux) {
+            info.memory_mb = memTotalMb(arena);
+            if (builtin.abi.isAndroid()) {
+                info.os_version = try std.fmt.allocPrint(arena, "{s} (API {s})", .{ systemProperty(arena, "ro.build.version.release"), systemProperty(arena, "ro.build.version.sdk") });
+                info.device = try std.fmt.allocPrint(arena, "{s} {s}", .{ systemProperty(arena, "ro.product.manufacturer"), systemProperty(arena, "ro.product.model") });
+            } else {
+                const u = std.posix.uname();
+                info.os_version = try arena.dupe(u8, std.mem.sliceTo(&u.release, 0));
+            }
+        }
+        const st = oriel.tts.status();
+        info.gpu = try arena.dupe(u8, st.backend);
+        return info;
+    }
+
+    /// The device's own model: whether this build has it, and its state
+    /// ("available", "downloadable", "downloading", "unavailable") with why.
+    pub fn system_ai_status(arena: std.mem.Allocator) !struct { built: bool, state: []const u8, reason: []const u8 } {
+        if (comptime !oriel.system_ai.available) return .{ .built = false, .state = "unavailable", .reason = "Not in this build." };
+        const st = oriel.system_ai.status();
+        return .{ .built = true, .state = @tagName(st.state), .reason = try arena.dupe(u8, st.reason()) };
+    }
+
+    /// Download the device's model (progress: the page's "system_ai:download").
+    pub fn system_ai_download(_: std.mem.Allocator) !void {
+        if (comptime !oriel.system_ai.available) return oriel.ipc.fail("Not in this build.", .{});
+        oriel.system_ai.download(null) catch |err| return oriel.ipc.fail("Couldn't download the on-device model ({s}).", .{@errorName(err)});
+    }
+
+    /// The window the page runs in: single-window mode, the page to show,
+    /// and which overlays float (the sidebar opens those instead).
+    pub fn ui_state(_: std.mem.Allocator) struct { single: bool, android: bool, route: []const u8, float_captions: bool, float_dictation: bool } {
+        return .{
+            .single = single_window,
+            .android = builtin.abi.isAndroid(),
+            .route = current_route,
+            .float_captions = float_captions,
+            .float_dictation = float_dictation,
+        };
+    }
+
     // Captions and dictation live in their own modules.
     pub const open_captions = captions.Commands.open_captions;
     pub const captions_status = captions.Commands.captions_status;
@@ -1207,6 +1440,12 @@ fn selectionText(arena: std.mem.Allocator) ![]const u8 {
 var hotkey_arena: std.heap.ArenaAllocator = .init(gpa);
 
 /// (Re)register the three hotkeys; returns the failures ("" when none).
+/// No global shortcuts on this desktop (see `Status.hotkeys_unavailable`).
+var hotkeys_unavailable: std.atomic.Value(bool) = .init(false);
+
+/// Register the three hotkeys; the ones that failed, as text ("" when all
+/// did). A desktop without the GlobalShortcuts portal isn't a failure of a
+/// hotkey: `hotkeys_unavailable` says so once, and Settings explains it.
 fn registerHotkeys(arena: std.mem.Allocator, s: Settings) []const u8 {
     const binds = [_]struct { id: []const u8, trigger: []const u8 }{
         .{ .id = "menu", .trigger = s.hotkey },
@@ -1220,6 +1459,10 @@ fn registerHotkeys(arena: std.mem.Allocator, s: Settings) []const u8 {
         if (std.mem.trim(u8, b.trigger, " ").len == 0) continue;
         const trigger = hotkey_arena.allocator().dupe(u8, b.trigger) catch continue;
         oriel.global_shortcut.register(gpa, .{ .id = b.id, .description = b.id, .trigger = trigger }, &onHotkey) catch |err| {
+            if (err == error.PortalUnavailable) {
+                hotkeys_unavailable.store(true, .release);
+                continue;
+            }
             failed.print(arena, "{s}{s} ({s}: {s})", .{ if (failed.items.len > 0) "; " else "", b.trigger, b.id, @errorName(err) }) catch {};
         };
     }
@@ -1236,7 +1479,9 @@ fn onHotkey(id: []const u8) void {
     }
 }
 
-var tray: ?*oriel.tray.Tray = null;
+/// No tray on Android (the app window is the app there).
+const has_tray = oriel.tray.available;
+var tray: if (has_tray) ?*oriel.tray.Tray else ?*anyopaque = null;
 
 /// The tray glyph as a monochrome template image for macOS: AppKit
 /// recolours it for the menu bar's theme itself (black on a light one,
@@ -1249,7 +1494,7 @@ const tray_recording_png = @embedFile("assets/tray-recording.png");
 
 /// The usual tray icon, set by `setup` (the app's icon is only there in
 /// the app's build, not the tests').
-var tray_idle_icon: oriel.tray.Icon = .{ .template_png = tray_mono_png };
+var tray_idle_icon: if (has_tray) oriel.tray.Icon else void = if (has_tray) .{ .template_png = tray_mono_png } else {};
 
 fn trayIcon(recording: bool) oriel.tray.Icon {
     return if (recording) .{ .png = tray_recording_png } else tray_idle_icon;
@@ -1259,6 +1504,7 @@ fn trayIcon(recording: bool) oriel.tray.Icon {
 /// icon is set on the main one, from the state at that point, so calls
 /// that land out of order still end on the right icon).
 pub fn refreshTrayIcon() void {
+    if (!has_tray) return;
     App.runOnMain({}, struct {
         fn run(_: void) void {
             const t = tray orelse return;
@@ -1316,7 +1562,6 @@ fn handleArgs(args: []const []const u8) void {
 var launch_args: []const []const u8 = &.{};
 
 fn setup() !void {
-    shared.load(io, gpa);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const s = try shared.get(io, arena.allocator());
@@ -1332,8 +1577,57 @@ fn setup() !void {
         .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 520, .height = 200, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
         .{ .label = "captions", .title = "GhostPen Captions", .url = "index.html#/captions", .width = 900, .height = 170, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
     };
-    for (windows) |w| App.registerWindow(w) catch |err| log.err("window {s}: {s}", .{ w.label, @errorName(err) });
+    for (windows) |w| {
+        // Single-window mode: the pages live in the app window; only the
+        // overlays set to float get windows of their own.
+        if (!std.mem.eql(u8, windowFor(w.label), w.label)) continue;
+        App.registerWindow(w) catch |err| log.err("window {s}: {s}", .{ w.label, @errorName(err) });
+    }
 
+    if (has_tray) setUpTray();
+
+    const failed = registerHotkeys(arena.allocator(), s);
+    if (failed.len > 0) log.warn("hotkeys not registered: {s} (bind `ghostpen --trigger` in your desktop instead)", .{failed});
+    if (hotkeys_unavailable.load(.acquire)) log.info("this desktop has no global shortcuts (no GlobalShortcuts portal): bind `ghostpen --trigger`, `--voice-input` and `--captions` in it", .{});
+
+    // macOS gates synthetic keystrokes behind Accessibility: ask once (the
+    // prompt lists GhostPen; elsewhere this is already granted).
+    switch (oriel.permissions.status(.accessibility)) {
+        .granted => {},
+        .denied => log.info("Accessibility is off for GhostPen: synthetic copy/paste won't work (System Settings → Privacy & Security → Accessibility)", .{}),
+        .prompt, .unknown => _ = oriel.permissions.request(.accessibility),
+    }
+
+    // Synthetic input available? (Probed off the UI thread: it may talk to the compositor.)
+    if (std.Thread.spawn(.{}, probeInput, .{})) |t| t.detach() else |_| {}
+
+    captions.init();
+    dictation.init();
+    meetings.init();
+    // The model service (chat, vision, embeddings, transcription) for other
+    // local apps: stt_server.zig, model_server.zig.
+    @import("stt_server.zig").maybeStart(io, environ_map);
+    updates.init(environ_map);
+    // Single-window mode is an app: its window opens at start (`--tray`, the
+    // autostart, keeps it in the tray), unless a flag picks the page.
+    if (single_window and !hasArg(launch_args, "--tray") and !hasPageArg(launch_args)) showWindow("main", false);
+    handleArgs(launch_args);
+}
+
+fn hasArg(args: []const []const u8, flag: []const u8) bool {
+    for (args) |a| if (std.mem.eql(u8, a, flag)) return true;
+    return false;
+}
+
+/// A flag that opens a page or an overlay (handleArgs shows it).
+fn hasPageArg(args: []const []const u8) bool {
+    for ([_][]const u8{ "--trigger", "--settings", "--playground", "--summary", "--meetings", "--captions", "--voice-input" }) |f|
+        if (hasArg(args, f)) return true;
+    return false;
+}
+
+/// The tray icon and its menu (desktop; Android has none).
+fn setUpTray() void {
     tray_idle_icon = switch (builtin.os.tag) {
         // macOS: a template image follows the menu bar's light/dark
         // theme without any detection on our side.
@@ -1362,35 +1656,13 @@ fn setup() !void {
         log.warn("no tray icon ({s}); use the hotkeys or `ghostpen --trigger`", .{@errorName(err)});
         break :blk null;
     };
-
-    const failed = registerHotkeys(arena.allocator(), s);
-    if (failed.len > 0) log.warn("hotkeys not registered: {s} (bind `ghostpen --trigger` in your desktop instead)", .{failed});
-
-    // macOS gates synthetic keystrokes behind Accessibility: ask once (the
-    // prompt lists GhostPen; elsewhere this is already granted).
-    switch (oriel.permissions.status(.accessibility)) {
-        .granted => {},
-        .denied => log.info("Accessibility is off for GhostPen: synthetic copy/paste won't work (System Settings → Privacy & Security → Accessibility)", .{}),
-        .prompt, .unknown => _ = oriel.permissions.request(.accessibility),
-    }
-
-    // Synthetic input available? (Probed off the UI thread: it may talk to the compositor.)
-    if (std.Thread.spawn(.{}, probeInput, .{})) |t| t.detach() else |_| {}
-
-    captions.init();
-    dictation.init();
-    meetings.init();
-    // The model service (chat, vision, embeddings, transcription) for other
-    // local apps: stt_server.zig, model_server.zig.
-    @import("stt_server.zig").maybeStart(io, environ_map);
-    updates.init(environ_map);
-    handleArgs(launch_args);
 }
 
 fn probeInput() void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     defer input_probed.store(true, .release);
+    if (!oriel.input.available) return;
     const check = oriel.input.check(arena.allocator(), .{ .io = io, .icon_png = app.build.icon.? }) catch return;
     input_available.store(check.ok, .release);
     if (!check.ok) log.info("synthetic input unavailable ({s}): manual-copy mode", .{check.detail});
@@ -1408,6 +1680,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len > 1 and std.mem.eql(u8, args[1], "--whisper-helper"))
         return @import("whisper_helper.zig").main(io, gpa, args[2..]);
     environ_map = init.environ_map;
+    // Android: models and voices in the app's storage for large files.
+    if (builtin.abi.isAndroid()) {
+        if (oriel.paths.appExternal(init.arena.allocator(), .{ .name = "GhostPen" })) |dir| {
+            llm_models.android_data_dir = std.fs.path.dirname(dir);
+        } else |err| log.warn("no app storage for models: {s}", .{@errorName(err)});
+    }
     // The built-in voice (oriel.tts) in <data dir>/GhostPen/tts.
     const tts_ready = tts.setUp(io, gpa, init.arena.allocator(), init.environ_map);
     // The LLM runner remembers its last successful split per model+settings
@@ -1417,6 +1695,7 @@ pub fn main(init: std.process.Init) !u8 {
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
     @import("models.zig").helper_exe = self_exe;
     ai.local_resolver = &resolveLocal;
+    if (oriel.system_ai.available) ai.system_generate = &systemGenerate;
     // Whisper models other apps (GhostReel) downloaded are reused.
     if (llmDirs(init.arena.allocator())) |d| {
         @import("models.zig").search_dirs = d.others;
@@ -1492,24 +1771,61 @@ pub fn main(init: std.process.Init) !u8 {
     // Logoff, shutdown or quit: the process can be killed before `oriel.main`
     // returns, so the deferred cleanup above runs on `terminating` too.
     try oriel.lifecycle.subscribe(onLifecycle);
+    // The settings now: the interface mode picks the main window.
+    shared.load(io, gpa);
+    {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        if (shared.get(io, arena.allocator())) |s| {
+            if (s.singleWindow()) single_window = true;
+            float_captions = s.captions.float;
+            float_dictation = s.dictation.float;
+            tts.setEngine(s.voiceEngine);
+        } else |_| {}
+    }
+    // Android has no floating windows (yet): captions and dictation are pages.
+    if (builtin.abi.isAndroid()) {
+        float_captions = false;
+        float_dictation = false;
+    }
+    // Android has one window and no overlays: always single.
+    if (builtin.abi.isAndroid()) return runApp(init, single_config);
+    if (single_window) return runApp(init, single_config);
+    return runApp(init, windows_config);
+}
+
+/// The menu: a frameless floating panel, shown by the trigger.
+const windows_config: App.WindowOptions = .{
+    .title = "GhostPen",
+    .width = 420,
+    .height = 640,
+    .resizable = false,
+    .decorations = false,
+    .always_on_top = true,
+    .skip_taskbar = true,
+    .placement = .{},
+    // The page paints only its rounded panel (.menu): the corners show
+    // what's behind the window.
+    .transparent = true,
+    .visible = false,
+    .hide_on_close = true,
+};
+
+/// Single-window mode: the app window, every page in its sidebar.
+const single_config: App.WindowOptions = .{
+    .title = "GhostPen",
+    .url = "index.html?mode=single#/actions",
+    .width = 1100,
+    .height = 760,
+    .visible = false,
+    // Closing it leaves GhostPen in the tray (Quit is there).
+    .hide_on_close = !builtin.abi.isAndroid(),
+};
+
+fn runApp(init: std.process.Init, comptime window: App.WindowOptions) !u8 {
     return oriel.main(init, .{ .commands = Commands, .events = Events }, .{
         .app = app.build,
-        .window = .{
-            .title = "GhostPen",
-            // The menu: a frameless floating panel, shown by the trigger.
-            .width = 420,
-            .height = 640,
-            .resizable = false,
-            .decorations = false,
-            .always_on_top = true,
-            .skip_taskbar = true,
-            .placement = .{},
-            // The page paints only its rounded panel (.menu): the corners show
-            // what's behind the window.
-            .transparent = true,
-            .visible = false,
-            .hide_on_close = true,
-        },
+        .window = window,
         .setup = &setup,
         .on_second_instance = &handleArgs,
     });

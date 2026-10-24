@@ -34,6 +34,8 @@ pub fn rootDir(arena: std.mem.Allocator) ![]const u8 {
     const s = try main.shared.get(main.io, arena);
     const dir = std.mem.trim(u8, s.meetings.dir, " \t");
     if (dir.len > 0) return expandHome(arena, dir);
+    // Android: no home or Documents folder an app can write; the app's own data.
+    if (builtin.abi.isAndroid()) return std.fs.path.join(arena, &.{ try oriel.paths.appData(arena, .{ .name = "GhostPen" }), "Meetings" });
     return std.fs.path.join(arena, &.{ try documentsDir(arena), "GhostPen", "Meetings" });
 }
 
@@ -533,8 +535,24 @@ const search_frames = rate * 15;
 fn transcribe(arena: std.mem.Allocator, root: []const u8, id: []const u8, m: *Meeting, s: main.Settings) !void {
     // The speech model of Settings → Speech, as captions and dictation.
     const model = s.captions.model;
-    if (!models.isDownloaded(main.io, gpa, model))
-        return oriel.ipc.fail("The whisper model \"{s}\" isn't downloaded (Settings → Speech models).", .{model});
+    // Not on the device yet (a first meeting on a new phone): fetch it now,
+    // with its progress on the meeting, rather than leave the recording untranscribed.
+    if (!models.isDownloaded(main.io, gpa, model)) {
+        log.info("meeting {s}: downloading the whisper model {s} first", .{ id, model });
+        const Report = struct {
+            fn on(meeting_id: []const u8, p: models.Progress) void {
+                if (p.total == 0) return;
+                var buf: [96]u8 = undefined;
+                const note = std.fmt.bufPrint(&buf, "Downloading the speech model ({d} of {d} MB)", .{ p.done / 1_000_000, p.total / 1_000_000 }) catch "Downloading the speech model";
+                emitState(meeting_id, "transcribing", 0, note);
+            }
+        };
+        var status: std.http.Status = .ok;
+        models.download(main.io, gpa, arena, model, id, Report.on, &status) catch |err| return switch (err) {
+            error.Busy => oriel.ipc.fail("The speech model \"{s}\" isn't downloaded and another download is running: Redo once it's done.", .{model}),
+            else => oriel.ipc.fail("Couldn't download the speech model \"{s}\" ({s}): Redo to try again.", .{ model, @errorName(err) }),
+        };
+    }
     const f = try std.Io.Dir.cwd().openFile(main.io, try store.path(arena, root, id, store.audio_name), .{});
     defer f.close(main.io);
     const i = try wav.info(main.io, f);
@@ -1158,13 +1176,21 @@ fn notifyDone(id: []const u8, title: []const u8, body: []const u8) void {
 /// over 127.0.0.1 (oriel.media_server, range requests) while the Meetings
 /// window wants them.
 var media_mutex: std.Io.Mutex = .init;
-var media: ?*oriel.media_server.Server = null;
+/// The HTTP media server (desktop); Android plays them through oriel.media_scheme.
+const has_media = oriel.media_server.available;
+var media: if (has_media) ?*oriel.media_server.Server else ?*anyopaque = null;
 var media_root: []u8 = &.{};
 
 const media_ports = [_]u16{ 8791, 8792, 8793, 8794, 8795, 8796, 8797, 8798, 8799 };
 
 /// The base URL of the running media server (started on first use).
 fn mediaBase(arena: std.mem.Allocator, root: []const u8) ![]const u8 {
+    // Android: the WebView streams them from the app's own origin (oriel.media_scheme).
+    if (comptime builtin.abi.isAndroid()) {
+        try oriel.media_scheme.setRoot(root, .inside_root);
+        return std.mem.trimEnd(u8, oriel.media_scheme.base_url, "/");
+    }
+    if (!has_media) return error.Unsupported;
     media_mutex.lockUncancelable(main.io);
     defer media_mutex.unlock(main.io);
     if (media) |srv| {
@@ -1191,6 +1217,7 @@ fn mediaBase(arena: std.mem.Allocator, root: []const u8) ![]const u8 {
 }
 
 fn stopMediaLocked() void {
+    if (!has_media) return;
     const srv = media orelse return;
     srv.stop();
     gpa.destroy(srv);

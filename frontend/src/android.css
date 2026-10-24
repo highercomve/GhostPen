@@ -1,0 +1,303 @@
+/* Android: GhostPen dressed as an Android app (Material 3's type scale, touch
+   sizes, shapes and surfaces). Every rule sits under .platform-android (set
+   on <html> by main.tsx on Android), so desktop keeps its own look. */
+
+.platform-android {
+  --md-radius-card: 16px;
+  --md-radius-field: 12px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.platform-android,
+.platform-android body,
+.platform-android button,
+.platform-android input,
+.platform-android select,
+.platform-android textarea {
+  font-family: Roboto, "Google Sans", system-ui, sans-serif;
+}
+.platform-android body { font-size: 16px; line-height: 1.5; }
+
+/* No hover on a touch screen: pressed states instead. */
+@media (hover: none) {
+  .platform-android .btn:hover,
+  .platform-android .action:hover:not(:disabled),
+  .platform-android .shell-item:hover { background: inherit; }
+}
+
+/* ---------- The frame: app bar and navigation drawer ---------- */
+
+.platform-android .shell-bar { height: 64px; padding: 0 4px; border-bottom: 0; background: var(--bg); }
+.platform-android .shell-bar .shell-toggle { width: 48px; height: 48px; justify-content: center; border-radius: 50%; }
+.platform-android .shell-bar .shell-toggle svg { width: 24px; height: 24px; }
+.platform-android .shell-title { font-size: 22px; font-weight: 400; }
+
+.platform-android .shell.narrow .shell-nav { width: min(320px, 86vw); padding: 12px; border-right: 0; border-radius: 0 16px 16px 0; background: var(--bg-soft); }
+.platform-android .shell-brand { padding: 16px 16px 12px; font-size: 14px; font-weight: 500; color: var(--muted); }
+.platform-android .shell-brand .shell-toggle { display: none; }
+.platform-android .shell-item { min-height: 56px; padding: 0 16px; gap: 12px; border-radius: 28px; font-size: 14px; font-weight: 500; }
+.platform-android .shell-item svg { width: 24px; height: 24px; }
+.platform-android .shell-item.active { background: var(--accent-soft); color: var(--text); }
+.platform-android .shell-sub { padding: 0 0 4px 28px; }
+.platform-android .shell-sub .shell-item { min-height: 44px; }
+.platform-android .shell-sub .shell-item.active { background: var(--accent-soft); color: var(--text); font-weight: 500; }
+.platform-android .shell-foot { border-top-color: var(--border); }
+.platform-android .shell-scrim { background: rgb(0 0 0 / 0.32); }
+
+/* ---------- Text ---------- */
+
+.platform-android .page-head p,
+.platform-android .settings-section-header p,
+.platform-android .muted.small,
+.platform-android .small { font-size: 14px; line-height: 1.45; }
+.platform-android .card h2,
+.platform-android .card h3 { font-size: 16px; font-weight: 500; letter-spacing: 0.1px; text-transform: none; }
+.platform-android .settings-panel-note { font-size: 14px; border-radius: var(--md-radius-field); }
+
+/* The reading pages: the system's typeface, not a desktop serif. */
+.platform-android .summary,
+.platform-android .meetings { font-family: Roboto, system-ui, sans-serif; --reader-font: Roboto, system-ui, sans-serif; }
+.platform-android .summary-heading h1,
+.platform-android .summary-empty h2,
+.platform-android .summary-error h2,
+.platform-android .summary-document-title,
+.platform-android .mt-side-head h2,
+.platform-android .mt-placeholder h2,
+.platform-android .mt-title,
+.platform-android .mt-title-input,
+.platform-android .mt-notes-heading h3,
+.platform-android .mt-workspace-head h1 { font-family: Roboto, system-ui, sans-serif; letter-spacing: 0; font-weight: 400; }
+.platform-android .summary-document-title,
+.platform-android .mt-title { font-size: 24px; line-height: 1.3; }
+.platform-android .mt-side-head h2,
+.platform-android .mt-workspace-head h1 { font-size: 22px; }
+.platform-android .mt-placeholder h2,
+.platform-android .summary-empty h2 { font-size: 24px; }
+.platform-android .mt-text,
+.platform-android .mt-summary-body,
+.platform-android .mt-notes-editor { font-family: Roboto, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+
+/* ---------- Surfaces ---------- */
+
+.platform-android .card { border-radius: var(--md-radius-card); border-color: transparent; background: var(--bg-soft); padding: 20px 16px; }
+.platform-android .settings-callout,
+.platform-android .llm-row { border-radius: var(--md-radius-field); }
+.platform-android .llm-row { padding: 14px 16px; min-height: 72px; }
+
+/* ---------- Controls: touch sizes and shapes ---------- */
+
+.platform-android .btn,
+.platform-android .cap-btn,
+.platform-android .summary-copy {
+  min-height: 40px;
+  padding: 0 20px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
+}
+.platform-android .btn.primary { color: #fff; }
+.platform-android .settings-footer .btn { min-height: 48px; border-radius: 24px; flex: 1; }
+
+.platform-android label { font-size: 14px; gap: 8px; margin-bottom: 16px; }
+.platform-android input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.platform-android select,
+.platform-android .card textarea,
+.platform-android .pg-area {
+  min-height: 52px;
+  padding: 12px 16px;
+  border-radius: var(--md-radius-field);
+  font-size: 16px; /* also keeps the WebView from zooming in on focus */
+}
+.platform-android textarea,
+.platform-android .pg-area { min-height: 120px; }
+.platform-android input[type="checkbox"],
+.platform-android input[type="radio"] { width: 22px; height: 22px; accent-color: var(--accent); flex: none; }
+.platform-android label.checkbox { min-height: 48px; gap: 16px; font-size: 16px; }
+.platform-android input[type="range"] { accent-color: var(--accent); height: 32px; }
+
+/* The menu's actions and the provider choices: list items. */
+.platform-android .action { min-height: 64px; padding: 12px 16px; border-radius: var(--md-radius-field); gap: 16px; }
+.platform-android .action-label { font-size: 16px; font-weight: 500; }
+.platform-android .action-hint { font-size: 14px; }
+.platform-android .action-icon { width: 24px; height: 24px; }
+.platform-android .settings-provider-option { border-radius: var(--md-radius-field); padding: 16px; }
+
+/* Segmented controls (intensity, detail). */
+.platform-android .seg,
+.platform-android .segmented { border-radius: 20px; min-height: 40px; }
+
+/* The Settings footer: a bottom bar. */
+.platform-android .settings-footer { padding: 12px 0 16px; gap: 12px; }
+
+/* Meetings on a phone: Record is the floating action button. */
+.platform-android .shell.narrow .mt-record-button {
+  position: fixed;
+  right: 16px;
+  bottom: 24px;
+  z-index: 12;
+  min-height: 56px;
+  padding: 0 20px;
+  gap: 12px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 500;
+  box-shadow: 0 3px 8px rgb(0 0 0 / 0.35);
+}
+.platform-android .shell.narrow .mt-record-button .mt-record-dot { background: #fff; }
+.platform-android .shell.narrow .mt-record-button.stop { background: var(--danger); }
+/* Above the player while a meeting is open. */
+.platform-android .shell.narrow .meetings.opened .mt-record-button { bottom: 104px; }
+.platform-android .shell.narrow .mt-item { border-radius: var(--md-radius-field); padding: 14px 16px; }
+
+/* The meetings list on a phone: an Android list, not a desktop sidebar. */
+.platform-android .shell.narrow .mt-side { background: var(--bg); }
+.platform-android .shell.narrow .mt-side-head { padding: 8px 16px 0; }
+/* The app bar says Meetings; a phone has no folder to open. */
+.platform-android .shell.narrow .mt-side-head { display: none; }
+.platform-android .shell.narrow .meetings.browsing .mt-workspace-head { border: 0; padding: 0; min-height: 0; }
+.platform-android .shell.narrow .meetings.browsing .mt-recorder { border: 0; margin: 0; }
+.platform-android input.mt-search[type="search"] {
+  margin: 4px 16px 12px;
+  min-height: 52px;
+  padding: 0 20px 0 48px !important; /* past the generic field padding */
+  border: 0;
+  border-radius: 28px;
+  background: var(--bg-soft) no-repeat 16px center / 20px 20px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239aa0ab' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
+  font-size: 16px;
+}
+.platform-android .mt-list { padding: 0 8px 96px; gap: 2px; }
+.platform-android .mt-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  min-height: 72px;
+  padding: 12px 12px;
+  border: 0;
+  border-radius: var(--md-radius-field);
+  background: transparent;
+  text-align: left;
+}
+.platform-android .mt-item:active,
+.platform-android .mt-item.active { background: var(--bg-soft); }
+.platform-android .shell.narrow .mt-item.active { background: transparent; } /* a phone shows one at a time */
+.platform-android .mt-item-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.platform-android .mt-item-avatar svg { width: 20px; height: 20px; }
+.platform-android .mt-item-text { gap: 2px; flex: 1; }
+.platform-android .mt-item-title { font-size: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.platform-android .mt-item-meta { font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.platform-android .mt-item-preview { font-size: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.platform-android .mt-badge { border-radius: 8px; padding: 2px 8px; font-size: 12px; font-weight: 500; }
+.platform-android .shell.narrow .mt-side-foot { padding: 8px 16px 16px; border-top: 0; }
+.platform-android .mt-voices-btn { min-height: 40px; padding: 0 12px; border: 0; border-radius: 20px; background: transparent; color: var(--accent); font-size: 14px; font-weight: 500; }
+
+/* A meeting open on a phone: the app bar has the back arrow (to Meetings). */
+.platform-android .shell.narrow .meetings.opened .mt-recorder:not(.is-recording) { display: none; }
+.platform-android .shell.narrow .meetings.opened .mt-back { display: none; }
+.platform-android .shell.narrow .mt-head { padding: 8px 16px 0; }
+.platform-android .shell.narrow .mt-actions { flex-wrap: wrap; gap: 8px; }
+
+/* Menus on a phone: bottom sheets over a dimmed page (back closes them). */
+.platform-android .shell.narrow .mt-sheet-scrim { display: block; position: fixed; inset: 0; z-index: 40; background: rgb(0 0 0 / 0.32); }
+.platform-android .shell.narrow .mt-menu {
+  position: fixed;
+  left: 0 !important;
+  right: 0;
+  top: auto !important;
+  bottom: 0;
+  z-index: 41;
+  min-width: 0;
+  max-height: 72vh;
+  overflow-y: auto;
+  padding: 28px 0 calc(16px + env(safe-area-inset-bottom));
+  border: 0;
+  border-radius: 28px 28px 0 0;
+  background: var(--bg-soft);
+  box-shadow: 0 -2px 12px rgb(0 0 0 / 0.3);
+}
+/* The drag handle. */
+.platform-android .shell.narrow .mt-menu::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  width: 32px;
+  height: 4px;
+  margin-left: -16px;
+  border-radius: 2px;
+  background: var(--muted);
+  opacity: 0.4;
+}
+.platform-android .shell.narrow .mt-menu button { min-height: 56px; padding: 0 24px; border-radius: 0; font-size: 16px; }
+.platform-android .shell.narrow .mt-menu-label { padding: 12px 24px 4px; font-size: 14px; text-transform: none; letter-spacing: 0.1px; font-weight: 500; }
+.platform-android .shell.narrow .mt-menu-sep { margin: 8px 0; }
+
+/* The meeting's tabs on a phone: a scrolling tab row, and Find under it at full width. */
+.platform-android .shell.narrow .mt-tabs { overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; }
+.platform-android .shell.narrow .mt-tabs button { min-height: 48px; padding: 0 16px; font-size: 14px; font-weight: 500; white-space: nowrap; }
+.platform-android .shell.narrow .mt-find { margin: 8px 0 0; flex: 1 1 100%; }
+.platform-android .shell.narrow .mt-find input { width: 100%; min-height: 48px; border-radius: 24px; padding: 0 48px 0 20px !important; font-size: 16px; }
+
+/* Captions on a phone: Start is the main action; the drawer has Meetings and Settings. */
+.platform-android .shell.narrow .captions.page { padding: 16px; }
+.platform-android .shell.narrow .captions.page .cap-bar { background: transparent; border: 0; padding: 0; }
+.platform-android .shell.narrow .captions.page .cap-brand:empty { display: none; }
+.platform-android .shell.narrow .captions.page .cap-controls { gap: 8px; }
+.platform-android .shell.narrow .captions.page .cap-btn { min-height: 40px; padding: 0 16px; border-radius: 20px; font-size: 14px; }
+.platform-android .shell.narrow .captions.page .cap-start,
+.platform-android .shell.narrow .captions.page .cap-btn.stop { background: var(--accent); border-color: var(--accent); color: #fff; padding: 0 24px; }
+.platform-android .shell.narrow .captions.page .cap-btn.stop { background: var(--danger); border-color: var(--danger); }
+.platform-android .shell.narrow .captions.page .cap-to-meetings,
+.platform-android .shell.narrow .captions.page .cap-to-settings { display: none; }
+.platform-android .cap-history { font-size: 16px; }
+
+/* Dictation on a phone: a big round mic, the app's own surfaces. */
+.platform-android .shell.narrow .dictation.page { padding: 16px; }
+.platform-android .dictation.page .dict-pill { padding: 16px; gap: 12px; background: var(--bg-soft); border-radius: var(--md-radius-card); }
+.platform-android .dictation.page .dict-top { flex-wrap: wrap; gap: 12px; }
+.platform-android .dictation.page .dict-mic { width: 56px; height: 56px; border-radius: 50%; background: var(--accent); color: #fff; }
+.platform-android .dictation.page .dict-mic svg { width: 24px; height: 24px; }
+.platform-android .dictation.page .dict-mic.live { background: var(--danger); }
+.platform-android .dictation.page .dict-wave { flex: 1 1 100%; order: 9; min-height: 32px; background: transparent; }
+.platform-android .dictation.page .dict-text { background: var(--bg); border-radius: var(--md-radius-field); padding: 16px; min-height: 160px; font-size: 16px; }
+.platform-android .dictation.page .dict-hint { font-size: 14px; color: var(--muted); }
+.platform-android .dictation.page .dict-lang { min-height: 40px; border-radius: 20px; padding: 0 12px; }
+.platform-android .dictation.page .dict-btn { width: 40px; height: 40px; border-radius: 50%; }
+.platform-android .shell.narrow .mt-toolbar { flex-wrap: wrap; row-gap: 4px; }
+
+/* Summary on a phone: its actions only once there's a summary, in one row of
+   compact buttons that scrolls sideways instead of wrapping. */
+.platform-android .shell.narrow .summary-head { padding: 8px 16px; min-height: 0; }
+.platform-android .shell.narrow .summary:not(.has-content) .summary-head { display: none; }
+.platform-android .shell.narrow .summary-head-btns {
+  flex: 1 1 100%;
+  flex-wrap: nowrap !important;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.platform-android .shell.narrow .summary-head-btns .summary-copy {
+  flex: none;
+  min-height: 36px;
+  padding: 0 14px;
+  gap: 6px;
+  border-radius: 18px;
+  font-size: 14px;
+}
+.platform-android .shell.narrow .summary-head-btns .summary-copy svg { width: 18px; height: 18px; }
+.platform-android .shell.narrow .summary-body { padding-top: 8px; }

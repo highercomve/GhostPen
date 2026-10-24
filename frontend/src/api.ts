@@ -4,6 +4,7 @@
 // from them, has the exact ones).
 import { orielWindow } from "./oriel";
 import { listen } from "./events";
+import { singleWindow } from "./mode";
 
 const invoke = <T>(cmd: string, args?: unknown): Promise<T> => window.oriel.invoke(cmd, args ?? null) as Promise<T>;
 
@@ -13,7 +14,7 @@ export interface Profile {
   id: string;
   name: string;
   /** "openai" (an OpenAI-compatible endpoint) or "local" (built-in: GhostPen runs the model itself). */
-  provider?: "openai" | "local";
+  provider?: "openai" | "local" | "system";
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -28,6 +29,8 @@ export interface CustomAction {
 }
 
 export interface CaptionsSettings {
+  /** A floating bar (off, in single-window mode: a page of the app window). */
+  float: boolean;
   model: string;
   language: string;
   whisperTranslate: boolean;
@@ -64,6 +67,10 @@ export interface Settings {
   server?: ServerSettings;
   /** Check for updates in the background and install them where possible. */
   autoUpdate: boolean;
+  /** "windows" or "single" (applies on the next start). */
+  interfaceMode: "windows" | "single";
+  /** Who reads aloud: "auto", "kokoro" or "system" (the device's voices, Android). */
+  voiceEngine?: "auto" | "kokoro" | "system";
 }
 
 /** Meeting mode (MEETINGS.md): captions that record, keep and proofread. */
@@ -107,6 +114,17 @@ export interface LocalLlmSettings {
 }
 
 export const isLocal = (p: Profile | undefined) => p?.provider === "local";
+/** The device's own model (Gemini Nano on Android). */
+export const isSystem = (p: Profile | undefined) => p?.provider === "system";
+
+export interface SystemAiStatus {
+  /** Built with it (Android). */
+  built: boolean;
+  state: "available" | "downloadable" | "downloading" | "unavailable";
+  reason: string;
+}
+export const systemAiStatus = () => invoke<SystemAiStatus>("system_ai_status");
+export const systemAiDownload = () => invoke<void>("system_ai_download");
 
 export type SelectionInfo =
   | { kind: "empty" }
@@ -145,6 +163,8 @@ export interface Status {
   manual_mode: boolean;
   active_profile: string;
   active_model: string;
+  /** No global shortcuts on this desktop: the commands are bound in it instead. */
+  hotkeys_unavailable: boolean;
 }
 
 export interface ProcessResult {
@@ -288,13 +308,25 @@ export const processText = (action: string, targetLang: string | null, level: Le
 export const processTextStream = (action: string, targetLang: string | null, level: Level, text: string) =>
   invoke<void>("process_text_stream", { action, targetLang, level, text });
 export const openPlayground = () => invoke<void>("open_playground");
-/** Hide the window this page runs in (Oriel: the window API, no command). */
-export const hideWindow = () => orielWindow.current().hide();
+/** Hide the window this page runs in (Oriel: the window API, no command).
+ *  In the single app window a page doesn't hide the app: nothing happens. */
+export const hideWindow = (): Promise<void> => (singleWindow ? Promise.resolve() : orielWindow.current().hide());
 /** Close the menu without pasting: the clipboard gets back what it held before the trigger. */
 export const dismissMenu = (): Promise<void> => {
   invoke<void>("menu_dismissed").catch((e) => console.warn("menu_dismissed:", e));
   return hideWindow().catch((e) => console.warn("hide the menu:", e));
 };
+
+/** The window the page runs in (ui_state in main.zig). */
+export interface UiState {
+  single: boolean;
+  android: boolean;
+  /** The page the app window should show ("/settings", …). */
+  route: string;
+  float_captions: boolean;
+  float_dictation: boolean;
+}
+export const uiState = () => invoke<UiState>("ui_state");
 export const openSettings = () => invoke<void>("open_settings");
 
 // ---- captions (ADR-008) --------------------------------------------------------------
@@ -328,6 +360,10 @@ export const captionsDownloadModel = (model?: string) =>
 
 /** Dictation shares the whisper model with captions (`settings.captions.model`). */
 export interface DictationSettings {
+  /** A floating panel (off, in single-window mode: a page of the app window). */
+  float: boolean;
+  /** "auto" (Android: the device's recognizer when there is one), "whisper" or "system". */
+  engine?: "auto" | "whisper" | "system";
   language: string;
   proofread: boolean;
   device: string;
@@ -499,6 +535,29 @@ export const formatBytes = (n: number) =>
 export const PASTE_KEYS = /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent) ? "⌘V" : "Ctrl+V";
 
 // ---- about & updates ------------------------------------------------------------------
+
+/** What's running (Settings → About; system_info in main.zig). */
+export interface SystemInfo {
+  version: string;
+  oriel: string;
+  os: string;
+  os_version: string;
+  device: string;
+  arch: string;
+  abi: string;
+  build: string;
+  cpus: number;
+  memory_mb: number;
+  gpu: string;
+  layout: "single" | "windows";
+  session: string;
+  system_ai: boolean;
+  system_voice: boolean;
+  speech_recognition: boolean;
+}
+export const systemInfo = () => invoke<SystemInfo>("system_info");
+/** Start GhostPen again (desktop). */
+export const restartApp = () => invoke<void>("restart_app");
 
 export interface AppInfo {
   version: string;

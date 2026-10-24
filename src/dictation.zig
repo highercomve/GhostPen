@@ -9,6 +9,7 @@
 //! or a new start silences it) and its worker thread each hold a reference.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const oriel = @import("oriel");
 const main = @import("main.zig");
 const models = @import("models.zig");
@@ -255,42 +256,49 @@ const Session = struct {
         if (transcript.len == 0) return update("Didn\u{2019}t catch anything \u{2014} try again.", "error");
         update(transcript, "transcribing");
 
-        const final = if (proofread_live.load(.acquire)) blk: {
-            update(transcript, "proofreading");
-            break :blk main.proofread(arena.allocator(), transcript) catch |err| fallback: {
-                log.warn("proofread failed ({s}); using the transcript", .{@errorName(err)});
-                break :fallback transcript;
-            };
-        } else transcript;
-        if (s.aborted.load(.acquire)) return;
+        deliver(arena.allocator(), transcript, &s.aborted);
+    }
+};
 
-        // Shares the menu's busy guard so clipboard writes can't interleave:
-        // waits a few seconds for a menu action, else keeps the text to copy.
-        var waited: u32 = 0;
-        while (main.busy.swap(true, .acq_rel)) : (waited += 50) {
-            if (s.aborted.load(.acquire)) return;
-            if (waited >= busy_wait_ms) return updateKeep(final, "Another action is still running: nothing was copied.");
-            main.io.sleep(.fromMilliseconds(50), .awake) catch return updateKeep(final, "Nothing was copied.");
-        }
-        defer main.busy.store(false, .release);
-        const settings = main.shared.get(main.io, arena.allocator()) catch main.Settings{};
-        if (settings.dictation.paste) {
-            const pasted = main.pasteFromWindow("dictation", final, settings) catch |err| {
-                var buf: [128]u8 = undefined;
-                return update(std.fmt.bufPrint(&buf, "Clipboard error: {s}", .{@errorName(err)}) catch "Clipboard error", "error");
-            };
-            // Not pasted (no synthetic input): it's on the clipboard, shown as done.
-            if (!pasted) log.info("dictation: {d} chars copied (no synthetic input to paste)", .{final.len});
-            return update(final, "done");
-        }
-        oriel.clipboard.writeText(final) catch |err| {
+/// A transcript's way out (both engines): proofread when asked, then pasted
+/// where the user was, or copied; the page shows the result. `aborted`: a
+/// cancel or a newer session silences it.
+fn deliver(arena: std.mem.Allocator, transcript: []const u8, aborted: *const std.atomic.Value(bool)) void {
+    const final = if (proofread_live.load(.acquire)) blk: {
+        update(transcript, "proofreading");
+        break :blk main.proofread(arena, transcript) catch |err| fallback: {
+            log.warn("proofread failed ({s}); using the transcript", .{@errorName(err)});
+            break :fallback transcript;
+        };
+    } else transcript;
+    if (aborted.load(.acquire)) return;
+
+    // Shares the menu's busy guard so clipboard writes can't interleave:
+    // waits a few seconds for a menu action, else keeps the text to copy.
+    var waited: u32 = 0;
+    while (main.busy.swap(true, .acq_rel)) : (waited += 50) {
+        if (aborted.load(.acquire)) return;
+        if (waited >= busy_wait_ms) return updateKeep(final, "Another action is still running: nothing was copied.");
+        main.io.sleep(.fromMilliseconds(50), .awake) catch return updateKeep(final, "Nothing was copied.");
+    }
+    defer main.busy.store(false, .release);
+    const settings = main.shared.get(main.io, arena) catch main.Settings{};
+    if (settings.dictation.paste) {
+        const pasted = main.pasteFromWindow(main.windowFor("dictation"), final, settings) catch |err| {
             var buf: [128]u8 = undefined;
             return update(std.fmt.bufPrint(&buf, "Clipboard error: {s}", .{@errorName(err)}) catch "Clipboard error", "error");
         };
-        log.info("dictation: {d} chars copied", .{final.len});
-        update(final, "done");
+        // Not pasted (no synthetic input): it's on the clipboard, shown as done.
+        if (!pasted) log.info("dictation: {d} chars copied (no synthetic input to paste)", .{final.len});
+        return update(final, "done");
     }
-};
+    oriel.clipboard.writeText(final) catch |err| {
+        var buf: [128]u8 = undefined;
+        return update(std.fmt.bufPrint(&buf, "Clipboard error: {s}", .{@errorName(err)}) catch "Clipboard error", "error");
+    };
+    log.info("dictation: {d} chars copied", .{final.len});
+    update(final, "done");
+}
 
 /// The configured microphone (substring match), else the default input.
 pub fn pickMicrophone(device: []const u8) !?[:0]u8 {
@@ -306,7 +314,57 @@ pub fn pickMicrophone(device: []const u8) !?[:0]u8 {
     return error.DeviceNotFound;
 }
 
+// ---- Android's recognizer (oriel.dictation's `.system` engine) ---------------------------
+
+/// The phone's own speech recognition (Google's on-device model on most
+/// phones): nothing to download. "auto" uses it on Android when it's there.
+/// Its text reaches the page as oriel.dictation's "dictation:partial" and
+/// "dictation:final"; stop hands the whole of it to `deliver`.
+const has_system = builtin.abi.isAndroid() and oriel.dictation.available;
+var system_on: std.atomic.Value(bool) = .init(false);
+var system_aborted: std.atomic.Value(bool) = .init(false);
+var system_ready = false;
+
+fn wantsSystem(engine: []const u8) bool {
+    return has_system and !std.mem.eql(u8, engine, "whisper");
+}
+
+fn startSystem() !void {
+    if (comptime !has_system) return error.EngineUnavailable;
+    if (!system_ready) {
+        const base = try oriel.paths.appData(gpa, .{ .name = "GhostPen" });
+        defer gpa.free(base);
+        const dir = try std.fs.path.join(gpa, &.{ base, "dictation" });
+        defer gpa.free(dir);
+        oriel.dictation.init(main.io, gpa, dir);
+        system_ready = true;
+    }
+    var lang_buf: [16]u8 = undefined;
+    _ = try oriel.dictation.start(.{ .engine = .system, .language = language(&lang_buf) });
+    system_aborted.store(false, .release);
+    system_on.store(true, .release);
+    update("", "listening");
+}
+
+/// Stop the system recognizer (a worker: it waits for the last phrase), then
+/// deliver what it heard, or drop it when cancelled.
+fn finishSystem(finalize: bool) void {
+    if (comptime !has_system) return;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const r = oriel.dictation.stop(arena.allocator()) catch |err| {
+        var buf: [128]u8 = undefined;
+        return update(std.fmt.bufPrint(&buf, "Speech recognition failed: {s}", .{@errorName(err)}) catch "Speech recognition failed", "error");
+    };
+    if (!finalize or system_aborted.load(.acquire)) return update("", "cancelled");
+    const text = std.mem.trim(u8, r.text, " \t\r\n");
+    if (text.len == 0) return update("Didn\u{2019}t catch anything \u{2014} try again.", "error");
+    update(text, "transcribing");
+    deliver(arena.allocator(), text, &system_aborted);
+}
+
 pub fn isRunning() bool {
+    if (system_on.load(.acquire)) return true;
     mutex.lockUncancelable(main.io);
     defer mutex.unlock(main.io);
     return if (current) |s| s.listening.load(.acquire) else false;
@@ -320,8 +378,19 @@ fn start(arena: std.mem.Allocator) ![]const u8 {
     if (starting.swap(true, .acq_rel)) return oriel.ipc.fail("Dictation is already starting.", .{});
     defer starting.store(false, .release);
     const gen = cancel_gen.load(.acquire);
+    if (models.test_audio == null) try main.ensureMicrophone();
 
     const s = try main.shared.get(main.io, arena);
+    if (wantsSystem(s.dictation.engine)) {
+        if (startSystem()) {
+            proofread_live.store(s.dictation.proofread, .release);
+            return arena.dupe(u8, "speech recognition");
+        } else |err| {
+            if (std.mem.eql(u8, s.dictation.engine, "system"))
+                return oriel.ipc.fail("This device's speech recognition isn't available ({s}). Pick Whisper in Settings → Speech.", .{@errorName(err)});
+            log.info("dictation: the system recognizer isn't available ({s}); whisper", .{@errorName(err)});
+        }
+    }
     const model = s.captions.model;
     if (!models.isDownloaded(main.io, gpa, model))
         return oriel.ipc.fail("Whisper model \"{s}\" isn't downloaded yet. Download it in Settings \u{2192} Captions.", .{model});
@@ -386,6 +455,12 @@ fn start(arena: std.mem.Allocator) ![]const u8 {
 /// Stop listening: finalize (`finalize` true) or cancel. Cancel also
 /// silences a session that is still finalizing (Esc during "Polishing…").
 fn end(finalize: bool) void {
+    if (system_on.swap(false, .acq_rel)) {
+        if (!finalize) system_aborted.store(true, .release);
+        const t = std.Thread.spawn(.{}, finishSystem, .{finalize}) catch return update("", "cancelled");
+        t.detach();
+        return;
+    }
     mutex.lockUncancelable(main.io);
     defer mutex.unlock(main.io);
     _ = cancel_gen.fetchAdd(1, .acq_rel);
@@ -400,6 +475,11 @@ fn end(finalize: bool) void {
 }
 
 fn showOverlay() void {
+    // Single-window mode without the floating panel: the app's Dictation page.
+    if (!std.mem.eql(u8, main.windowFor("dictation"), "dictation")) {
+        main.showWindow("dictation", false);
+        return events.emit(.@"ghostpen://dictation-show", .{});
+    }
     const w = App.ensureWindow("dictation") catch |err| return log.err("dictation window: {s}", .{@errorName(err)});
     w.show();
     w.focus();

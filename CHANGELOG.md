@@ -2,6 +2,44 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.0] - 2026-10-23
+
+### Added
+
+- **One app window** (Settings → Actions → Window layout): every tool in a
+  sidebar instead of a window each, with the hotkey and the tray opening the
+  right page there. A window per tool stays the default; captions and
+  dictation can still float. Changing it offers **Restart now**.
+- **Android** (preview, built with `oriel android build`): the single app
+  window, with a top app bar and navigation drawer on phones and a sidebar on
+  Chromebooks; Android's back navigation; menus as bottom sheets.
+  - The phone's own engines: **Gemini Nano** as an AI profile ("On this
+    device"), Android's **speech recognition** for dictation, and its
+    **voices** for Read aloud, nothing to download.
+  - Meetings record other apps' audio (with the screen-capture consent) or
+    the microphone, and play back with seeking.
+- Captions as a page keep the whole session as a transcript with times, Copy
+  and Clear; Dictation as a page lists this session's dictations.
+- Settings → About shows **This build** (versions, system, architecture,
+  memory, GPU backend, on-device engines) with **Copy details**; the copy
+  and paste diagnostics moved there from Connections.
+- Settings → Voices: **Play** a sample of each voice (and the device's).
+
+### Changed
+
+- Saving a meeting downloads the speech model first when it's missing,
+  instead of leaving it untranscribed.
+- Captions, meetings and dictation ask for the microphone permission before
+  they start.
+- "Read summary" is now "Read".
+- Built on Oriel 0.19.3.
+
+### Fixed
+
+- A desktop without the GlobalShortcuts portal (e.g. ChromeOS's Linux) no
+  longer reports every hotkey as failed on each save: Settings explains how
+  to bind the commands there instead.
+
 ## [0.3.9] - 2026-10-22
 
 ### Added

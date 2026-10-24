@@ -9,7 +9,22 @@ import {
   ttsDelete,
   listenVoice,
   formatBytes,
+  ttsSpeak,
+  ttsStop,
 } from "./api";
+
+/** A sentence to hear a voice with, in its language (espeak codes). */
+const SAMPLES: Record<string, string> = {
+  en: "Hello! This is how I sound when GhostPen reads your text aloud.",
+  es: "¡Hola! Así sueno cuando GhostPen lee tu texto en voz alta.",
+  fr: "Bonjour ! Voici ma voix quand GhostPen lit votre texte à voix haute.",
+  pt: "Olá! É assim que eu soo quando o GhostPen lê o seu texto em voz alta.",
+  it: "Ciao! Ecco come suono quando GhostPen legge il tuo testo ad alta voce.",
+  ja: "こんにちは。GhostPenがあなたの文章を読み上げるときの声です。",
+  zh: "你好！这是GhostPen为你朗读文字时的声音。",
+  hi: "नमस्ते! जब GhostPen आपका पाठ पढ़ता है, तो मेरी आवाज़ ऐसी होती है।",
+};
+export const sampleFor = (lang: string) => SAMPLES[lang.split("-")[0]] ?? SAMPLES.en;
 
 /**
  * Settings → Voices: the built-in Kokoro text-to-speech (oriel.tts). Download
@@ -49,6 +64,14 @@ export default function Voices() {
 
   const busy = progress !== null || !!catalog?.downloading;
   const inUse = state?.phase === "generating" || state?.phase === "playing";
+  const busySample = inUse || state?.phase === "downloading";
+  const modelReady = (catalog?.models ?? []).some((m) => m.downloaded);
+  const modelSize = catalog?.models?.[0]?.size ?? 0;
+  /** Play a voice's sample (downloading what it needs first), or stop the one playing. */
+  const play = (voice: string, lang: string) => {
+    if (busySample && state?.voice === voice) return void ttsStop().catch(() => {});
+    ttsSpeak(sampleFor(lang), lang, voice).catch((e) => setMessage(String(e)));
+  };
 
   const download = async (id: string, size: number) => {
     setMessage("");
@@ -161,6 +184,15 @@ export default function Voices() {
                 )}
               </div>
               <div className="llm-actions">
+                {!p && (
+                  <button
+                    className="btn"
+                    onClick={() => play(v.id, v.lang ?? "en-us")}
+                    title={v.downloaded && modelReady ? "Hear this voice" : `Hear this voice (downloads ${formatBytes((v.downloaded ? 0 : v.size) + (modelReady ? 0 : modelSize))} first)`}
+                  >
+                    {busySample && state?.voice === v.id ? "■ Stop" : "▶ Play"}
+                  </button>
+                )}
                 {p ? null : v.downloaded ? (
                   deleteButtons(v.id, v.size)
                 ) : (

@@ -14,7 +14,9 @@ import {
   MeetingProgress,
   openSettings,
   hideWindow,
+  copyText,
 } from "./api";
+import { singleWindow } from "./mode";
 
 interface Line {
   id: number;
@@ -23,6 +25,8 @@ interface Line {
   speaker: string;
   /** The speaker's label ("" = none). */
   name: string;
+  /** When it came (ms since the epoch). */
+  at: number;
 }
 
 /** Consecutive captions by one speaker: one line in the overlay. */
@@ -66,6 +70,21 @@ function clock(seconds: number): string {
 // doesn't clear old frames, so a bar that resizes ghosts): it shows as many lines as fit
 // and clips the oldest at the top. Enough captions to fill it at the smallest font size.
 const KEEP_CAPTIONS = 8;
+// As a page of the app window (single-window mode, captions not floating) there's room:
+// the whole session, as a transcript that scrolls.
+const KEEP_HISTORY = 5000;
+const asPage = singleWindow;
+
+function timeOf(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/** The transcript as plain text: a line per speaker turn. */
+function transcriptText(lines: Line[]): string {
+  return turnsOf(lines)
+    .map((t) => `[${timeOf(t.lines[0].at)}] ${t.name ? t.name + ": " : ""}${t.lines.map((l) => l.text.trim()).join(" ")}`)
+    .join("\n");
+}
 
 export default function Captions() {
   const [lines, setLines] = useState<Line[]>([]);
@@ -108,8 +127,8 @@ export default function Captions() {
       setError(null);
       setLines((prev) => {
         const label = name || (speaker === "me" ? "Me" : "");
-        const next = [...prev, { id: nextId.current++, text, translated, speaker, name: label }];
-        return next.slice(-KEEP_CAPTIONS);
+        const next = [...prev, { id: nextId.current++, text, translated, speaker, name: label, at: Date.now() }];
+        return next.slice(-(asPage ? KEEP_HISTORY : KEEP_CAPTIONS));
       });
     });
     const un2 = listen<string>("ghostpen://caption-error", (e) => {
@@ -155,6 +174,8 @@ export default function Captions() {
   // captions never keep transcribing invisibly behind a hidden window.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
+      // A page of the app window: Esc isn't "close the overlay".
+      if (asPage) return;
       if (ev.key === "Escape") {
         ev.preventDefault();
         captionsStop().catch(() => {});
@@ -220,13 +241,37 @@ export default function Captions() {
 
   const running = status?.running ?? false;
 
+  // The page's transcript follows the newest caption unless scrolled up to read.
+  const historyRef = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  useEffect(() => {
+    const el = historyRef.current;
+    if (el && following.current) el.scrollTop = el.scrollHeight;
+  }, [lines]);
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await copyText(transcriptText(lines));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     // Pressed anywhere but a button, the overlay moves (Oriel drag region).
-    <div className={`captions ${ghost ? "ghost" : ""}`} data-oriel-drag-region>
+    <div className={`captions ${ghost ? "ghost" : ""} ${asPage ? "page" : ""}`} data-oriel-drag-region={asPage ? undefined : true}>
+      {asPage && (
+        <header className="page-head">
+          <h1>Captions</h1>
+          <p>Live subtitles of what this device plays, kept for the whole session.</p>
+        </header>
+      )}
       {!ghost && (
         <div className="cap-bar">
           <span className="cap-brand">
-            GhostPen Captions
+            {!asPage && "GhostPen Captions"}
             {recording && (
               <span className="cap-rec" title="Recording this meeting: Stop saves it">
                 ● REC {clock(recSeconds)}
@@ -253,7 +298,7 @@ export default function Captions() {
               </button>
             ) : (
               <button
-                className="cap-btn"
+                className="cap-btn cap-start"
                 onClick={onStart}
                 disabled={status ? !status.available : true}
                 title={
@@ -290,22 +335,71 @@ export default function Captions() {
             >
               🎙 Meeting
             </button>
-            <button className="cap-btn" onClick={() => openMeetings().catch(() => {})} title="Saved meetings">
+            <button className="cap-btn cap-to-meetings" onClick={() => openMeetings().catch(() => {})} title="Saved meetings">
               🗂
             </button>
-            <button className="cap-btn" onClick={enterGhost} title="Click-through (mouse passes through)">
-              👻 Ghost
-            </button>
-            <button className="cap-btn" onClick={() => openSettings().catch((e) => console.warn("open settings:", e))} title="Captions settings">
+            {asPage ? (
+              <>
+                <button className="cap-btn" onClick={onCopy} disabled={lines.length === 0} title="Copy the transcript">
+                  {copied ? "✓ Copied" : "Copy"}
+                </button>
+                <button className="cap-btn" onClick={() => setLines([])} disabled={lines.length === 0 || running} title="Clear the transcript">
+                  Clear
+                </button>
+              </>
+            ) : (
+              <button className="cap-btn" onClick={enterGhost} title="Click-through (mouse passes through)">
+                👻 Ghost
+              </button>
+            )}
+            <button className="cap-btn cap-to-settings" onClick={() => openSettings().catch((e) => console.warn("open settings:", e))} title="Captions settings">
               ⚙
             </button>
-            <button className="cap-btn" onClick={() => hideWindow().catch((e) => console.warn("hide captions:", e))} title="Hide overlay">
-              ✕
-            </button>
+            {!asPage && (
+              <button className="cap-btn" onClick={() => hideWindow().catch((e) => console.warn("hide captions:", e))} title="Hide overlay">
+                ✕
+              </button>
+            )}
           </span>
         </div>
       )}
 
+      {asPage ? (
+        <div
+          className="cap-history"
+          ref={historyRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          }}
+        >
+          {error && <div className="cap-error">⚠ {error}</div>}
+          {lines.length === 0 ? (
+            <div className="cap-idle">
+              {status && !status.available
+                ? "Captions support isn’t compiled into this build."
+                : running
+                  ? "Listening… play some audio."
+                  : status && !status.model_ready
+                    ? `Model “${status.model}” not downloaded — open Settings → Speech.`
+                    : "Press Start to caption your system audio. The whole session stays here."}
+            </div>
+          ) : (
+            turnsOf(lines).map((t) => (
+              <p key={t.lines[0].id} className={`cap-history-turn ${t.speaker === "me" ? "me" : ""}`}>
+                <span className="cap-history-time">{timeOf(t.lines[0].at)}</span>
+                {t.name && <span className="cap-speaker">{t.name}:</span>}
+                {t.lines.map((l) => (
+                  <span key={l.id}>
+                    {l.text}
+                    {l.translated && <span className="cap-tag">translated</span>}{" "}
+                  </span>
+                ))}
+              </p>
+            ))
+          )}
+        </div>
+      ) : (
       <div className="cap-stage" style={{ fontSize }}>
         {/* Idle, error, and caption text all share the ONE fixed-size bar (.cap-lines):
             swapping between differently-sized boxes ghosts on wlroots (see styles.css). */}
@@ -349,6 +443,8 @@ export default function Captions() {
           </div>
         )}
       </div>
+
+      )}
 
       {ghost && <div className="cap-ghost-hint">Tray → Captions to show controls</div>}
     </div>

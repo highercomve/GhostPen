@@ -17,15 +17,17 @@ const llm_models = @import("llm_models.zig");
 const sp = oriel.speakers;
 const log = std.log.scoped(.speakers);
 const gpa = std.heap.smp_allocator;
-const rate = sp.sample_rate;
+// Speaker labels aren't built for every platform (oriel.speakers.available:
+// not Android yet): there, every entry point says no.
+const rate = if (sp.available) sp.sample_rate else 16000;
 
 pub const available = sp.available;
 /// The catalog's first: WeSpeaker ResNet34 (Oriel's docs/speakers.md has
 /// the measurements; the ECAPA GGUF tells people apart much less well).
-pub const default_model = sp.catalog[0].id;
+pub const default_model = if (available) sp.catalog[0].id else "";
 
 var mutex: std.Io.Mutex = .init;
-var encoder: ?*sp.Encoder = null;
+var encoder: if (available) ?*sp.Encoder else ?*anyopaque = null;
 var encoder_model: []u8 = &.{};
 var family_buf: [128]u8 = undefined;
 var family_len: usize = 0;
@@ -41,6 +43,7 @@ fn modelDir(arena: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn isDownloaded(arena: std.mem.Allocator, id: []const u8) bool {
+    if (!available) return false;
     const m = find(id) orelse return false;
     const dir = modelDir(arena) catch return false;
     const p = std.fs.path.join(arena, &.{ dir, m.file }) catch return false;
@@ -51,6 +54,7 @@ pub fn isDownloaded(arena: std.mem.Allocator, id: []const u8) bool {
 /// The model's file, downloaded first when missing (resumed and verified
 /// like the other models; `progress(ctx, 0..1)`). Blocks: a worker only.
 pub fn ensureModel(arena: std.mem.Allocator, id: []const u8, ctx: anytype, comptime progress: fn (@TypeOf(ctx), f64) void) ![:0]const u8 {
+    if (!available) return error.Unsupported;
     const m = find(id) orelse return error.UnknownModel;
     const dir = try modelDir(arena);
     if (!isDownloaded(arena, id)) {
@@ -112,6 +116,7 @@ pub fn findSpeakers(
     ctx: anytype,
     comptime progress: fn (@TypeOf(ctx), f64) void,
 ) !void {
+    if (!available) return error.Unsupported;
     const Dl = struct {
         fn report(c: @TypeOf(ctx), p: f64) void {
             progress(c, p * 0.2);
@@ -320,6 +325,7 @@ fn relabel(arena: std.mem.Allocator, final: []const store.Segment, segs: []const
 /// to show. null when the model isn't downloaded (live labels never wait
 /// for a download) or the chunk can't be embedded.
 pub fn liveLabel(arena: std.mem.Allocator, tracker: *voices.Tracker, model_id: []const u8, samples: []const f32, known: []const voices.Voice) ?struct { index: usize, name: []const u8 } {
+    if (!available) return null;
     if (!isDownloaded(arena, model_id)) return null;
     const m = find(model_id) orelse return null;
     const dir = modelDir(arena) catch return null;

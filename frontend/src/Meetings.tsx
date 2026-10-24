@@ -190,6 +190,8 @@ export default function Meetings() {
   const queryRef = useRef(query);
   useEffect(() => { queryRef.current = query; }, [query]);
   const [selected, setSelected] = useState<string | null>(null);
+  // Phones: the list, or one meeting full-screen (styles.css); wide windows show both.
+  const [opened, setOpened] = useState(false);
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [progress, setProgress] = useState<Record<string, MeetingProgress>>({});
   const [error, setError] = useState<string | null>(null);
@@ -238,12 +240,69 @@ export default function Meetings() {
   const voiceBusy = voice.phase === "playing" || voice.phase === "generating" || voice.phase === "downloading";
   // The list's right-click menu: which meeting, where, and whether Delete was clicked once.
   const [ctxMenu, setCtxMenu] = useState<{ id: string; x: number; y: number; confirm: boolean } | null>(null);
+
+  // An open menu is a step of its own for back (a bottom sheet on phones:
+  // android.css): Android's back closes it rather than leaving the page.
+  const anyMenu = menuOpen !== null || speakerMenu !== null || lineMenu !== null || ctxMenu !== null;
+  const closeMenus = () => {
+    setSpeakerMenu(null);
+    setLineMenu(null);
+    setMenuOpen(null);
+    setCtxMenu(null);
+  };
+  const menuEntry = useRef(false);
+  useEffect(() => {
+    if (anyMenu && !menuEntry.current) {
+      window.history.pushState({ ghostpenSheet: true }, "");
+      menuEntry.current = true;
+    } else if (!anyMenu && menuEntry.current) {
+      menuEntry.current = false;
+      if (window.history.state?.ghostpenSheet) window.history.back();
+    }
+  }, [anyMenu]);
+  useEffect(() => {
+    const onPop = () => {
+      if (!menuEntry.current) return;
+      menuEntry.current = false;
+      closeMenus();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
   const [known, setKnown] = useState<KnownVoice[]>([]);
 
   const linesRef = useRef<HTMLDivElement>(null);
   const userScrolledAt = useRef(0);
 
   const meeting = detail?.meeting ?? null;
+
+  // A meeting opened is its own page, #/meetings/<id>: Android's back (the
+  // WebView's history), the app bar's back arrow and the drawer return to the
+  // list. Phones show one or the other; wide windows show both.
+  useEffect(() => {
+    const sync = () => {
+      const m = window.location.hash.match(/^#\/meetings\/(.+)$/);
+      if (m) {
+        setSelected(decodeURIComponent(m[1]));
+        setOpened(true);
+      } else if (window.location.hash.startsWith("#/meetings")) {
+        setOpened(false);
+      }
+    };
+    sync();
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+  const openMeeting = (id: string) => {
+    setSelected(id);
+    if (window.location.hash.startsWith("#/meetings")) window.location.hash = "/meetings/" + encodeURIComponent(id);
+    else setOpened(true); // its own window (no page routes there)
+  };
+  // The app bar while one is open (Shell.tsx): a back arrow to "Meetings" (the
+  // title stays on the page, where it's renamed).
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("ghostpen:subtitle", { detail: opened ? "Meetings" : "" }));
+  }, [opened]);
   const editable = !!meeting && !detail?.busy && !busyState(meeting.state);
 
   // ---- data ----
@@ -749,7 +808,9 @@ export default function Meetings() {
   const state = liveState?.state ?? meeting?.state;
 
   return (
-    <div className="meetings" onClick={() => { setSpeakerMenu(null); setLineMenu(null); setMenuOpen(null); setCtxMenu(null); }}>
+    <div className={`meetings ${opened ? "opened" : "browsing"}`} onClick={closeMenus}>
+      {/* Phones: the dimmed backdrop behind a menu shown as a bottom sheet. */}
+      {anyMenu && <div className="mt-sheet-scrim" onClick={(e) => { e.stopPropagation(); closeMenus(); }} />}
       <aside className="mt-side">
         <div className="mt-side-head">
           <h2>Conversations</h2>
@@ -785,13 +846,15 @@ export default function Meetings() {
                 role="option"
                 aria-selected={m.id === selected}
                 className={`mt-item ${m.id === selected ? "active" : ""}`}
-                onClick={() => setSelected(m.id)}
+                onClick={() => openMeeting(m.id)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
                   setCtxMenu({ id: m.id, x: e.clientX, y: e.clientY, confirm: false });
                 }}
               >
+                <span className="mt-item-avatar" aria-hidden="true"><Icon name="mic" /></span>
+                <span className="mt-item-text">
                 <span className="mt-item-title">{m.title || "Meeting"}</span>
                 <span className="mt-item-meta">
                   {m.startedLocal} · {st === "recording" ? "In progress" : duration(m.durationMs)}
@@ -803,13 +866,14 @@ export default function Meetings() {
                   )}
                 </span>
                 {m.preview && <span className="mt-item-preview">{m.preview}</span>}
+                </span>
               </button>
             );
           })}
         </div>
         <div className="mt-side-foot" onClick={(e) => e.stopPropagation()}>
           <button className="mt-voices-btn" onClick={() => setVoicesOpen(!voicesOpen)}>
-            🗣 Known voices{known.length ? ` (${known.length})` : ""} {voicesOpen ? "▴" : "▾"}
+            <span className="mt-voices-glyph" aria-hidden="true">🗣</span> Known voices{known.length ? ` (${known.length})` : ""} {voicesOpen ? "▴" : "▾"}
           </button>
           {voicesOpen && (
             <div className="mt-voices">
@@ -859,6 +923,7 @@ export default function Meetings() {
 
       <main className="mt-main">
         <MeetingRecorder onRecorded={recordingSelected} />
+        <button className="mt-back" onClick={() => window.history.back()}>‹ Conversations</button>
         {error && (
           <div className="mt-error" role="alert">
             {error}<button aria-label="Dismiss error" onClick={() => setError(null)}>×</button>

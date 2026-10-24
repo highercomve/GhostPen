@@ -109,7 +109,7 @@ export default function WhisperModels(props: {
                   Speed {scoreMeter(m.speed)} · Accuracy {scoreMeter(m.accuracy)} · {m.note}
                 </span>
                 {active && !installed && !p && (
-                  <span className="muted small">Not downloaded yet: captions and dictation need it.</span>
+                  <span className="muted small">Not downloaded yet: captions, meetings and Whisper dictation need it.</span>
                 )}
                 {installed && m.external && (
                   <span className="muted small" title={m.path}>Found in another app's folder: reused</span>

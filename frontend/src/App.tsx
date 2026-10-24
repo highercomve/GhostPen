@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import Menu from "./Menu";
+import Shell from "./Shell";
+import { singleWindow } from "./mode";
 
 // Each window loads index.html at its own route; the other pages are split into
 // their own chunks, so a window parses only the code it shows (the menu, shown
@@ -23,7 +25,7 @@ function Page({ path }: { path: string }) {
   if (path.startsWith("/dictation")) return <Dictation />;
   if (path.startsWith("/summary")) return <Summary />;
   if (path.startsWith("/meetings")) return <Meetings />;
-  return <Menu />;
+  return <Menu />; // "/" and "/actions"
 }
 
 export default function App() {
@@ -35,6 +37,7 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  if (singleWindow) return <Shell path={path} />;
   return (
     <Suspense fallback={null}>
       <Page path={path} />

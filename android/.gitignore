@@ -1,0 +1,8 @@
+.gradle/
+build/
+local.properties
+*.keystore
+.idea/
+.kotlin/
+# Oriel's Kotlin runtime: rewritten from the library on every build.
+/app/src/main/java/dev/oriel/*.kt

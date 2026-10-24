@@ -3,7 +3,7 @@ const oriel = @import("oriel");
 
 /// GhostPen's version: the packages, `ghostpen --version`, Settings → About
 /// and the updater all read it from here.
-const version = "0.3.9";
+const version = "0.4.0";
 
 /// Public half of the release signing key (the private half is the
 /// GHOSTPEN_UPDATE_KEY secret the release workflow signs latest.json with).
@@ -39,6 +39,8 @@ pub fn build(b: *std.Build) void {
         // Images for vision models (their mmproj projector): Extract Text on Built-in profiles.
         .llama_mtmd = true,
         .audio_capture = true,
+        // The phone's own model (oriel.system_ai): Gemini Nano through ML Kit on Android.
+        .system_ai = target.result.abi.isAndroid(),
         // Whisper and the local model on an NVIDIA GPU: `oriel build -Dcuda` (Linux, CUDA toolkit).
         .ggml_cuda = b.option(bool, "cuda", "Run whisper and the local model on an NVIDIA GPU (libggml-cuda.so; needs the CUDA toolkit)") orelse false,
         // Releases: the GPU generations to build for, and cuBLAS linked in (needs only the driver).
@@ -78,6 +80,8 @@ pub fn build(b: *std.Build) void {
     // `@import("ghostpen_build").version`, for the app and the CLI.
     const build_info = b.addOptions();
     build_info.addOption([]const u8, "version", version);
+    // The Oriel this build uses (its build.zig.zon), for Settings → About.
+    build_info.addOption([]const u8, "oriel_version", orielVersion(b, dep));
     // The release channel this build updates from (its entry in latest.json):
     // "x86_64-linux-cuda" for the CUDA packages; default the OS and CPU.
     build_info.addOption(?[]const u8, "update_target", b.option([]const u8, "update_target", "Update channel in latest.json (default: <arch>-<os>, e.g. x86_64-linux)"));
@@ -158,4 +162,14 @@ pub fn build(b: *std.Build) void {
         .use_lld = target.result.ofmt != .macho,
     });
     b.step("test", "Run the unit tests").dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// The `.version` in the Oriel dependency's build.zig.zon ("?" if unreadable).
+fn orielVersion(b: *std.Build, dep: *std.Build.Dependency) []const u8 {
+    const zon = dep.builder.build_root.handle.readFileAlloc(b.graph.io, "build.zig.zon", b.allocator, .limited(64 * 1024)) catch return "?";
+    const key = ".version = \"";
+    const at = std.mem.indexOf(u8, zon, key) orelse return "?";
+    const rest = zon[at + key.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return "?";
+    return rest[0..end];
 }

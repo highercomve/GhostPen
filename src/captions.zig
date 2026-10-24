@@ -342,9 +342,12 @@ fn pickSource(device: []const u8) ![:0]u8 {
             .windows => return gpa.dupeZ(u8, "loopback"),
             else => {}, // macOS (the audio tap, BlackHole): the first monitor source
         }
+        // Android 10+: "system" (what other apps play, with the user's consent).
         for (sources) |src| {
             if (src.monitor) return gpa.dupeZ(u8, src.name);
         }
+        // An Android without playback capture: the microphone hears the room.
+        if (builtin.abi.isAndroid()) return gpa.dupeZ(u8, "default");
         return error.NoSystemAudioSource;
     }
     for (sources) |src| {
@@ -405,7 +408,9 @@ fn releaseStart() void {
 }
 
 fn prepareMeeting(sess: *Session, s: @import("settings.zig").Settings, arena: std.mem.Allocator) !void {
-    const with_mic = s.meetings.mic and models.test_audio == null;
+    // Android without playback capture records the microphone as the meeting's audio already.
+    const mic_is_source = builtin.abi.isAndroid() and std.mem.eql(u8, sess.source.?, "default");
+    const with_mic = s.meetings.mic and models.test_audio == null and !mic_is_source;
     const rec = meetings.begin(with_mic) catch |err| return oriel.ipc.fail("Could not create the meeting's folder ({s}).", .{@errorName(err)});
     sess.rec = rec;
     // Live labels when the speaker model is already here (never a download mid-meeting).
@@ -433,11 +438,17 @@ fn openSession(sess: *Session) !void {
     sess.capture_thread = try std.Thread.spawn(.{}, Session.captureLoop, .{sess});
     if (sess.mic) sess.mic_thread = try std.Thread.spawn(.{}, Session.micLoop, .{sess});
     // Fail the start (like the Tauri app) when the source doesn't open.
+    // Android's "system" asks the user first (the screen-capture consent).
+    const asks = builtin.abi.isAndroid() and std.mem.eql(u8, sess.source.?, "system");
+    const limit: u32 = if (asks) 125_000 else 3000;
     var waited: u32 = 0;
-    while (sess.opened.load(.acquire) == 0 and waited < 3000) : (waited += 20) {
+    while (sess.opened.load(.acquire) == 0 and waited < limit) : (waited += 20) {
         main.io.sleep(.fromMilliseconds(20), .awake) catch break;
     }
-    if (sess.opened.load(.acquire) != 1) return oriel.ipc.fail("Could not open the audio source \"{s}\".", .{sess.source.?});
+    if (sess.opened.load(.acquire) != 1) {
+        if (asks) return oriel.ipc.fail("GhostPen wasn't allowed to capture what this device plays. Start again and allow it, or pick \"Microphone\" as the source in Settings → Speech.", .{});
+        return oriel.ipc.fail("Could not open the audio source \"{s}\".", .{sess.source.?});
+    }
     if (sess.mode == .captions) sess.worker_thread = try std.Thread.spawn(.{}, Session.workerLoop, .{sess});
 }
 
@@ -448,6 +459,7 @@ fn start(arena: std.mem.Allocator, mode: CaptureMode) ![]const u8 {
     const gen = try acquireStart(mode);
     defer releaseStart();
 
+    if (models.test_audio == null) try main.ensureMicrophone();
     const s = try main.shared.get(main.io, arena);
     const c = s.captions;
     if (mode == .captions and !models.isDownloaded(main.io, gpa, c.model))
@@ -457,7 +469,10 @@ fn start(arena: std.mem.Allocator, mode: CaptureMode) ![]const u8 {
         // anyerror: on Windows "Auto" is always the loopback, so pickSource
         // can't return NoSystemAudioSource there (v0.2.25's Windows build
         // failed on it).
-        error.NoSystemAudioSource => oriel.ipc.fail("No system-audio source found (on macOS, install a loopback device such as BlackHole).", .{}),
+        error.NoSystemAudioSource => if (builtin.os.tag == .macos)
+            oriel.ipc.fail("No system-audio source found: install a loopback device such as BlackHole.", .{})
+        else
+            oriel.ipc.fail("No system-audio source found (no monitor of an output device): pick a source in Settings → Speech.", .{}),
         error.DeviceNotFound => oriel.ipc.fail("Audio device \"{s}\" not found.", .{c.device}),
         else => oriel.ipc.fail("Could not list audio devices ({s}).", .{@errorName(err)}),
     };
@@ -577,6 +592,11 @@ test "capture startup is exclusive and cancellation respects its owner" {
 
 /// Show the overlay with its controls (leave ghost mode), at the bottom.
 pub fn open() void {
+    // Single-window mode without the floating bar: the app's Captions page.
+    if (!std.mem.eql(u8, main.windowFor("captions"), "captions")) {
+        main.showWindow("captions", false);
+        return events.emit(.@"ghostpen://captions-show", .{});
+    }
     const w = App.ensureWindow("captions") catch |err| return log.err("captions window: {s}", .{@errorName(err)});
     w.setClickThrough(false);
     w.show();
@@ -682,6 +702,7 @@ pub const Commands = struct {
         const device = start(arena, .captions) catch |err| return if (err == error.Cancelled) "" else err;
         App.runOnMain({}, struct {
             fn show(_: void) void {
+                if (!std.mem.eql(u8, main.windowFor("captions"), "captions")) return; // the page started it
                 const w = App.ensureWindow("captions") catch |err| return log.err("captions window: {s}", .{@errorName(err)});
                 w.show();
             }
@@ -744,7 +765,7 @@ pub const Commands = struct {
     pub fn whisper_download_model(arena: std.mem.Allocator, args: struct { id: []const u8 }) !void {
         const Emit = struct {
             fn progress(_: void, p: models.Progress) void {
-                events.emitTo("settings", .@"ghostpen://whisper-download", p) catch {};
+                events.emitTo(main.windowFor("settings"), .@"ghostpen://whisper-download", p) catch {};
             }
         };
         var status: std.http.Status = .ok;

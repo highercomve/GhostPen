@@ -117,7 +117,12 @@ pub fn ownDir(arena: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]
     return std.fs.path.join(arena, &.{ base, "GhostPen", "models" }) catch null;
 }
 
+/// Android: the app's own storage for large files (no HOME there), set by
+/// the app at start (oriel.paths.appExternal's parent).
+pub var android_data_dir: ?[]const u8 = null;
+
 fn platformDataDir(arena: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]const u8 {
+    if (builtin.abi.isAndroid()) return android_data_dir;
     return switch (builtin.os.tag) {
         .windows => env.get("LOCALAPPDATA"),
         .macos => if (env.get("HOME")) |h| std.fs.path.join(arena, &.{ h, "Library", "Application Support" }) catch null else null,

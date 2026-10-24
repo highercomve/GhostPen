@@ -318,7 +318,7 @@ export default function Summary() {
             disabled={!summary && !voicePlaying}
             onClick={() => speak(summary)}
           >
-            {voicePlaying ? "■ Stop" : "🔊 Read summary"}
+            {voicePlaying ? "■ Stop" : <><Icon name="read" />Read</>}
           </button>
           {pageTextRef.current.trim().length > 0 && (
             <button
@@ -327,7 +327,7 @@ export default function Summary() {
               disabled={voicePlaying}
               onClick={() => speak(pageTextRef.current.trim())}
             >
-              {voicePlaying ? "■ Stop" : "🔊 Read page"}
+              {voicePlaying ? "■ Stop" : <><Icon name="read" />Read page</>}
             </button>
           )}
         </div>
