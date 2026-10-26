@@ -2,6 +2,28 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.2] - 2026-10-26
+
+### Fixed
+
+- Agents on the built-in model (pi, Codex, …) no longer get stuck calling
+  the same tool over and over. Their requests sampled almost greedily
+  (temperature 0.2, no penalty), which makes a thinking model repeat
+  itself; they now sample as Qwen recommends for agents (temperature 0.6,
+  top_p 0.95, top_k 20, min_p 0, presence penalty 1.0) unless the request
+  sets its own. When an agent still makes the same call and gets the same
+  result twice in a row, the model is told so; a third time, it answers
+  without tools. A poll whose result changes isn't a repeat.
+- A tool result or message carrying the model's control tokens
+  (`<|im_end|>`, `<|im_start|>`, …) can no longer close its turn and write
+  a fake one (a system prompt, say) for the model: agents' requests are
+  neutralized like GhostPen's own prompts.
+
+### Added
+
+- The model service takes `top_p`, `top_k`, `min_p`, `presence_penalty`,
+  `frequency_penalty` and `repeat_penalty` on `/v1/chat/completions`.
+
 ## [0.4.1] - 2026-10-26
 
 ### Fixed

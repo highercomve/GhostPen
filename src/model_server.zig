@@ -9,13 +9,17 @@
 //!
 //! - `POST /v1/chat/completions`: messages (text, and `image_url` data URLs
 //!   when the model has a vision projector), `max_tokens`, `temperature`,
-//!   `stream`, thinking, and `response_format` `json_schema` (the answer
+//!   `stream`, `top_p`, `top_k`, `min_p`, `presence_penalty`,
+//!   `frequency_penalty`, `repeat_penalty` (unset: Qwen's agent settings,
+//!   `agent_sampling`), thinking, and `response_format` `json_schema` (the answer
 //!   matches the schema). Thinking is on unless the request turns it off
 //!   (`reasoning_effort: "none"`, `chat_template_kwargs.enable_thinking` or
 //!   `think` false); the reasoning comes back as `reasoning_content`.
 //!   GhostPen's own features don't go through here and keep theirs off.
 //!   The runner takes one system and one user turn: earlier turns are folded
-//!   into the user text.
+//!   into the user text. An agent that keeps making the same tool call and
+//!   getting the same result is told so after the second time and gets no
+//!   tools after the third (`repeatedTurns`), so it answers instead of looping.
 //!   The `model` field selects any installed built-in model; an omitted model
 //!   uses the configured default. The runner loads on demand and switches models.
 //! - `POST /v1/embeddings`: `input` (a string or strings), 768-dim vectors
@@ -335,24 +339,32 @@ const ToolAnswer = struct {
 /// The runner's request from an OpenAI chat body; null (with `err` set) when
 /// it can't be served.
 fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?ChatRequest {
-    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch {
+    var root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch {
         err.* = "the body isn't JSON";
         return null;
     };
-    const obj = switch (root) {
-        .object => |o| o,
-        else => {
-            err.* = "expected a JSON object";
-            return null;
-        },
-    };
-    const messages = switch (obj.get("messages") orelse .null) {
+    if (root != .object) {
+        err.* = "expected a JSON object";
+        return null;
+    }
+    const messages = switch (root.object.get("messages") orelse .null) {
         .array => |a| a.items,
         else => {
             err.* = "missing messages";
             return null;
         },
     };
+
+    // A small model in an agent loop calls the same tool with the same
+    // arguments, gets the same result, and calls it again: a note on that
+    // result, then a turn without tools so it answers.
+    const repeats = try repeatedTurns(arena, messages);
+    if (repeats >= repeat_note_at) {
+        try noteRepeat(arena, messages, repeats);
+        if (repeats >= repeat_answer_at) _ = root.object.orderedRemove("tools");
+    }
+    const request_body = if (repeats >= repeat_note_at) try std.json.Stringify.valueAlloc(arena, root, .{}) else body;
+    const obj = root.object;
 
     // Tools (unless tool_choice is "none").
     const tools: []const std.json.Value = if (obj.get("tools")) |t| (if (t == .array) t.array.items else &.{}) else &.{};
@@ -362,13 +374,13 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     const folded = try foldMessages(arena, messages, err) orelse return null;
     // Other apps' agents get the model's reasoning by default (it picks
     // tools far better with it); GhostPen's own features run without.
-    var chat: local_llm.Chat = .{ .system = folded.system, .user = folded.user, .image = folded.image, .think = true };
+    var chat: local_llm.Chat = .{ .system = folded.system, .user = folded.user, .image = folded.image, .think = true, .temperature = agent_temperature, .sampling = agent_sampling };
     try applyOptions(arena, obj, &chat);
     // Without an image the model's own chat template takes the request as it
     // is, as llama-server does: the messages with their tool calls and
     // results, and the tools, in the format the model was trained on. An
     // image goes the runner's vision way: one system and one user turn.
-    if (folded.image == null) chat.request = body;
+    if (folded.image == null) chat.request = request_body;
     if (use_tools and chat.request.len == 0) {
         chat.schema = try toolSchema(arena, tools, choice);
         const guide = try toolGuide(arena, tools, choice);
@@ -381,6 +393,77 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     };
     const requested = if (obj.get("model")) |m| (if (m == .string and m.string.len > 0) m.string else null) else null;
     return .{ .chat = chat, .model = requested, .stream = stream, .include_usage = include_usage, .tools = use_tools };
+}
+
+/// The same tool calls with the same results this many turns in a row: a
+/// note on the last result; then the tools are left out.
+const repeat_note_at = 2;
+const repeat_answer_at = 3;
+
+/// How many assistant turns in a row, up to the end, made the very same tool
+/// calls (names and arguments, not ids) and got the very same results; 0
+/// unless the request ends with tool results. A poll whose answer changes
+/// isn't a repeat.
+fn repeatedTurns(arena: std.mem.Allocator, messages: []const std.json.Value) !usize {
+    var n: usize = 0;
+    var latest: ?[]const u8 = null;
+    var end = messages.len;
+    var i = messages.len;
+    while (i > 0) {
+        i -= 1;
+        const role = roleOf(messages[i]) orelse continue;
+        if (std.mem.eql(u8, role, "tool")) continue;
+        if (!std.mem.eql(u8, role, "assistant") or i + 1 == end) break;
+        const key = try turnKey(arena, messages[i..end]) orelse break;
+        if (latest) |l| {
+            if (!std.mem.eql(u8, l, key)) break;
+        } else latest = key;
+        n += 1;
+        end = i;
+    }
+    return n;
+}
+
+/// An assistant turn's tool calls (their functions) and the results after
+/// it, as JSON text to compare; null when it called no tool.
+fn turnKey(arena: std.mem.Allocator, turn: []const std.json.Value) !?[]const u8 {
+    const calls = turn[0].object.get("tool_calls") orelse return null;
+    if (calls != .array or calls.array.items.len == 0) return null;
+    var w: std.Io.Writer.Allocating = .init(arena);
+    for (calls.array.items) |call| {
+        const f = if (call == .object) call.object.get("function") orelse .null else .null;
+        try std.json.Stringify.value(f, .{}, &w.writer);
+    }
+    for (turn[1..]) |result| if (result == .object) {
+        try std.json.Stringify.value(result.object.get("content") orelse .null, .{}, &w.writer);
+    };
+    return w.written();
+}
+
+/// Tells the model, after the last tool result, that it keeps making the
+/// same call (and, from `repeat_answer_at`, that it has no tools now).
+fn noteRepeat(arena: std.mem.Allocator, messages: []std.json.Value, repeats: usize) !void {
+    var i = messages.len;
+    const last = while (i > 0) {
+        i -= 1;
+        const role = roleOf(messages[i]) orelse continue;
+        if (std.mem.eql(u8, role, "tool")) break &messages[i];
+    } else return;
+    const note = try std.fmt.allocPrint(arena, "\n\n[Note: you have made this same tool call with the same arguments {d} times in a row, and it returned the same result each time. {s}]", .{
+        repeats,
+        if (repeats >= repeat_answer_at) "Tools are off for this turn: answer the user now with what you have." else "Do not call it again: use the result above, or answer the user.",
+    });
+    const content = last.object.getPtr("content") orelse return;
+    switch (content.*) {
+        .string => |t| content.* = .{ .string = try std.mem.concat(arena, u8, &.{ t, note }) },
+        .array => |*parts| {
+            var part: std.json.ObjectMap = .empty;
+            try part.put(arena, "type", .{ .string = "text" });
+            try part.put(arena, "text", .{ .string = note });
+            try parts.append(.{ .object = part });
+        },
+        else => content.* = .{ .string = note },
+    }
 }
 
 fn toolChoice(obj: std.json.ObjectMap) ToolChoice {
@@ -458,18 +541,29 @@ fn foldToolCalls(arena: std.mem.Allocator, transcript: *std.ArrayList(u8), call_
     try transcript.print(arena, "Assistant called tools: [{s}]\n\n", .{calls.items});
 }
 
-/// The request's generation options: max_tokens, temperature, thinking,
-/// response_format (overridden by tools), keep_alive, context.
+/// How other apps' agents sample unless the request says otherwise: Qwen's
+/// recommendation for thinking and tool use, with a mild presence penalty.
+/// Near-greedy sampling (GhostPen's own 0.2) makes a thinking model repeat
+/// itself, and an agent then calls the same tool over and over.
+const agent_temperature = 0.6;
+const agent_sampling: local_llm.Sampling = .{ .top_p = 0.95, .top_k = 20, .min_p = 0, .presence_penalty = 1.0 };
+
+/// The request's generation options: max_tokens, sampling (OpenAI's and
+/// llama-server's names), thinking, response_format (overridden by tools),
+/// keep_alive, context.
 fn applyOptions(arena: std.mem.Allocator, obj: std.json.ObjectMap, chat: *local_llm.Chat) !void {
     if (obj.get("max_tokens") orelse obj.get("max_completion_tokens")) |v| switch (v) {
         .integer => |n| chat.max_tokens = @intCast(std.math.clamp(n, 1, 32768)),
         else => {},
     };
-    if (obj.get("temperature")) |v| switch (v) {
-        .float => |f| chat.temperature = f,
-        .integer => |n| chat.temperature = @floatFromInt(n),
-        else => {},
-    };
+    if (number(obj, "temperature", 0, 2)) |f| chat.temperature = f;
+    const sp = &chat.sampling;
+    if (number(obj, "top_p", 0, 1)) |f| sp.top_p = @floatCast(f);
+    if (number(obj, "top_k", 0, 1000)) |f| sp.top_k = @intFromFloat(f);
+    if (number(obj, "min_p", 0, 1)) |f| sp.min_p = @floatCast(f);
+    if (number(obj, "presence_penalty", -2, 2)) |f| sp.presence_penalty = @floatCast(f);
+    if (number(obj, "frequency_penalty", -2, 2)) |f| sp.frequency_penalty = @floatCast(f);
+    if (number(obj, "repeat_penalty", 0, 2) orelse number(obj, "repetition_penalty", 0, 2)) |f| sp.repeat_penalty = @floatCast(f);
     // OpenAI's spelling (pi, Codex): "none" is off, any effort is on.
     if (obj.get("reasoning_effort")) |e| if (e == .string) {
         chat.think = !std.mem.eql(u8, e.string, "none");
@@ -492,6 +586,16 @@ fn applyOptions(arena: std.mem.Allocator, obj: std.json.ObjectMap, chat: *local_
     };
     chat.keep_alive_ms = keepAliveMs(obj);
     chat.ctx = requestedCtx(obj);
+}
+
+/// A numeric field clamped to `lo`..`hi`; null when absent or not a finite number.
+fn number(obj: std.json.ObjectMap, field: []const u8, lo: f64, hi: f64) ?f64 {
+    const f: f64 = switch (obj.get(field) orelse return null) {
+        .float => |f| f,
+        .integer => |n| @floatFromInt(n),
+        else => return null,
+    };
+    return if (std.math.isFinite(f)) std.math.clamp(f, lo, hi) else null;
 }
 
 const ToolChoice = union(enum) { auto, none, required, function: []const u8 };
@@ -1161,4 +1265,73 @@ test "parseChat: system, history folded, image, thinking and schema" {
     try std.testing.expectEqual(@as(?u32, 65536), big.chat.ctx);
 
     try std.testing.expect((try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}]}", &err)) == null);
+}
+
+test "parseChat: agents sample as Qwen recommends unless the request says otherwise" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var err: []const u8 = "";
+    const plain = (try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", &err)).?;
+    try std.testing.expectEqual(@as(f64, 0.6), plain.chat.temperature);
+    try std.testing.expectEqual(@as(i32, 20), plain.chat.sampling.top_k);
+    try std.testing.expectEqual(@as(f32, 0), plain.chat.sampling.min_p);
+    try std.testing.expectEqual(@as(f32, 1.0), plain.chat.sampling.presence_penalty);
+
+    const own = (try parseChat(arena,
+        \\{"temperature":0.1,"top_p":0.8,"top_k":5000,"min_p":0.1,"presence_penalty":0,
+        \\ "frequency_penalty":"high","repeat_penalty":1.1,"messages":[{"role":"user","content":"hi"}]}
+    , &err)).?;
+    try std.testing.expectEqual(@as(f64, 0.1), own.chat.temperature);
+    try std.testing.expectEqual(@as(f32, 0.8), own.chat.sampling.top_p);
+    try std.testing.expectEqual(@as(i32, 1000), own.chat.sampling.top_k);
+    try std.testing.expectEqual(@as(f32, 0.1), own.chat.sampling.min_p);
+    try std.testing.expectEqual(@as(f32, 0), own.chat.sampling.presence_penalty);
+    try std.testing.expectEqual(@as(f32, 0), own.chat.sampling.frequency_penalty);
+    try std.testing.expectEqual(@as(f32, 1.1), own.chat.sampling.repeat_penalty);
+}
+
+test "parseChat: the same tool call with the same result again and again" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var err: []const u8 = "";
+    const Body = struct {
+        /// A request whose agent ran `bash ls` once per result, then (`asked`) a user turn.
+        fn of(a: std.mem.Allocator, results: []const []const u8, asked: bool) ![]const u8 {
+            var b: std.ArrayList(u8) = .empty;
+            try b.appendSlice(a, "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"parameters\":{\"type\":\"object\"}}}],\"messages\":[{\"role\":\"user\",\"content\":\"list\"}");
+            for (results, 0..) |r, i| {
+                try b.print(a, ",{{\"role\":\"assistant\",\"content\":\"Let me look.\",\"tool_calls\":[{{\"id\":\"c{d}\",\"type\":\"function\",\"function\":{{\"name\":\"bash\",\"arguments\":\"{{\\\"cmd\\\":\\\"ls\\\"}}\"}}}}]}}", .{i});
+                try b.print(a, ",{{\"role\":\"tool\",\"tool_call_id\":\"c{d}\",\"content\":\"{s}\"}}", .{ i, r });
+            }
+            if (asked) try b.appendSlice(a, ",{\"role\":\"user\",\"content\":\"again\"}");
+            try b.appendSlice(a, "]}");
+            return b.items;
+        }
+    };
+
+    // Once: as it is.
+    const once = try Body.of(arena, &.{"a.md"}, false);
+    try std.testing.expectEqualStrings(once, (try parseChat(arena, once, &err)).?.chat.request);
+
+    // Twice with the same result: a note on the last result, tools still on.
+    const r2 = (try parseChat(arena, try Body.of(arena, &.{ "a.md", "a.md" }, false), &err)).?;
+    try std.testing.expect(std.mem.indexOf(u8, r2.chat.request, "2 times in a row") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r2.chat.request, "\"tools\"") != null);
+    try std.testing.expect(r2.tools);
+
+    // A poll whose result changes isn't a repeat.
+    const poll = try Body.of(arena, &.{ "pending", "done" }, false);
+    try std.testing.expectEqualStrings(poll, (try parseChat(arena, poll, &err)).?.chat.request);
+
+    // Three times: no tools, answer now.
+    const r3 = (try parseChat(arena, try Body.of(arena, &.{ "a.md", "a.md", "a.md" }, false), &err)).?;
+    try std.testing.expect(std.mem.indexOf(u8, r3.chat.request, "Tools are off for this turn") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r3.chat.request, "\"tools\"") == null);
+    try std.testing.expect(!r3.tools);
+
+    // A new user message starts over.
+    const asked = try Body.of(arena, &.{ "a.md", "a.md" }, true);
+    try std.testing.expectEqualStrings(asked, (try parseChat(arena, asked, &err)).?.chat.request);
 }

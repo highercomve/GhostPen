@@ -45,6 +45,9 @@ pub const Chat = struct {
     system: []const u8,
     user: []const u8,
     temperature: f64 = 0.2,
+    /// The sampler past the temperature, for a `request` (the model
+    /// service's agents); the defaults are llama.cpp's.
+    sampling: Sampling = .{},
     think: bool = false,
     max_tokens: u32 = 2048,
     /// An image (PNG/JPEG bytes) before the text; needs `Config.mmproj`.
@@ -64,6 +67,19 @@ pub const Chat = struct {
     /// runner restarts with it (and keeps it until it stops).
     ctx: ?u32 = null,
     observer: ?@import("ai_observer.zig").Observer = null,
+};
+
+/// llama.cpp's sampler steps (oriel's `ChatTemplates.Options`): nucleus
+/// (top_p 1: off), the likeliest top_k tokens (0: all), min_p (0: off), and
+/// penalties on tokens already generated (presence and frequency 0, repeat
+/// 1: off).
+pub const Sampling = struct {
+    top_p: f32 = 0.95,
+    top_k: i32 = 40,
+    min_p: f32 = 0.05,
+    presence_penalty: f32 = 0,
+    frequency_penalty: f32 = 0,
+    repeat_penalty: f32 = 1,
 };
 
 pub const Result = struct {
@@ -265,6 +281,7 @@ fn chatImpl(
         .user = req.user,
         .max_tokens = req.max_tokens,
         .temperature = req.temperature,
+        .sampling = req.sampling,
         .think = req.think,
         .channels = channels,
         .image = image_b64,
