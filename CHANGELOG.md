@@ -2,6 +2,16 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.1] - 2026-10-26
+
+### Fixed
+
+- GhostPen no longer runs out of open files after a few hours of serving
+  models. Finding a model in another app's folder (LM Studio, …) left
+  directories open on every `/v1/models` call and model lookup, until the
+  model runner couldn't start (`ProcessFdQuotaExceeded`) and the app quit
+  with "Too many open files".
+
 ## [0.4.0] - 2026-10-23
 
 ### Added

@@ -167,12 +167,20 @@ pub fn embeddingModel(io: std.Io, arena: std.mem.Allocator, d: Dirs) ?[]const u8
     return null;
 }
 
+/// Closes the subdirectories a walk stopped inside (an early return, or an
+/// error from `next`): `Walker.deinit` only frees memory, so each one would
+/// leak a handle per call until the process runs out of descriptors.
+fn endWalk(io: std.Io, walker: *std.Io.Dir.Walker) void {
+    while (walker.inner.stack.items.len > 0) walker.leave(io);
+    walker.deinit();
+}
+
 /// `name` (case-insensitive) under `root`, at most 4 levels deep; non-empty files only.
 fn findFile(io: std.Io, arena: std.mem.Allocator, root: []const u8, name: []const u8) ?[]const u8 {
     var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return null;
     defer dir.close(io);
     var walker = dir.walk(arena) catch return null;
-    defer walker.deinit();
+    defer endWalk(io, &walker);
     while (walker.next(io) catch null) |entry| {
         if (entry.depth() > 4) continue;
         if (entry.kind != .file and entry.kind != .sym_link) continue;
@@ -287,7 +295,7 @@ fn scanOthers(io: std.Io, arena: std.mem.Allocator, d: Dirs) ![]LocalFile {
         var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch continue;
         defer dir.close(io);
         var walker = dir.walk(arena) catch continue;
-        defer walker.deinit();
+        defer endWalk(io, &walker);
         while (walker.next(io) catch null) |entry| {
             if (entry.depth() > 4 or (entry.kind != .file and entry.kind != .sym_link)) continue;
             const base = entry.basename;
