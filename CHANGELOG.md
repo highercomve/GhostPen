@@ -2,6 +2,17 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.3] - 2026-10-26
+
+### Added
+
+- Settings → Built-in models → Runner → Sampling for other apps: the
+  temperature, top P, top K, min P and the presence, frequency and repeat
+  penalties that other apps' and agents' requests to the model service use
+  unless they set their own. The defaults are 0.4.2's (Qwen's for agents),
+  and a button resets them. GhostPen's own actions keep their profile's
+  temperature.
+
 ## [0.4.2] - 2026-10-26
 
 ### Fixed

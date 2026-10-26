@@ -13,7 +13,27 @@ import {
   scoreMeter,
 } from "./api";
 
-export const DEFAULT_LOCAL: LocalLlmSettings = { ctxTokens: 8192, gpu: true, moePct: 0, idleMinutes: 10 };
+/** Sampling defaults for other apps (Qwen's for agents; src/settings.zig's `LocalLlm`). */
+export const DEFAULT_SAMPLING = {
+  temperature: 0.6, topP: 0.95, topK: 20, minP: 0, presencePenalty: 1.0, frequencyPenalty: 0, repeatPenalty: 1.0,
+};
+
+export const DEFAULT_LOCAL: LocalLlmSettings = { ctxTokens: 8192, gpu: true, moePct: 0, idleMinutes: 10, ...DEFAULT_SAMPLING };
+
+type SamplingKey = keyof typeof DEFAULT_SAMPLING;
+
+/** The sampling controls: label, range, step and what it does. */
+const SAMPLING: { key: SamplingKey; label: string; min: number; max: number; step: number; help: string }[] = [
+  { key: "temperature", label: "Temperature", min: 0, max: 2, step: 0.05,
+    help: "Lower is more predictable. Near 0, thinking models repeat themselves." },
+  { key: "topP", label: "Top P", min: 0, max: 1, step: 0.01, help: "Keeps the likeliest tokens up to this share of the probability (1 = off)." },
+  { key: "topK", label: "Top K", min: 0, max: 200, step: 1, help: "Keeps this many of the likeliest tokens (0 = all)." },
+  { key: "minP", label: "Min P", min: 0, max: 1, step: 0.01, help: "Drops tokens less likely than this share of the likeliest one (0 = off)." },
+  { key: "presencePenalty", label: "Presence penalty", min: -2, max: 2, step: 0.1,
+    help: "Discourages any token it already wrote; what stops an agent from repeating itself (0 = off)." },
+  { key: "frequencyPenalty", label: "Frequency penalty", min: -2, max: 2, step: 0.1, help: "Discourages tokens by how often it wrote them (0 = off)." },
+  { key: "repeatPenalty", label: "Repeat penalty", min: 0, max: 2, step: 0.05, help: "llama.cpp's repetition penalty (1 = off)." },
+];
 
 export const CONTEXT_SIZES = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
 
@@ -268,6 +288,25 @@ export default function LocalModels(props: {
           onChange={(e) => props.onLocalChange({ idleMinutes: parseInt(e.target.value, 10) })} />
         <span className="muted small">The model stays loaded between actions for speed, then frees its memory.</span>
       </label>
+      <h3>Sampling for other apps</h3>
+      <p className="muted small">
+        How requests from other apps and agents (pi, Codex, GhostReel, …) to the model service sample, unless a
+        request sets its own. The defaults are Qwen's recommendation for agents. GhostPen's own actions use their
+        profile's temperature.
+      </p>
+      {SAMPLING.map((c) => (
+        <label key={c.key}>
+          {c.label}: {local[c.key]}
+          <input type="range" min={c.min} max={c.max} step={c.step} value={local[c.key]}
+            onChange={(e) => props.onLocalChange({ [c.key]: parseFloat(e.target.value) })} />
+          <span className="muted small">{c.help}</span>
+        </label>
+      ))}
+      <div className="row">
+        <button className="btn" type="button" onClick={() => props.onLocalChange({ ...DEFAULT_SAMPLING })}>
+          Reset sampling to defaults
+        </button>
+      </div>
       <div className="row">
         <span className="muted small">
           {status?.loaded ? "A model is loaded now." : "No model loaded."} Models folder: <code>{status?.status.dir}</code>

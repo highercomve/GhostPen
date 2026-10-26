@@ -37,6 +37,21 @@ pub const LocalLlm = struct {
     moePct: u8 = 0,
     /// Unload the model after this many minutes without use (0 = never).
     idleMinutes: u32 = 10,
+    /// How other apps' requests to the model service (agents: pi, Codex, …)
+    /// sample, unless a request sets its own: Qwen's recommendation for
+    /// thinking and tool use, with a mild presence penalty. GhostPen's own
+    /// features use their profile's temperature.
+    temperature: f64 = 0.6,
+    /// Nucleus sampling (1 = off).
+    topP: f64 = 0.95,
+    /// The likeliest tokens kept (0 = all).
+    topK: u32 = 20,
+    /// Tokens below this share of the likeliest one's probability dropped (0 = off).
+    minP: f64 = 0,
+    /// Penalties on tokens already generated (0, 0 and 1 = off).
+    presencePenalty: f64 = 1.0,
+    frequencyPenalty: f64 = 0,
+    repeatPenalty: f64 = 1.0,
 };
 
 pub const CustomAction = struct {
@@ -173,6 +188,15 @@ pub const Settings = struct {
         self.localLlm.ctxTokens = c(self.localLlm.ctxTokens, min_ctx, max_ctx);
         self.localLlm.moePct = @min(self.localLlm.moePct, 100);
         self.localLlm.idleMinutes = @min(self.localLlm.idleMinutes, 24 * 60);
+        const l = &self.localLlm;
+        const d: LocalLlm = .{};
+        l.temperature = finiteIn(l.temperature, 0, 2, d.temperature);
+        l.topP = finiteIn(l.topP, 0, 1, d.topP);
+        l.topK = @min(l.topK, 1000);
+        l.minP = finiteIn(l.minP, 0, 1, d.minP);
+        l.presencePenalty = finiteIn(l.presencePenalty, -2, 2, d.presencePenalty);
+        l.frequencyPenalty = finiteIn(l.frequencyPenalty, -2, 2, d.frequencyPenalty);
+        l.repeatPenalty = finiteIn(l.repeatPenalty, 0, 2, d.repeatPenalty);
         // 0 = the built-in model's setting.
         if (self.server.ctxTokens != 0) self.server.ctxTokens = c(self.server.ctxTokens, min_ctx, max_ctx);
         if (self.server.port == 0) self.server.port = (Server{}).port;
@@ -263,7 +287,7 @@ test "clamp: out-of-range numbers come back into range" {
     defer arena.deinit();
     const a = arena.allocator();
     const v = try std.json.parseFromSliceLeaky(std.json.Value, a,
-        \\{"ocr":{"maxDimension":0},"localLlm":{"ctxTokens":4000000000,"moePct":250,"idleMinutes":999999},
+        \\{"ocr":{"maxDimension":0},"localLlm":{"ctxTokens":4000000000,"moePct":250,"idleMinutes":999999,"topP":3,"topK":99999,"presencePenalty":-9},
         \\ "server":{"ctxTokens":1,"port":0},"captions":{"chunkSeconds":0.01,"fontSize":4000},"restoreDelayMs":99999999,
         \\ "profiles":[{"id":"a","name":"A","model":"m","temperature":7.5},{"id":"b","name":"B","model":"m","temperature":0.7}]}
     , .{});
@@ -272,6 +296,10 @@ test "clamp: out-of-range numbers come back into range" {
     try std.testing.expectEqual(@as(u32, max_ctx), s.localLlm.ctxTokens);
     try std.testing.expectEqual(@as(u8, 100), s.localLlm.moePct);
     try std.testing.expectEqual(@as(u32, 24 * 60), s.localLlm.idleMinutes);
+    try std.testing.expectEqual(@as(f64, 1), s.localLlm.topP);
+    try std.testing.expectEqual(@as(u32, 1000), s.localLlm.topK);
+    try std.testing.expectEqual(@as(f64, -2), s.localLlm.presencePenalty);
+    try std.testing.expectEqual(@as(f64, 0.6), s.localLlm.temperature);
     try std.testing.expectEqual(@as(u32, min_ctx), s.server.ctxTokens);
     try std.testing.expectEqual(@as(u16, 8771), s.server.port);
     try std.testing.expectEqual(@as(f64, 1.0), s.captions.chunkSeconds);

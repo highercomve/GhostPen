@@ -10,8 +10,8 @@
 //! - `POST /v1/chat/completions`: messages (text, and `image_url` data URLs
 //!   when the model has a vision projector), `max_tokens`, `temperature`,
 //!   `stream`, `top_p`, `top_k`, `min_p`, `presence_penalty`,
-//!   `frequency_penalty`, `repeat_penalty` (unset: Qwen's agent settings,
-//!   `agent_sampling`), thinking, and `response_format` `json_schema` (the answer
+//!   `frequency_penalty`, `repeat_penalty` (unset: Settings → Built-in
+//!   models → Runner, `Defaults`), thinking, and `response_format` `json_schema` (the answer
 //!   matches the schema). Thinking is on unless the request turns it off
 //!   (`reasoning_effort: "none"`, `chat_template_kwargs.enable_thinking` or
 //!   `think` false); the reasoning comes back as `reasoning_content`.
@@ -53,6 +53,7 @@ const ai_stream = @import("ai_stream.zig");
 const metrics = @import("metrics.zig");
 const models = @import("models.zig");
 const llm_models = @import("llm_models.zig");
+const settings = @import("settings.zig");
 
 const log = std.log.scoped(.model_server);
 const gpa = std.heap.smp_allocator;
@@ -338,7 +339,7 @@ const ToolAnswer = struct {
 
 /// The runner's request from an OpenAI chat body; null (with `err` set) when
 /// it can't be served.
-fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?ChatRequest {
+fn parseChat(arena: std.mem.Allocator, body: []const u8, defaults: Defaults, err: *[]const u8) !?ChatRequest {
     var root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch {
         err.* = "the body isn't JSON";
         return null;
@@ -374,7 +375,7 @@ fn parseChat(arena: std.mem.Allocator, body: []const u8, err: *[]const u8) !?Cha
     const folded = try foldMessages(arena, messages, err) orelse return null;
     // Other apps' agents get the model's reasoning by default (it picks
     // tools far better with it); GhostPen's own features run without.
-    var chat: local_llm.Chat = .{ .system = folded.system, .user = folded.user, .image = folded.image, .think = true, .temperature = agent_temperature, .sampling = agent_sampling };
+    var chat: local_llm.Chat = .{ .system = folded.system, .user = folded.user, .image = folded.image, .think = true, .temperature = defaults.temperature, .sampling = defaults.sampling };
     try applyOptions(arena, obj, &chat);
     // Without an image the model's own chat template takes the request as it
     // is, as llama-server does: the messages with their tool calls and
@@ -541,12 +542,26 @@ fn foldToolCalls(arena: std.mem.Allocator, transcript: *std.ArrayList(u8), call_
     try transcript.print(arena, "Assistant called tools: [{s}]\n\n", .{calls.items});
 }
 
-/// How other apps' agents sample unless the request says otherwise: Qwen's
-/// recommendation for thinking and tool use, with a mild presence penalty.
-/// Near-greedy sampling (GhostPen's own 0.2) makes a thinking model repeat
-/// itself, and an agent then calls the same tool over and over.
-const agent_temperature = 0.6;
-const agent_sampling: local_llm.Sampling = .{ .top_p = 0.95, .top_k = 20, .min_p = 0, .presence_penalty = 1.0 };
+/// How a request samples unless it says otherwise: Settings → Built-in
+/// models → Runner (by default Qwen's recommendation for thinking and tool
+/// use, with a mild presence penalty). Near-greedy sampling (GhostPen's own
+/// 0.2) makes a thinking model repeat itself, and an agent then calls the
+/// same tool over and over.
+const Defaults = struct {
+    temperature: f64,
+    sampling: local_llm.Sampling,
+
+    fn of(l: settings.LocalLlm) Defaults {
+        return .{ .temperature = l.temperature, .sampling = .{
+            .top_p = @floatCast(l.topP),
+            .top_k = @intCast(l.topK),
+            .min_p = @floatCast(l.minP),
+            .presence_penalty = @floatCast(l.presencePenalty),
+            .frequency_penalty = @floatCast(l.frequencyPenalty),
+            .repeat_penalty = @floatCast(l.repeatPenalty),
+        } };
+    }
+};
 
 /// The request's generation options: max_tokens, sampling (OpenAI's and
 /// llama-server's names), thinking, response_format (overridden by tools),
@@ -762,7 +777,8 @@ fn usageFields(res: local_llm.Result) struct {
 /// (null returned: already answered).
 pub fn chatReply(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Request, body: []const u8) !?Reply {
     var err: []const u8 = "";
-    const req = (try parseChat(arena, body, &err)) orelse return errorReply(.bad_request, err, arena);
+    const s = main.shared.get(io, arena) catch settings.Settings{};
+    const req = (try parseChat(arena, body, .of(s.localLlm), &err)) orelse return errorReply(.bad_request, err, arena);
     var why: []const u8 = "";
     const cfg = config(arena, req.model, &why) orelse return errorReply(.service_unavailable, why, arena);
     if (req.chat.image != null and cfg.mmproj == null) return errorReply(.bad_request, "the built-in model can't read images (no vision projector)", arena);
@@ -1165,7 +1181,7 @@ test "chat request keeps the selected model" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     var err: []const u8 = "";
-    const req = (try parseChat(arena_state.allocator(), "{\"model\":\"qwen3.5-4b\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}", &err)).?;
+    const req = (try parseChat(arena_state.allocator(), "{\"model\":\"qwen3.5-4b\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}", .of(.{}), &err)).?;
     try std.testing.expectEqualStrings("qwen3.5-4b", req.model.?);
 }
 
@@ -1181,7 +1197,7 @@ test "tools: schema, guide, transcript and the answer as tool_calls" {
         \\  {"role":"user","content":"Find a dog"},
         \\  {"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"search_moments","arguments":"{\"query\":\"dog\"}"}}]},
         \\  {"role":"tool","tool_call_id":"c1","content":"2 moments found"}]}
-    , &err)).?;
+    , .of(.{}), &err)).?;
     try std.testing.expect(req.tools);
     // No image: the model's own template takes the request as it is.
     try std.testing.expect(std.mem.indexOf(u8, req.chat.request, "\"search_moments\"") != null);
@@ -1213,25 +1229,25 @@ test "parseChat: thinking on unless the request turns it off; one turn with tool
     const msgs = "\"messages\":[{\"role\":\"developer\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Read a.md\"}]";
     const tools = "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"parameters\":{\"type\":\"object\"}}}]";
 
-    const plain = (try parseChat(arena, "{" ++ msgs ++ "}", &err)).?;
+    const plain = (try parseChat(arena, "{" ++ msgs ++ "}", .of(.{}), &err)).?;
     try std.testing.expect(plain.chat.think);
-    const high = (try parseChat(arena, "{\"reasoning_effort\":\"high\"," ++ msgs ++ "}", &err)).?;
+    const high = (try parseChat(arena, "{\"reasoning_effort\":\"high\"," ++ msgs ++ "}", .of(.{}), &err)).?;
     try std.testing.expect(high.chat.think);
-    const none = (try parseChat(arena, "{\"reasoning_effort\":\"none\"," ++ msgs ++ "}", &err)).?;
+    const none = (try parseChat(arena, "{\"reasoning_effort\":\"none\"," ++ msgs ++ "}", .of(.{}), &err)).?;
     try std.testing.expect(!none.chat.think);
-    const ollama = (try parseChat(arena, "{\"think\":false," ++ msgs ++ "}", &err)).?;
+    const ollama = (try parseChat(arena, "{\"think\":false," ++ msgs ++ "}", .of(.{}), &err)).?;
     try std.testing.expect(!ollama.chat.think);
     // An explicit switch wins over the effort.
-    const kwarg = (try parseChat(arena, "{\"reasoning_effort\":\"high\",\"chat_template_kwargs\":{\"enable_thinking\":false}," ++ msgs ++ "}", &err)).?;
+    const kwarg = (try parseChat(arena, "{\"reasoning_effort\":\"high\",\"chat_template_kwargs\":{\"enable_thinking\":false}," ++ msgs ++ "}", .of(.{}), &err)).?;
     try std.testing.expect(!kwarg.chat.think);
 
-    const tooled = (try parseChat(arena, "{" ++ tools ++ "," ++ msgs ++ "}", &err)).?;
+    const tooled = (try parseChat(arena, "{" ++ tools ++ "," ++ msgs ++ "}", .of(.{}), &err)).?;
     try std.testing.expect(tooled.tools);
     try std.testing.expectEqualStrings("Read a.md", tooled.chat.user);
     try std.testing.expect(tooled.chat.request.len > 0);
 
     // An image: the vision path (one system and one user turn), tools in the guide.
-    const pic = (try parseChat(arena, "{" ++ tools ++ ",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"What is it?\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,aGVsbG8=\"}}]}]}", &err)).?;
+    const pic = (try parseChat(arena, "{" ++ tools ++ ",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"What is it?\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,aGVsbG8=\"}}]}]}", .of(.{}), &err)).?;
     try std.testing.expectEqualStrings("", pic.chat.request);
     try std.testing.expect(std.mem.indexOf(u8, pic.chat.system, "# Tools") != null);
 }
@@ -1249,7 +1265,7 @@ test "parseChat: system, history folded, image, thinking and schema" {
         \\  {"role":"user","content":"Hi"},{"role":"assistant","content":"Hello!"},
         \\  {"role":"user","content":[{"type":"text","text":"What is this?"},
         \\   {"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}
-    , &err)).?;
+    , .of(.{}), &err)).?;
     try std.testing.expect(req.stream);
     try std.testing.expectEqualStrings("Be brief.", req.chat.system);
     try std.testing.expect(std.mem.indexOf(u8, req.chat.user, "User: Hi") != null);
@@ -1261,10 +1277,10 @@ test "parseChat: system, history folded, image, thinking and schema" {
     try std.testing.expectEqualStrings("{\"type\":\"object\"}", req.chat.schema);
     try std.testing.expect(req.chat.ctx == null);
 
-    const big = (try parseChat(arena, "{\"options\":{\"num_ctx\":65536},\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", &err)).?;
+    const big = (try parseChat(arena, "{\"options\":{\"num_ctx\":65536},\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", .of(.{}), &err)).?;
     try std.testing.expectEqual(@as(?u32, 65536), big.chat.ctx);
 
-    try std.testing.expect((try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}]}", &err)) == null);
+    try std.testing.expect((try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}]}", .of(.{}), &err)) == null);
 }
 
 test "parseChat: agents sample as Qwen recommends unless the request says otherwise" {
@@ -1272,7 +1288,7 @@ test "parseChat: agents sample as Qwen recommends unless the request says otherw
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var err: []const u8 = "";
-    const plain = (try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", &err)).?;
+    const plain = (try parseChat(arena, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", .of(.{}), &err)).?;
     try std.testing.expectEqual(@as(f64, 0.6), plain.chat.temperature);
     try std.testing.expectEqual(@as(i32, 20), plain.chat.sampling.top_k);
     try std.testing.expectEqual(@as(f32, 0), plain.chat.sampling.min_p);
@@ -1281,7 +1297,7 @@ test "parseChat: agents sample as Qwen recommends unless the request says otherw
     const own = (try parseChat(arena,
         \\{"temperature":0.1,"top_p":0.8,"top_k":5000,"min_p":0.1,"presence_penalty":0,
         \\ "frequency_penalty":"high","repeat_penalty":1.1,"messages":[{"role":"user","content":"hi"}]}
-    , &err)).?;
+    , .of(.{}), &err)).?;
     try std.testing.expectEqual(@as(f64, 0.1), own.chat.temperature);
     try std.testing.expectEqual(@as(f32, 0.8), own.chat.sampling.top_p);
     try std.testing.expectEqual(@as(i32, 1000), own.chat.sampling.top_k);
@@ -1313,25 +1329,25 @@ test "parseChat: the same tool call with the same result again and again" {
 
     // Once: as it is.
     const once = try Body.of(arena, &.{"a.md"}, false);
-    try std.testing.expectEqualStrings(once, (try parseChat(arena, once, &err)).?.chat.request);
+    try std.testing.expectEqualStrings(once, (try parseChat(arena, once, .of(.{}), &err)).?.chat.request);
 
     // Twice with the same result: a note on the last result, tools still on.
-    const r2 = (try parseChat(arena, try Body.of(arena, &.{ "a.md", "a.md" }, false), &err)).?;
+    const r2 = (try parseChat(arena, try Body.of(arena, &.{ "a.md", "a.md" }, false), .of(.{}), &err)).?;
     try std.testing.expect(std.mem.indexOf(u8, r2.chat.request, "2 times in a row") != null);
     try std.testing.expect(std.mem.indexOf(u8, r2.chat.request, "\"tools\"") != null);
     try std.testing.expect(r2.tools);
 
     // A poll whose result changes isn't a repeat.
     const poll = try Body.of(arena, &.{ "pending", "done" }, false);
-    try std.testing.expectEqualStrings(poll, (try parseChat(arena, poll, &err)).?.chat.request);
+    try std.testing.expectEqualStrings(poll, (try parseChat(arena, poll, .of(.{}), &err)).?.chat.request);
 
     // Three times: no tools, answer now.
-    const r3 = (try parseChat(arena, try Body.of(arena, &.{ "a.md", "a.md", "a.md" }, false), &err)).?;
+    const r3 = (try parseChat(arena, try Body.of(arena, &.{ "a.md", "a.md", "a.md" }, false), .of(.{}), &err)).?;
     try std.testing.expect(std.mem.indexOf(u8, r3.chat.request, "Tools are off for this turn") != null);
     try std.testing.expect(std.mem.indexOf(u8, r3.chat.request, "\"tools\"") == null);
     try std.testing.expect(!r3.tools);
 
     // A new user message starts over.
     const asked = try Body.of(arena, &.{ "a.md", "a.md" }, true);
-    try std.testing.expectEqualStrings(asked, (try parseChat(arena, asked, &err)).?.chat.request);
+    try std.testing.expectEqualStrings(asked, (try parseChat(arena, asked, .of(.{}), &err)).?.chat.request);
 }

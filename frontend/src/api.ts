@@ -111,6 +111,14 @@ export interface LocalLlmSettings {
   /** MoE models: share of expert weights kept in system RAM, % of blocks (0 = all on the GPU). */
   moePct: number;
   idleMinutes: number;
+  /** How other apps' requests to the model service sample unless they set their own. */
+  temperature: number;
+  topP: number;
+  topK: number;
+  minP: number;
+  presencePenalty: number;
+  frequencyPenalty: number;
+  repeatPenalty: number;
 }
 
 export const isLocal = (p: Profile | undefined) => p?.provider === "local";
