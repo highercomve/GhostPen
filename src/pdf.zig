@@ -184,12 +184,12 @@ fn blocks(arena: std.mem.Allocator, markdown: []const u8, images: []const Image)
             continue;
         }
 
-        if (headingOf(raw)) |level| {
+        if (headingOf(raw)) |h| {
             try drop.both(&out, arena, &para, &quote);
             try out.append(arena, .{
                 .kind = .heading,
-                .level = @min(level, 3),
-                .text = try plain(arena, raw[1 + level ..]),
+                .level = @min(h.level, 3),
+                .text = try plain(arena, h.text),
             });
             continue;
         }
@@ -285,14 +285,17 @@ pub fn decode64(arena: std.mem.Allocator, payload: []const u8) Error![]u8 {
     return bytes;
 }
 
-fn headingOf(raw: []const u8) ?usize {
+const Heading = struct { level: usize, text: []const u8 };
+
+fn headingOf(raw: []const u8) ?Heading {
     var i: usize = 0;
     while (i < raw.len and (raw[i] == ' ' or raw[i] == '\t')) : (i += 1) {}
     if (i >= raw.len or raw[i] != '#') return null;
     var level: usize = 0;
     while (i < raw.len and raw[i] == '#') : (i += 1) level += 1;
     if (level > 6 or i >= raw.len or (raw[i] != ' ' and raw[i] != '\t')) return null;
-    return level;
+    while (i < raw.len and (raw[i] == ' ' or raw[i] == '\t')) : (i += 1) {}
+    return .{ .level = level, .text = raw[i..] };
 }
 
 fn isRule(raw: []const u8) bool {
@@ -927,6 +930,20 @@ test "a markdown summary renders as a valid PDF" {
     try std.testing.expect(std.mem.indexOf(u8, bytes, "/BaseFont /Helvetica-Bold") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "/Count 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "startxref") != null);
+}
+
+test "indented headings parse level and text without prefix whitespace or hash markers" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const bs = try blocksForTesting(a,
+        \\  ## Indented heading
+        \\
+    );
+    try std.testing.expectEqual(@as(usize, 1), bs.len);
+    try std.testing.expectEqual(Block.Kind.heading, bs[0].kind);
+    try std.testing.expectEqual(@as(u8, 2), bs[0].level);
+    try std.testing.expectEqualStrings("Indented heading", bs[0].text);
 }
 
 test "the markdown subset: headings, lists, quotes, fences, inline marks" {

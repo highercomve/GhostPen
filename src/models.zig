@@ -8,11 +8,13 @@ const oriel = @import("oriel");
 const whisper = oriel.whisper;
 const builtin = @import("builtin");
 const llm_models = @import("llm_models.zig");
-const whisper_helper = @import("whisper_helper.zig");
 
 const log = std.log.scoped(.models);
 
 pub const sample_rate = whisper.sample_rate;
+
+/// Three hours of audio (the transcription server takes whole recordings).
+pub const max_samples: u64 = 3 * 60 * 60 * sample_rate;
 
 /// Serializes the runner's use: one request at a time, and no start or stop
 /// in between.
@@ -286,7 +288,7 @@ fn request(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Re
 }
 
 fn requestOnce(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Request, samples: []const f32) !Reply {
-    if (samples.len > whisper_helper.max_samples) return error.AudioTooLong;
+    if (samples.len > max_samples) return error.AudioTooLong;
     const r = try ensureRunner(io, gpa, arena);
     var line = req;
     line.id = r.next_id;
@@ -624,6 +626,7 @@ fn scan(io: std.Io, arena: std.mem.Allocator, root: []const u8, external: bool, 
 }
 
 pub const Progress = llm_models.Progress;
+pub const downloadErrorMessage = llm_models.downloadErrorMessage;
 
 /// Download catalog model `id` into our folder: resumable, checked against
 /// its SHA-256, one download at a time (shared with the built-in models,

@@ -384,12 +384,7 @@ fn defaultSinkMonitor(sources: []const audio.Source) !?[:0]u8 {
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i..][0..needle.len], needle)) return true;
-    }
-    return false;
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
 
 fn acquireStart(mode: CaptureMode) !u64 {
@@ -771,16 +766,7 @@ pub const Commands = struct {
         var status: std.http.Status = .ok;
         models.download(main.io, gpa, arena, args.id, {}, Emit.progress, &status) catch |err| {
             if (err == error.Busy) return oriel.ipc.fail("Another model is downloading.", .{});
-            const message: []const u8 = switch (err) {
-                error.Cancelled => "",
-                error.UnknownModel => "Unknown model.",
-                error.ChecksumMismatch => "The download was damaged (checksum mismatch) and was deleted: try again.",
-                error.RangeIgnored => "The server can't resume this download: try again to start over.",
-                error.Incomplete => "The download stopped early: try again to resume it.",
-                error.Stalled => "The download stalled (no data for a minute): check the connection, then resume it.",
-                error.HttpError => try std.fmt.allocPrint(arena, "Download failed: HTTP {d} {s}.", .{ @intFromEnum(status), status.phrase() orelse "" }),
-                else => try std.fmt.allocPrint(arena, "Download failed ({s}).", .{@errorName(err)}),
-            };
+            const message: []const u8 = try models.downloadErrorMessage(arena, err, status);
             Emit.progress({}, .{ .id = args.id, .state = if (err == error.Cancelled) "cancelled" else "error", .message = message });
             if (err == error.Cancelled) return;
             return oriel.ipc.fail("{s}", .{message});

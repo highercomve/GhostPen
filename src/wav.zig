@@ -10,7 +10,8 @@ const header_len = 44;
 /// The 44-byte RIFF header for `frames` frames of 16-bit PCM.
 fn header(channels: u16, rate: u32, frames: u64) [header_len]u8 {
     const block: u32 = @as(u32, channels) * 2;
-    const data: u32 = @intCast(@min(frames * block, std.math.maxInt(u32) - 36));
+    const total = std.math.mul(u64, frames, block) catch std.math.maxInt(u64);
+    const data: u32 = @intCast(@min(total, std.math.maxInt(u32) - 36));
     var h: [header_len]u8 = undefined;
     @memcpy(h[0..4], "RIFF");
     std.mem.writeInt(u32, h[4..8], 36 + data, .little);

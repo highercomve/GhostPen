@@ -129,10 +129,12 @@ pub fn findSpeakers(
     const info = try wav.info(main.io, f);
     if (info.rate != rate) return error.UnsupportedFormat;
 
-    mutex.lockUncancelable(main.io);
-    defer mutex.unlock(main.io);
-    const enc = try encoderLocked(model_path, model_id);
-    const family = try arena.dupe(u8, family_buf[0..family_len]);
+    const family = blk: {
+        mutex.lockUncancelable(main.io);
+        defer mutex.unlock(main.io);
+        _ = try encoderLocked(model_path, model_id);
+        break :blk try arena.dupe(u8, family_buf[0..family_len]);
+    };
 
     // Embed windows of every segment, track by track.
     var wins: std.ArrayList(Win) = .empty;
@@ -152,9 +154,14 @@ pub fn findSpeakers(
             const samples = try wav.readChannel(main.io, gpa, f, info, channel, from, @intFromFloat(dur * rate));
             defer gpa.free(samples);
             if (store.silent(samples)) continue;
-            const e = enc.embed(gpa, samples) catch |err| {
-                log.warn("embedding a window at {d:.1} s: {s}", .{ start, @errorName(err) });
-                continue;
+            const e = blk: {
+                mutex.lockUncancelable(main.io);
+                defer mutex.unlock(main.io);
+                const enc = try encoderLocked(model_path, model_id);
+                break :blk enc.embed(gpa, samples) catch |err| {
+                    log.warn("embedding a window at {d:.1} s: {s}", .{ start, @errorName(err) });
+                    continue;
+                };
             };
             defer gpa.free(e);
             const owned = try arena.dupe(f32, e);
@@ -178,7 +185,7 @@ pub fn findSpeakers(
         const match = if (c.len > 0) voices.bestMatch(known, family, c) else null;
         try speakers.append(arena, .{
             .id = store.me_id,
-            .name = keptName(m.*, store.me_id) orelse "Me",
+            .name = m.keptName(store.me_id) orelse "Me",
             .voice = if (match) |j| known[j].name else "",
             .embedding = c,
         });
@@ -223,7 +230,7 @@ pub fn findSpeakers(
     }
     try pruneAndNumber(arena, &speakers, segs);
     // Others with no voice at all (all too short): one plain speaker.
-    if (k == 0 and hasOthers(segs)) try speakers.append(arena, .{ .id = "s1", .name = keptName(m.*, "s1") orelse "Speaker 1" });
+    if (k == 0 and hasOthers(segs)) try speakers.append(arena, .{ .id = "s1", .name = m.keptName("s1") orelse "Speaker 1" });
 
     m.segments = segs;
     m.speakers = speakers.items;
@@ -274,11 +281,6 @@ fn hasSpeaker(m: store.Meeting, id: []const u8) bool {
 fn hasOthers(segs: []const store.Segment) bool {
     for (segs) |s| if (!std.mem.eql(u8, s.speaker, store.me_id)) return true;
     return false;
-}
-
-fn keptName(m: store.Meeting, id: []const u8) ?[]const u8 {
-    for (m.speakers) |s| if (std.mem.eql(u8, s.id, id)) return s.name;
-    return null;
 }
 
 fn countKnown(list: []const store.Speaker) usize {

@@ -87,6 +87,11 @@ pub const Meeting = struct {
         return id;
     }
 
+    pub fn keptName(m: Meeting, id: []const u8) ?[]const u8 {
+        for (m.speakers) |s| if (std.mem.eql(u8, s.id, id)) return s.name;
+        return null;
+    }
+
     /// Editing (the Meetings window) only when the pipeline is done.
     pub fn editable(m: Meeting) bool {
         return std.mem.eql(u8, m.state, "ready") or std.mem.eql(u8, m.state, "error");

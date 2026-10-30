@@ -576,7 +576,7 @@ pub fn loaded() bool {
 }
 
 /// The embedding model is loaded right now.
-pub fn embeddingsLoaded() bool {
+fn embeddingsLoaded() bool {
     return embed_slot.is_loaded.load(.acquire);
 }
 

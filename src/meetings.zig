@@ -786,14 +786,9 @@ fn labelSpeakers(arena: std.mem.Allocator, m: *Meeting) !void {
         used_me = used_me or std.mem.eql(u8, seg.speaker, store.me_id);
         used_s1 = used_s1 or std.mem.eql(u8, seg.speaker, "s1");
     }
-    if (used_me or m.mic) try list.append(arena, .{ .id = store.me_id, .name = keptName(m.*, store.me_id) orelse "Me" });
-    if (used_s1 or !m.mic) try list.append(arena, .{ .id = "s1", .name = keptName(m.*, "s1") orelse if (m.mic) "Others" else "Speaker 1" });
+    if (used_me or m.mic) try list.append(arena, .{ .id = store.me_id, .name = m.keptName(store.me_id) orelse "Me" });
+    if (used_s1 or !m.mic) try list.append(arena, .{ .id = "s1", .name = m.keptName("s1") orelse if (m.mic) "Others" else "Speaker 1" });
     m.speakers = list.items;
-}
-
-fn keptName(m: Meeting, id: []const u8) ?[]const u8 {
-    for (m.speakers) |sp| if (std.mem.eql(u8, sp.id, id)) return sp.name;
-    return null;
 }
 
 /// Input characters per summary request: the summary needs the context

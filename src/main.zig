@@ -1220,16 +1220,7 @@ pub const Commands = struct {
         _ = llm_models.download(io, gpa, arena, d, args.id, {}, Emit.progress, &status) catch |err| {
             // Another download is running: its progress bar stays as it is.
             if (err == error.Busy) return oriel.ipc.fail("Another model is downloading.", .{});
-            const message: []const u8 = switch (err) {
-                error.Cancelled => "",
-                error.UnknownModel => "Unknown model.",
-                error.ChecksumMismatch => "The download was damaged (checksum mismatch) and was deleted: try again.",
-                error.RangeIgnored => "The server can't resume this download: try again to start over.",
-                error.Incomplete => "The download stopped early: try again to resume it.",
-                error.Stalled => "The download stalled (no data for a minute): check the connection, then resume it.",
-                error.HttpError => try std.fmt.allocPrint(arena, "Download failed: HTTP {d} {s}.", .{ @intFromEnum(status), status.phrase() orelse "" }),
-                else => try std.fmt.allocPrint(arena, "Download failed ({s}).", .{@errorName(err)}),
-            };
+            const message: []const u8 = try llm_models.downloadErrorMessage(arena, err, status);
             Emit.progress({}, .{ .id = args.id, .state = if (err == error.Cancelled) "cancelled" else "error", .message = message });
             if (err == error.Cancelled) return;
             return oriel.ipc.fail("{s}", .{message});

@@ -712,12 +712,7 @@ pub fn looksLikeReasoning(output: []const u8, input: ?[]const u8) bool {
 }
 
 fn containsIgnoreCase(haystack: []const u8, lower_needle: []const u8) bool {
-    if (lower_needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + lower_needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i..][0..lower_needle.len], lower_needle)) return true;
-    }
-    return false;
+    return std.ascii.indexOfIgnoreCase(haystack, lower_needle) != null;
 }
 
 // ---- tests -----------------------------------------------------------------------------

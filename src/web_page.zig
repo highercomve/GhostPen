@@ -427,8 +427,11 @@ pub fn extract(arena: std.mem.Allocator, html: []const u8) !Page {
         // Skipped regions: to the matching close (the literal; script bodies
         // contain '>' freely, so searching for it would not do).
         if (!closing and inList(&skip_tags, name)) {
-            var close_buf: [16]u8 = undefined;
-            const close = std.fmt.bufPrint(&close_buf, "</{s}", .{name}) catch unreachable;
+            var close_buf: [32]u8 = undefined;
+            const close = std.fmt.bufPrint(&close_buf, "</{s}", .{name}) catch {
+                i = html.len;
+                continue;
+            };
             i = findClose(html, j, close) orelse html.len;
             continue;
         }
@@ -698,10 +701,10 @@ test "readPath: a markdown file reads with its heading as the title" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "plan.md", .data =
-    \\# Secret rotation plan
-    \\
-    \\1. Rotate the client key.
-    \\2. Add a budget rule.
+        \\# Secret rotation plan
+        \\
+        \\1. Rotate the client key.
+        \\2. Add a budget rule.
     });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &path_buf);
@@ -722,7 +725,7 @@ test "readPath: ~/ expands through the home, binary and missing files say why" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "page.htm", .data =
-    \\<!DOCTYPE html><html><head><title>Saved</title></head><body><p>one</p><script>x</script></body></html>
+        \\<!DOCTYPE html><html><head><title>Saved</title></head><body><p>one</p><script>x</script></body></html>
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "blob.bin", .data = "text" ++ [_]u8{0} ++ "more" });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;

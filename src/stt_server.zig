@@ -32,7 +32,6 @@ const std = @import("std");
 const main = @import("main.zig");
 const models = @import("models.zig");
 const model_server = @import("model_server.zig");
-const whisper_helper = @import("whisper_helper.zig");
 
 const log = std.log.scoped(.stt_server);
 const gpa = std.heap.smp_allocator;
@@ -597,7 +596,7 @@ fn decodeToPcm16k(io: std.Io, arena: std.mem.Allocator, bytes: []const u8) ![]co
     // what the whisper runner takes (3 h): longer fails here, not after
     // decoding hours more.
     var pcm: std.array_list.Aligned(u8, .@"4") = .empty;
-    r.interface.appendRemainingAligned(arena, .@"4", &pcm, .limited(whisper_helper.max_samples * @sizeOf(f32))) catch |err| {
+    r.interface.appendRemainingAligned(arena, .@"4", &pcm, .limited(models.max_samples * @sizeOf(f32))) catch |err| {
         // Kill first: ffmpeg blocked on a full stdout would keep the feeder
         // blocked on its stdin, and the join would never return.
         child.kill(io);

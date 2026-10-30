@@ -2,6 +2,30 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.4] - 2026-10-30
+
+### Fixed
+
+- Markdown PDF generation: headings with leading whitespace (indentation)
+  now correctly extract their heading text without slicing out-of-bounds or
+  including hashtag characters in the title.
+- Speaker diarization: narrowed the global mutex in speaker identification so
+  audio file reading and progress callbacks run outside the lock, preventing
+  live caption speaker identification from dropping labels while meeting saves
+  are in progress.
+- Cleaned up cross-layer imports by moving transcription `max_samples` to
+  `models.zig`, removing helper process imports from core and the STT server.
+- Standardized substring search across `ai`, `captions`, and `llm_models` on
+  `std.ascii.indexOfIgnoreCase`.
+- Deduplicated model download error reporting into `llm_models.downloadErrorMessage`
+  shared by `captions` and `main`.
+- Moved speaker name lookup into `Meeting.keptName` in `meeting_store`.
+- Added checked integer multiplication on WAV header frame calculations to prevent
+  overflow panics on untrusted or corrupt audio files.
+- Enlarged HTML skip-tag close buffer in web page extraction to prevent stack overflows.
+- Made dead exported function `embeddingsLoaded` private.
+- Formatted `web_page.zig` multiline test strings for clean `zig fmt` checks.
+
 ## [0.4.3] - 2026-10-26
 
 ### Added
