@@ -113,6 +113,23 @@ const load_timeout_ms = 10 * 60 * 1000;
 const generate_timeout_ms = 15 * 60 * 1000;
 /// Text the helper accepts in one request.
 const max_request_bytes = 240 * 1024;
+
+/// Whether a request without a whole conversation (`request`) is past
+/// `max_request_bytes`: a selection to rewrite or answer. An agent's
+/// conversation also carries a folded copy in `system`/`user`, but the model
+/// reads `request`, which only the context limits.
+fn selectionTooLong(req: anytype) bool {
+    return req.request.len == 0 and req.system.len + req.user.len > max_request_bytes;
+}
+
+test selectionTooLong {
+    const big = "x" ** (max_request_bytes + 1);
+    const Req = struct { system: []const u8 = "", user: []const u8 = "", request: []const u8 = "" };
+    try std.testing.expect(selectionTooLong(Req{ .user = big }));
+    try std.testing.expect(!selectionTooLong(Req{ .user = "short" }));
+    // An agent's long conversation: the folded copy doesn't count.
+    try std.testing.expect(!selectionTooLong(Req{ .user = big, .request = "{\"messages\":[]}" }));
+}
 /// A request line with an image in base64 (the helper's line buffer is 32 MiB).
 const max_image_line_bytes = 30 * 1024 * 1024;
 
@@ -241,7 +258,7 @@ fn chatImpl(
         diag.* = "The conversation is too long for the built-in model.";
         return error.LocalFailed;
     }
-    if (req.system.len + req.user.len > max_request_bytes) {
+    if (selectionTooLong(req)) {
         diag.* = "The text is too long for the built-in model (about 200 KB at most): select less.";
         return error.LocalFailed;
     }

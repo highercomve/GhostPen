@@ -431,10 +431,17 @@ const ChatModel = struct {
         if (remembered) |r| {
             batches = .{ .batch = r.batch, .ubatch = r.ubatch };
             const measured = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
-            const safe = limitRemembered(r, measured);
+            var safe = limitRemembered(r, measured);
             if (safe.ngl != r.ngl or safe.experts != r.experts) {
                 remembered = null;
                 std.debug.print("ghostpen-llm: cached split exceeds current GPU memory; reducing GPU allocation\n", .{});
+            } else if (outgrown(r, measured, meta.experts != 0)) {
+                // Remembered while something else held GPU memory: the GPU
+                // has room for more now, so this load measures again and
+                // remembers that instead.
+                remembered = null;
+                safe = .{ .ngl = measured.ngl, .experts = measured.n_overrides, .batch = r.batch, .ubatch = r.ubatch };
+                std.debug.print("ghostpen-llm: the GPU has room for more than the cached split; using the new measurement\n", .{});
             }
             plan = .{ .ngl = safe.ngl, .n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, safe.experts) };
             if (safe.ngl >= 999) {
@@ -569,6 +576,12 @@ const ChatModel = struct {
             cparams.type_k = opts.kv_type;
             cparams.type_v = opts.kv_type;
             cparams.flash_attn_type = opts.flash_attn;
+            // Sliding-window layers (Gemma) cache only their window, not the
+            // whole context: llama.cpp's default sizes them for every token,
+            // 22 GB for Gemma 4 12B at 128k, so the context never fit. The
+            // prompt cache checks the window before reusing a prefix
+            // (`evalText`).
+            cparams.swa_full = false;
             if (c.llama_init_from_model(model, cparams)) |ctx| return ctx;
             if (n_ctx <= 2048) {
                 std.debug.print("ghostpen-llm: could not create a {d}-token context (out of memory?)\n", .{n_ctx});
@@ -680,9 +693,14 @@ fn layerCount(opts: Options) i32 {
 
 const ModelMeta = struct {
     layers: i32 = 0,
-    /// KV-cache bytes per context token (K and V, this model's geometry and
-    /// the configured KV precision).
+    /// KV-cache bytes per context token of the layers that cache the whole
+    /// context (K and V, this model's geometry and the configured KV
+    /// precision).
     kv_per_token: u64 = 0,
+    /// The same for the sliding-window layers (Gemma), which cache only the
+    /// last `swa_window` tokens however long the context: `kvBytes`.
+    kv_swa_per_token: u64 = 0,
+    swa_window: u32 = 0,
     /// Vocabulary size: the logits buffer is n_batch entries of it.
     vocab: u32 = 0,
     /// A MoE model (`{arch}.expert_count` in the metadata; its expert
@@ -713,28 +731,141 @@ fn modelMeta(opts: Options) ModelMeta {
     // expert tensor exists, so a hold-back plan would be a no-op that
     // still forces every layer onto the GPU.
     out.experts = metaInt(m, "{s}.expert_count", arch[0..@intCast(n)]);
-    const heads = metaInt(m, "{s}.attention.head_count_kv", arch[0..@intCast(n)]);
-    if (heads <= 0) return out;
-    var head_dim = metaInt(m, "{s}.attention.key_length", arch[0..@intCast(n)]);
-    if (head_dim <= 0) {
-        const n_embd = metaInt(m, "{s}.embedding_length", arch[0..@intCast(n)]);
-        const n_heads = metaInt(m, "{s}.attention.head_count", arch[0..@intCast(n)]);
-        if (n_embd <= 0 or n_heads <= 0) return out;
-        head_dim = @divTrunc(n_embd, n_heads);
-    }
-    const elem = @divTrunc(c.ggml_type_size(opts.kv_type), @as(usize, @intCast(c.ggml_blck_size(opts.kv_type))));
-    // Only the full-attention layers cache KV: the recurrent (SSM) blocks of
-    // a hybrid model (Qwen3.5 and friends) hold their state instead — one
-    // attention layer every `full_attention_interval` blocks (llama.cpp
-    // marks the rest recurrent). Without this, the reserve covers one
-    // layer's cache and a 131k-token context under-counts by gigabytes.
-    const interval: u64 = @intCast(@max(metaInt(m, "{s}.full_attention_interval", arch[0..@intCast(n)]), 1));
-    const kv_layers: u64 = if (out.layers > 0)
-        @divTrunc(@as(u64, @intCast(out.layers)) - 1, interval) + 1
-    else
-        1;
-    out.kv_per_token = kv_layers * 2 * @as(u64, @intCast(heads)) * @as(u64, @intCast(head_dim)) * @as(u64, @intCast(elem));
+    const a = arch[0..@intCast(n)];
+    // Per layer where the model varies them (Gemma 4: `[8, 8, 8, 8, 8, 1,
+    // …]` KV heads and which layers slide), a single number otherwise.
+    var heads: [max_kv_layers]u32 = undefined;
+    var swa: [max_kv_layers]bool = undefined;
+    var text: [4096]u8 = undefined;
+    const geometry: KvGeometry = .{
+        .layers = @intCast(@max(out.layers, 0)),
+        .heads_kv = parseInts(metaStr(m, "{s}.attention.head_count_kv", a, &text), &heads),
+        .key_len = @intCast(@max(metaInt(m, "{s}.attention.key_length", a), 0)),
+        .value_len = @intCast(@max(metaInt(m, "{s}.attention.value_length", a), 0)),
+        .key_len_swa = @intCast(@max(metaInt(m, "{s}.attention.key_length_swa", a), 0)),
+        .value_len_swa = @intCast(@max(metaInt(m, "{s}.attention.value_length_swa", a), 0)),
+        .head_dim = headDim(m, a),
+        .swa = parseBools(metaStr(m, "{s}.attention.sliding_window_pattern", a, &text), &swa),
+        .swa_window = @intCast(@max(metaInt(m, "{s}.attention.sliding_window", a), 0)),
+        .full_interval = @intCast(@max(metaInt(m, "{s}.full_attention_interval", a), 1)),
+    };
+    const elems = geometry.elems();
+    out.kv_per_token = kvElemBytes(elems.full, opts.kv_type);
+    out.kv_swa_per_token = kvElemBytes(elems.swa, opts.kv_type);
+    out.swa_window = if (elems.swa > 0) geometry.swa_window else 0;
     return out;
+}
+
+/// The head size when the metadata has no `key_length`: the embedding
+/// width over the attention heads (0 when unknown).
+fn headDim(m: *c.llama_model, arch: []const u8) u32 {
+    const n_embd = metaInt(m, "{s}.embedding_length", arch);
+    const n_heads = metaInt(m, "{s}.attention.head_count", arch);
+    if (n_embd <= 0 or n_heads <= 0) return 0;
+    return @intCast(@divTrunc(n_embd, n_heads));
+}
+
+/// Bytes for `elems` KV elements at precision `kv_type`: q8_0 is 34 bytes
+/// a block of 32, so the size per element isn't a whole number.
+fn kvElemBytes(elems: u64, kv_type: c.ggml_type) u64 {
+    const block: u64 = @intCast(c.ggml_blck_size(kv_type));
+    return elems * @as(u64, c.ggml_type_size(kv_type)) / @max(block, 1);
+}
+
+/// The KV cache a context of `ctx` tokens needs, with prompt micro-batches
+/// of `ubatch`: the full-attention layers hold every token, the
+/// sliding-window ones the window plus one micro-batch (llama.cpp's SWA
+/// cache), never more than the context.
+fn kvBytes(meta: ModelMeta, ctx: u32, ubatch: u32) u64 {
+    const swa_tokens: u64 = @min(@as(u64, ctx), @as(u64, meta.swa_window) + ubatch);
+    return @as(u64, ctx) * meta.kv_per_token + swa_tokens * meta.kv_swa_per_token;
+}
+
+/// Layers whose geometry is read per layer; a model with more uses the
+/// first entry's value for the rest.
+const max_kv_layers = 256;
+
+/// A model's attention geometry from its metadata: what its KV cache holds
+/// per token.
+const KvGeometry = struct {
+    layers: usize,
+    /// KV heads: one per layer, or a single value for every layer.
+    heads_kv: []const u32,
+    /// K and V sizes per head (0: `head_dim`), and the sliding-window
+    /// layers' own when they differ (0: the same).
+    key_len: u32 = 0,
+    value_len: u32 = 0,
+    key_len_swa: u32 = 0,
+    value_len_swa: u32 = 0,
+    head_dim: u32 = 0,
+    /// Per layer: whether it slides (caches only `swa_window` tokens).
+    /// Empty: no layer does.
+    swa: []const bool = &.{},
+    swa_window: u32 = 0,
+    /// Hybrid models (Qwen3.5): one attention layer every this many blocks,
+    /// the rest recurrent with no KV cache.
+    full_interval: u32 = 1,
+
+    /// KV elements per token: the full-attention layers' and the
+    /// sliding-window layers'.
+    fn elems(g: KvGeometry) struct { full: u64, swa: u64 } {
+        var full: u64 = 0;
+        var swa: u64 = 0;
+        if (g.heads_kv.len == 0) return .{ .full = 0, .swa = 0 };
+        for (0..g.layers) |i| {
+            // llama.cpp marks every layer but each `full_interval`th
+            // recurrent: they hold a state, not a cache.
+            if (g.full_interval > 1 and (i + 1) % g.full_interval != 0) continue;
+            const heads: u64 = g.heads_kv[if (i < g.heads_kv.len) i else 0];
+            const slides = g.swa_window > 0 and i < g.swa.len and g.swa[i];
+            const k: u64 = pick(if (slides) g.key_len_swa else 0, g.key_len, g.head_dim);
+            const v: u64 = pick(if (slides) g.value_len_swa else 0, g.value_len, k);
+            const n = heads * (k + v);
+            if (slides) swa += n else full += n;
+        }
+        return .{ .full = full, .swa = swa };
+    }
+
+    /// The first non-zero size.
+    fn pick(a: u64, b: u64, fallback: u64) u64 {
+        return if (a != 0) a else if (b != 0) b else fallback;
+    }
+};
+
+/// `[8, 8, 1]` or `8` (llama.cpp's text for an array or a number) into
+/// `out`; the values read (empty when none parse).
+fn parseInts(text: []const u8, out: []u32) []const u32 {
+    var n: usize = 0;
+    var it = std.mem.tokenizeAny(u8, text, "[], ");
+    while (it.next()) |t| {
+        if (n == out.len) break;
+        out[n] = std.fmt.parseInt(u32, t, 10) catch return out[0..0];
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// `[true, false]` into `out`; the values read (empty when it isn't a list
+/// of booleans: a single number is a period no model here uses).
+fn parseBools(text: []const u8, out: []bool) []const bool {
+    var n: usize = 0;
+    var it = std.mem.tokenizeAny(u8, text, "[], ");
+    while (it.next()) |t| {
+        if (n == out.len) break;
+        out[n] = if (std.mem.eql(u8, t, "true")) true else if (std.mem.eql(u8, t, "false")) false else return out[0..0];
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// One `<arch>.<key>` value as llama.cpp prints it, in `buf` ("" when absent
+/// or longer than `buf`).
+fn metaStr(m: *c.llama_model, comptime fmt: []const u8, arch: []const u8, buf: []u8) []const u8 {
+    var key: [96]u8 = undefined;
+    const k = std.fmt.bufPrintZ(&key, fmt, .{arch}) catch return "";
+    const v = c.llama_model_meta_val_str(m, k.ptr, buf.ptr, buf.len);
+    if (v <= 0 or @as(usize, @intCast(v)) >= buf.len) return "";
+    return buf[0..@intCast(v)];
 }
 
 /// One `<arch>.<key>` integer from the model's metadata (0 when absent).
@@ -801,6 +932,36 @@ const Remembered = struct {
     ubatch: u32,
 };
 
+/// Whether the cache can resume after a prefix of `common` tokens: with a
+/// sliding window of `n_swa` tokens, it must still hold the window before
+/// it (its oldest position `pos_min` at most `common - n_swa`).
+/// llama-server's check. A model without a window can always resume.
+fn swaPrefixUsable(common: usize, pos_min: c.llama_pos, n_swa: i32) bool {
+    if (n_swa <= 0 or common == 0 or pos_min < 0) return true;
+    const need: i64 = @max(@as(i64, @intCast(common)) - n_swa, 0);
+    return pos_min <= need;
+}
+
+test swaPrefixUsable {
+    // No sliding window, or nothing to reuse: always.
+    try std.testing.expect(swaPrefixUsable(5000, 4000, 0));
+    try std.testing.expect(swaPrefixUsable(0, 4000, 1024));
+    // Window of 1024: an agent's next turn extends the last prompt, whose
+    // last 1024+ tokens are still cached.
+    try std.testing.expect(swaPrefixUsable(10_000, 8_900, 1024));
+    // The shared prefix ends 3,000 tokens back: its window was evicted.
+    try std.testing.expect(!swaPrefixUsable(7_000, 8_900, 1024));
+    // A short prompt: the whole of it is in the window.
+    try std.testing.expect(swaPrefixUsable(600, 0, 1024));
+}
+
+/// Whether a fresh measurement fits more of the model on the GPU than the
+/// remembered split: more layers (dense), or fewer blocks' experts in system
+/// RAM (MoE).
+fn outgrown(cached: Remembered, measured: Plan, moe: bool) bool {
+    return if (moe) measured.n_overrides < cached.experts else measured.ngl > cached.ngl;
+}
+
 fn limitRemembered(cached: Remembered, measured: Plan) Remembered {
     var safe = cached;
     safe.ngl = @min(cached.ngl, measured.ngl);
@@ -836,6 +997,75 @@ test "cached GPU split respects current memory for dense and MoE models" {
     try std.testing.expectEqual(@as(i32, 17), dense.ngl);
     const conservative = limitRemembered(moe, .{ .ngl = 999, .n_overrides = 30 });
     try std.testing.expectEqual(moe, conservative);
+}
+
+test "a split remembered under memory pressure gives way to a roomier measurement" {
+    // Gemma 4 at 80k tokens, remembered at 14 layers while GPU memory was taken.
+    const cached: Remembered = .{ .ngl = 14, .experts = 0, .batch = 512, .ubatch = 512 };
+    try std.testing.expect(outgrown(cached, .{ .ngl = 999, .n_overrides = 0 }, false));
+    try std.testing.expect(!outgrown(cached, .{ .ngl = 14, .n_overrides = 0 }, false));
+    try std.testing.expect(!outgrown(cached, .{ .ngl = 9, .n_overrides = 0 }, false));
+    // MoE: fewer blocks' experts in RAM is more on the GPU.
+    const moe: Remembered = .{ .ngl = 999, .experts = 30, .batch = 512, .ubatch = 512 };
+    try std.testing.expect(outgrown(moe, .{ .ngl = 999, .n_overrides = 12 }, true));
+    try std.testing.expect(!outgrown(moe, .{ .ngl = 999, .n_overrides = 30 }, true));
+}
+
+test "KV geometry: Gemma 4's sliding-window layers cache only the window" {
+    // highllama-gemma4-12b-agentic's metadata: 48 layers, five sliding then
+    // one full, 8 KV heads of 256 when sliding, 1 of 512 when full.
+    var heads: [48]u32 = undefined;
+    var swa: [48]bool = undefined;
+    for (0..48) |i| {
+        const full = i % 6 == 5;
+        heads[i] = if (full) 1 else 8;
+        swa[i] = !full;
+    }
+    const g: KvGeometry = .{
+        .layers = 48,
+        .heads_kv = &heads,
+        .key_len = 512,
+        .value_len = 512,
+        .key_len_swa = 256,
+        .value_len_swa = 256,
+        .swa = &swa,
+        .swa_window = 1024,
+    };
+    const e = g.elems();
+    try std.testing.expectEqual(@as(u64, 8 * 1 * (512 + 512)), e.full);
+    try std.testing.expectEqual(@as(u64, 40 * 8 * (256 + 256)), e.swa);
+    // At 128k tokens in q8_0 (34 bytes a block of 32) and micro-batches of
+    // 512: 1,088 MiB for the full layers and 255 MiB for the sliding ones,
+    // about 1.3 GiB. Read as a single number, the per-layer KV head
+    // list failed to parse and the estimate was 0; counting every layer at
+    // the full context would have been ~22 GiB.
+    const meta: ModelMeta = .{ .layers = 48, .kv_per_token = e.full * 34 / 32, .kv_swa_per_token = e.swa * 34 / 32, .swa_window = 1024 };
+    const kv = kvBytes(meta, 131072, 512);
+    try std.testing.expect(kv > 1300 << 20 and kv < 1400 << 20);
+    // A context shorter than the window: the sliding layers hold all of it.
+    try std.testing.expectEqual(@as(u64, 100) * (meta.kv_per_token + meta.kv_swa_per_token), kvBytes(meta, 100, 512));
+}
+
+test "KV geometry: a single KV head count and a hybrid model" {
+    const one = [_]u32{8};
+    // Dense, 32 layers of 8 heads of 128 (no value_length: K's size).
+    const dense: KvGeometry = .{ .layers = 32, .heads_kv = &one, .key_len = 128 };
+    try std.testing.expectEqual(@as(u64, 32 * 8 * 256), dense.elems().full);
+    // Qwen3.5-style hybrid: one attention layer in four caches.
+    const hybrid: KvGeometry = .{ .layers = 32, .heads_kv = &one, .key_len = 128, .full_interval = 4 };
+    try std.testing.expectEqual(@as(u64, 8 * 8 * 256), hybrid.elems().full);
+    try std.testing.expectEqual(@as(u64, 0), hybrid.elems().swa);
+}
+
+test "metadata lists parse as llama.cpp prints them" {
+    var ints: [8]u32 = undefined;
+    try std.testing.expectEqualSlices(u32, &.{ 8, 8, 1 }, parseInts("[8, 8, 1]", &ints));
+    try std.testing.expectEqualSlices(u32, &.{8}, parseInts("8", &ints));
+    try std.testing.expectEqual(@as(usize, 0), parseInts("", &ints).len);
+    try std.testing.expectEqual(@as(usize, 0), parseInts("[8, x]", &ints).len);
+    var bools: [8]bool = undefined;
+    try std.testing.expectEqualSlices(bool, &.{ true, true, false }, parseBools("[true, true, false]", &bools));
+    try std.testing.expectEqual(@as(usize, 0), parseBools("6", &bools).len);
 }
 
 const max_plan_entries = 64;
@@ -973,7 +1203,7 @@ fn gpuLayers(opts: Options, batches: Batches) i32 {
     // (n_batch entries of the vocabulary — 2 GB at 250k), and the rest of the
     // compute buffers.
     const meta = modelMeta(opts);
-    const kv: u64 = @as(u64, opts.ctx) * meta.kv_per_token;
+    const kv: u64 = kvBytes(meta, opts.ctx, batches.ubatch);
     const logits: u64 = @as(u64, batches.batch) * @as(u64, meta.vocab) * 4;
     const compute: u64 = 650 * 1024 * 1024 + @as(u64, batches.ubatch / 512) * 750 * 1024 * 1024;
     const reserve: u64 = compute + kv + logits;
@@ -1007,7 +1237,7 @@ fn moeCpuForVram(opts: Options, blocks: usize, batches: Batches) usize {
     // (n_batch entries of the vocabulary), the CUDA + compute buffers, with a
     // safety margin.
     const meta = modelMeta(opts);
-    const kv_mib = @as(u64, opts.ctx) * meta.kv_per_token >> 20;
+    const kv_mib = kvBytes(meta, opts.ctx, batches.ubatch) >> 20;
     const logits_mib = @as(u64, batches.batch) * @as(u64, meta.vocab) * 4 >> 20;
     // Compute buffers: base + the activations, which scale with the
     // micro-batch size.
@@ -1457,6 +1687,14 @@ const Engine = struct {
         // (a "casual" rewrite that remembered the translation before it).
         // Then start over from an empty memory.
         const mem = c.llama_get_memory(self.ctx);
+        // Sliding-window layers keep only their last window of tokens
+        // (`swa_full` off): a prefix ending further back than that has lost
+        // the cache its next token attends to, and reusing it would answer
+        // wrongly. Start over then, as llama-server does.
+        if (!swaPrefixUsable(common, c.llama_memory_seq_pos_min(mem, 0), c.llama_model_n_swa(self.model))) {
+            c.llama_memory_clear(mem, true);
+            common = 0;
+        }
         if (!c.llama_memory_seq_rm(mem, 0, @intCast(common), -1)) {
             c.llama_memory_clear(mem, true);
             common = 0;

@@ -2,6 +2,29 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.5] - 2026-11-01
+
+0.4.4 was tagged but never published (its tag wasn't annotated, so the release
+step had no notes): its fixes below ship in this release.
+
+### Fixed
+
+- Built-in models stay on the GPU. A GPU split remembered while other programs
+  held video memory was reused forever, even once the memory was free again:
+  Gemma 4 12B at an 80k context ran with 14 of its 48 layers on the GPU and
+  the rest on the CPU. A split is now measured again and replaced when the GPU
+  has room for more.
+- Long contexts for Gemma models. Their sliding-window layers now cache only
+  their window (llama.cpp's `swa_full` off) instead of the whole context:
+  Gemma 4 12B fits a 128k-token context on a 12 GB GPU, where it fell back to
+  16k before. A cached prompt is reused only while its window is still in the
+  cache, as llama-server does.
+- The GPU memory estimate reads per-layer KV head counts and sliding-window
+  layers (Gemma 4's metadata), and the 8-bit KV cache's real size: it came out
+  as zero for Gemma 4.
+- Agents' long conversations are no longer refused at 240 KB: that limit is for
+  selected text. A conversation is limited only by the model's context.
+
 ## [0.4.4] - 2026-10-30
 
 ### Fixed
