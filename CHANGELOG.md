@@ -2,11 +2,14 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
-## [0.4.6] - 2026-11-02
+## [0.4.7] - 2026-11-02
+
+0.4.6 was tagged but not published: its Windows build failed to link Vulkan.
+Its change (below) ships in this release.
 
 ### Changed
 
-- Built on Oriel 0.20.10, with llama.cpp from October 30: newer model
+- Built on Oriel 0.20.11, with llama.cpp from October 30: newer model
   architectures load in the built-in model runner, Flint among them, which
   GhostPen refused before with "unknown model architecture".
 
