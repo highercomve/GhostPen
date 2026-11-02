@@ -2,6 +2,14 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.6] - 2026-11-02
+
+### Changed
+
+- Built on Oriel 0.20.10, with llama.cpp from October 30: newer model
+  architectures load in the built-in model runner, Flint among them, which
+  GhostPen refused before with "unknown model architecture".
+
 ## [0.4.5] - 2026-11-01
 
 0.4.4 was tagged but never published (its tag wasn't annotated, so the release
