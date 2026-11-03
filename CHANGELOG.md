@@ -2,6 +2,14 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.4.8] - 2026-11-03
+
+### Fixed
+
+- The Linux tray icon is readable on dark panels. It was the app icon, whose
+  dark tile vanished into the panel; it is now the ghost alone, on a
+  transparent background, and the recording icon likewise.
+
 ## [0.4.7] - 2026-11-02
 
 0.4.6 was tagged but not published: its Windows build failed to link Vulkan.

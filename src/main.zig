@@ -1483,12 +1483,19 @@ const tray_mono_png = @embedFile("assets/tray-mono.png");
 /// macOS too (a template image would lose the red).
 const tray_recording_png = @embedFile("assets/tray-recording.png");
 
+/// Linux: the ghost cut out of the app icon, without its dark tile, which
+/// vanishes into the dark panels most desktops use (GNOME's even in light
+/// mode). Derived from icon.png, as is the recording one.
+const tray_dark_png = @embedFile("assets/tray-dark.png");
+const tray_recording_dark_png = @embedFile("assets/tray-recording-dark.png");
+
 /// The usual tray icon, set by `setup` (the app's icon is only there in
 /// the app's build, not the tests').
 var tray_idle_icon: if (has_tray) oriel.tray.Icon else void = if (has_tray) .{ .template_png = tray_mono_png } else {};
 
 fn trayIcon(recording: bool) oriel.tray.Icon {
-    return if (recording) .{ .png = tray_recording_png } else tray_idle_icon;
+    if (recording) return .{ .png = if (builtin.os.tag == .linux) tray_recording_dark_png else tray_recording_png };
+    return tray_idle_icon;
 }
 
 /// Show on the tray icon whether a meeting is recording (any thread: the
@@ -1623,6 +1630,7 @@ fn setUpTray() void {
         // macOS: a template image follows the menu bar's light/dark
         // theme without any detection on our side.
         .macos => .{ .template_png = tray_mono_png },
+        .linux => .{ .png = tray_dark_png },
         else => .{ .png = app.build.icon.? },
     };
     tray = oriel.tray.Tray.create(gpa, .{
