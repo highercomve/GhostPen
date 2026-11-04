@@ -1071,7 +1071,7 @@ button.page-header-pill:focus-visible { outline: 2px solid var(--accent); outlin
 .pg-pane-tools { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px 12px; }
 .pg-pane-head strong { color: var(--accent); font-weight: 650; }
 .pg-working { font-weight: 400; }
-.pg-switch { position: relative; display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; user-select: none; }
+.pg-switch { position: relative; display: inline-flex; align-items: center; gap: 7px; margin: 0; min-height: 30px; line-height: 1; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; user-select: none; }
 .pg-switch input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
 .pg-switch input:checked ~ span:last-child { color: var(--text); }
 .pg-diff { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
