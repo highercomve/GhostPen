@@ -1713,10 +1713,6 @@ pub fn main(init: std.process.Init) !u8 {
     }
     // The built-in voice (oriel.tts) in <data dir>/GhostPen/tts.
     const tts_ready = tts.setUp(io, gpa, init.arena.allocator(), init.environ_map);
-    // The LLM runner remembers its last successful split per model+settings
-    // in GhostPen's config (~/.config/ghostpen/llm-plans.json): a model swap
-    // doesn't re-run the whole plan ladder on every load.
-    local_llm.plan_path = llm_models.configFile(init.arena.allocator(), init.environ_map, "llm-plans.json");
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
     @import("models.zig").helper_exe = self_exe;
     ai.local_resolver = &resolveLocal;

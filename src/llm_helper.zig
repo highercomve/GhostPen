@@ -1,9 +1,16 @@
 //! The local LLM runner: GhostPen's own executable started as
 //! `ghostpen --llm-helper --model <file.gguf> [--mmproj <file.gguf>] [--embed-model <file.gguf>]
-//! [--ctx N] [--kv-type f16|q8_0|q4_0] [--flash-attn auto|on|off] [--moe-pct N] [--cpu]` by
+//! [--ctx N] [--min-ctx N] [--kv-type f16|q8_0|q4_0] [--flash-attn auto|on|off] [--moe-pct N] [--cpu]` by
 //! `local_llm.zig`. A separate process so a crash or an out-of-memory in
 //! llama.cpp can't take the app down, Stop can always kill it, and the
 //! model's memory is returned when it exits.
+//!
+//! `--measure [--measure-ctx 65536,131072,262144]` checks the GPU planner
+//! instead of serving: for each context and prompt-batch step, one JSON line
+//! with the planner's estimate (`Estimate`) beside llama.cpp's own
+//! accounting of the same load with every layer on the GPU. The model loads
+//! `no_alloc`, so nothing is allocated and any model at any context can be
+//! measured, whatever memory is free (scripts/estimator-check.sh).
 //!
 //! Protocol: JSON lines. Once the model is loaded the helper prints
 //!
@@ -57,6 +64,7 @@
 const std = @import("std");
 const oriel = @import("oriel");
 const chat_format = @import("chat_format.zig");
+const gguf = @import("gguf_context.zig");
 
 const c = oriel.llama.c;
 const log = std.log.scoped(.llm);
@@ -75,6 +83,9 @@ const Options = struct {
     /// system RAM (0: all on the GPU; 100: every expert); attention stays on
     /// the GPU.
     moe_pct: u8 = 0,
+    /// The shortest context the planner may shorten `ctx` to so the model
+    /// fits on the GPU (`--min-ctx`; at least `min_fit_ctx`).
+    min_ctx: u32 = 0,
 };
 
 /// Prompt batch and micro-batch (llama.cpp's -b / -ub): the batch also
@@ -147,11 +158,6 @@ var io: std.Io = undefined;
 var out_mutex: std.Io.Mutex = .init;
 var out_buf: [16 * 1024]u8 = undefined;
 var out_writer: std.Io.File.Writer = undefined;
-/// The remembered-plans file (`--plans`, GhostPen's ~/.config/ghostpen);
-/// null (e.g. a manual run): plan from scratch every time, as before.
-var plans_path: ?[:0]const u8 = null;
-/// The runner's allocator (main's): the plan cache's file reads and JSON.
-var plan_gpa: std.mem.Allocator = undefined;
 var cancel: std.atomic.Value(bool) = .init(false);
 /// A request is running. Cleared just before its last line goes out, so
 /// the client's next request (sent as soon as it reads that line) is never
@@ -197,17 +203,17 @@ fn abortCallback(_: ?*anyopaque) callconv(.c) bool {
 
 pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
     io = process_io;
-    plan_gpa = gpa;
     out_writer = std.Io.File.stdout().writerStreaming(io, &out_buf);
 
     var opts: Options = .{ .model = "" };
     var model_owned = false;
+    var measure_mode = false;
+    var measure_ctx_buf: [16]u32 = undefined;
+    var measure_ctxs: []const u32 = &default_measure_ctxs;
     defer {
         if (model_owned) gpa.free(opts.model);
         if (opts.mmproj) |p| gpa.free(p);
         if (opts.embed_model) |p| gpa.free(p);
-        if (plans_path) |p| gpa.free(p);
-        plans_path = null;
     }
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -220,9 +226,8 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
             opts.model = value;
             model_owned = true;
         } else if (std.mem.eql(u8, a, "--plans") and has_value) {
+            // An older GhostPen's remembered splits: every load measures now.
             i += 1;
-            if (plans_path) |p| gpa.free(p);
-            plans_path = gpa.dupeZ(u8, args[i]) catch null;
         } else if (std.mem.eql(u8, a, "--mmproj") and has_value) {
             i += 1;
             const value = gpa.dupeZ(u8, args[i]) catch return 1;
@@ -256,8 +261,20 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
                 return 2;
             }
             opts.moe_pct = pct;
+        } else if (std.mem.eql(u8, a, "--min-ctx") and has_value) {
+            i += 1;
+            opts.min_ctx = std.fmt.parseInt(u32, args[i], 10) catch 0;
         } else if (std.mem.eql(u8, a, "--cpu")) {
             opts.cpu = true;
+        } else if (std.mem.eql(u8, a, "--measure")) {
+            measure_mode = true;
+        } else if (std.mem.eql(u8, a, "--measure-ctx") and has_value) {
+            i += 1;
+            measure_ctxs = parseInts(args[i], &measure_ctx_buf);
+            if (measure_ctxs.len == 0) {
+                std.debug.print("ghostpen-llm: --measure-ctx takes contexts like 65536,131072 (got {s})\n", .{args[i]});
+                return 2;
+            }
         }
     }
     if (opts.model.len == 0 and opts.embed_model == null) {
@@ -276,6 +293,7 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
     // add contention (highllama's -t 8 on an 8-core/16-thread machine).
     const logical = std.Thread.getCpuCount() catch 4;
     const threads: i32 = @intCast(if (logical >= 16) logical / 2 else logical);
+    if (measure_mode) return measure(opts, gpus, threads, measure_ctxs);
 
     // The chat model, unless this runner only embeds (`--embed-model` alone:
     // a search doesn't load a chat model).
@@ -409,131 +427,122 @@ const ChatModel = struct {
 
     /// Null (the reason on stderr) when it can't be loaded.
     fn load(opts: Options, gpus: usize, threads: i32) ?ChatModel {
-        // MoE experts in system RAM: tensor-name patterns (matched with a
-        // regex search) whose weights load on the CPU while the rest goes to
-        // the GPU (llama.cpp's --n-cpu-moe). They must live through the load.
+        // MoE experts in system RAM as Settings asks (a share of the
+        // blocks): tensor-name patterns (matched with a regex search) whose
+        // weights load on the CPU while the rest goes to the GPU (llama.cpp's
+        // --n-cpu-moe). They must live through the load.
         const max_moe_blocks = 128;
         var moe_patterns: [max_moe_blocks][96]u8 = undefined;
         var moe_overrides: [max_moe_blocks + 1]c.llama_model_tensor_buft_override = undefined;
-        const meta = modelMeta(opts);
-        const blocks: usize = @intCast(@max(meta.layers, 0));
-        // The plan: GPU layers and experts held back, from the free memory
-        // right now, at the fastest batches that leave the whole model (or
-        // as much of it as possible) on the GPU — smaller prompt batches
-        // shrink the compute buffers, and the prompt is paid once while a
-        // split model pays the CPU/GPU boundary on every generated token.
-        // A split this model loaded with before is remembered in GhostPen's
-        // config and takes the ladder's place; forgotten, then re-measured,
-        // when a load with it fails (the machine's memory changed under it).
-        var batches: Batches = .{};
-        var plan: Plan = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
-        var remembered = if (gpus > 0 and meta.layers > 0) planRemembered(opts, gpus) else null;
-        if (remembered) |r| {
-            batches = .{ .batch = r.batch, .ubatch = r.ubatch };
-            const measured = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
-            var safe = limitRemembered(r, measured);
-            if (safe.ngl != r.ngl or safe.experts != r.experts) {
-                remembered = null;
-                std.debug.print("ghostpen-llm: cached split exceeds current GPU memory; reducing GPU allocation\n", .{});
-            } else if (outgrown(r, measured, meta.experts != 0)) {
-                // Remembered while something else held GPU memory: the GPU
-                // has room for more now, so this load measures again and
-                // remembers that instead.
-                remembered = null;
-                safe = .{ .ngl = measured.ngl, .experts = measured.n_overrides, .batch = r.batch, .ubatch = r.ubatch };
-                std.debug.print("ghostpen-llm: the GPU has room for more than the cached split; using the new measurement\n", .{});
-            }
-            plan = .{ .ngl = safe.ngl, .n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, safe.experts) };
-            if (safe.ngl >= 999) {
-                std.debug.print("ghostpen-llm: remembered: all layers on the GPU, {d} of {d} blocks' experts in system RAM, prompt batches {d}/{d}\n", .{ safe.experts, blocks, safe.batch, safe.ubatch });
-            } else {
-                std.debug.print("ghostpen-llm: remembered: {d} layers on the GPU, prompt batches {d}/{d}\n", .{ safe.ngl, safe.batch, safe.ubatch });
-            }
-        } else if (gpus > 0) for ([_]Batches{ Batches.ub512, Batches.small }) |try_batches| {
-            const alt = planSplit(opts, gpus, blocks, meta.experts != 0, try_batches, &moe_patterns, &moe_overrides);
-            const better = if (meta.experts != 0)
-                alt.n_overrides < plan.n_overrides // fewer experts paying the boundary
-            else
-                alt.ngl > plan.ngl; // more of the file on the GPU
-            if (better) {
-                plan = alt;
-                batches = try_batches;
-            }
-            // Everything that can be on the GPU is: nothing left to gain.
-            if (if (meta.experts != 0) plan.n_overrides == 0 else plan.ngl >= blocks) break;
-        };
+        // What else goes on the GPU with the model: the vision projector and
+        // the embedding model (their files; their compute buffers are small).
+        const extra = fileBytes(opts.mmproj) + fileBytes(opts.embed_model);
+        var plan = planLoad(opts, gpus, extra);
+        logPlan(opts, plan);
         var ngl = plan.ngl;
+        var overrides = plan.overrides;
         var n_overrides = plan.n_overrides;
+        const blocks: usize = @intCast(@max(plan.layers, 0));
+        if (gpus > 0 and plan.experts != 0 and opts.moe_pct > 0) {
+            // Rounded up, so even a small percentage does something; never
+            // fewer than the plan already holds back.
+            const n: usize = @min(@max(blocks * @as(usize, opts.moe_pct) / 100 + 1, 1), blocks);
+            if (n > n_overrides) {
+                n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, n);
+                overrides = &moe_overrides;
+                ngl = 999;
+                std.debug.print("ghostpen-llm: MoE experts of {d} of {d} blocks in system RAM (Settings)\n", .{ n_overrides, blocks });
+            }
+        }
         var attempts: usize = 0;
         const model = while (true) {
             attempts += 1;
             var mparams = c.llama_model_default_params();
             mparams.n_gpu_layers = ngl;
-            // With experts in RAM, read the weights into memory instead of
-            // mmap: mmap'd weights are clean file pages that memory pressure
-            // evicts — a model bigger than the RAM that's left refaults from
-            // disk on every token; malloc'd memory is only swapped under real
-            // pressure.
-            if (n_overrides > 0) mparams.load_mode = c.LLAMA_LOAD_MODE_NONE;
-            if (n_overrides > 0) mparams.tensor_buft_overrides = &moe_overrides;
+            if (n_overrides > 0) {
+                // With weights in RAM, read them into memory instead of
+                // mmap: mmap'd weights are clean file pages that memory
+                // pressure evicts — a model bigger than the RAM that's left
+                // refaults from disk on every token; malloc'd memory is only
+                // swapped under real pressure.
+                mparams.load_mode = c.LLAMA_LOAD_MODE_NONE;
+                mparams.tensor_buft_overrides = overrides;
+            }
             if (c.llama_model_load_from_file(opts.model.ptr, mparams)) |m| break m;
             if (ngl == 0) {
                 std.debug.print("ghostpen-llm: could not load the model {s} (unsupported or damaged file)\n", .{opts.model});
                 return null;
             }
             // First failure: the previous runner's VRAM may still be freeing.
-            // Wait, measure again, and retry the freshly planned split before
-            // giving anything up. The remembered split is gone now — the
-            // measurement leads from here on.
+            // Wait, measure again, and retry the fresh plan before giving
+            // anything up.
             if (attempts == 1 and gpus > 0) {
-                if (remembered != null) {
-                    planForget(opts, gpus);
-                    remembered = null;
-                }
                 std.debug.print("ghostpen-llm: load failed; the previous runner's GPU memory may still be freeing — retrying\n", .{});
                 std.Io.sleep(io, .fromSeconds(2), .awake) catch {};
-                const fresh = planSplit(opts, gpus, blocks, meta.experts != 0, batches, &moe_patterns, &moe_overrides);
-                if (fresh.ngl != ngl or fresh.n_overrides != n_overrides) {
-                    ngl = fresh.ngl;
-                    n_overrides = fresh.n_overrides;
+                const fresh = planLoad(opts, gpus, extra);
+                if (fresh.ngl != ngl or fresh.n_overrides != n_overrides or fresh.ctx != plan.ctx) {
+                    plan = fresh;
+                    logPlan(opts, plan);
+                    ngl = plan.ngl;
+                    overrides = plan.overrides;
+                    n_overrides = plan.n_overrides;
                     continue;
                 }
             }
-            // Out of GPU memory with the experts held back: shift more expert
+            // Out of GPU memory with experts held back: shift more expert
             // weights into system RAM (the whole blocks stay on the GPU —
-            // their attention is cheap); halve the GPU layers only once every
+            // their attention is cheap); fewer GPU layers only once every
             // expert is already out.
-            // (At most `max_moe_blocks` patterns: past that, fewer layers.)
-            if (n_overrides > 0 and ngl >= 999 and n_overrides < @min(blocks, max_moe_blocks)) {
+            if (plan.experts != 0 and ngl >= 999 and n_overrides < @min(blocks, max_moe_blocks)) {
                 const more = @min(n_overrides + @max(blocks / 8, 1), blocks);
                 std.debug.print("ghostpen-llm: not enough GPU memory: {d} of {d} blocks' experts in system RAM\n", .{ more, blocks });
                 n_overrides = writeMoeOverrides(&moe_patterns, &moe_overrides, more);
+                overrides = &moe_overrides;
                 continue;
             }
-            ngl = if (ngl >= 999) @max(@divTrunc(meta.layers * 2, 3), 0) else @divTrunc(ngl, 2);
+            ngl = if (ngl >= 999) @max(@divTrunc(plan.layers * 2, 3), 0) else @divTrunc(ngl, 2);
             std.debug.print("ghostpen-llm: not enough GPU memory, retrying with {d} layers on the GPU\n", .{ngl});
         };
         errdefer c.llama_model_free(model);
-        const ctx = createContext(model, opts, batches, threads) orelse {
+        var planned = opts;
+        planned.ctx = plan.ctx;
+        const ctx = createContext(model, planned, plan.batches, threads) orelse {
             c.llama_model_free(model);
             return null;
         };
-        // Cache only after the context and its GPU buffers also fit.
-        if (remembered == null and gpus > 0)
-            planRemember(opts, gpus, .{ .ngl = ngl, .experts = n_overrides, .batch = batches.batch, .ubatch = batches.ubatch });
 
         // A resident threadpool (what llama-server does): without one, ggml
         // builds a disposable pool — spawns and joins all the threads — for
         // every graph compute, and in split mode (experts in system RAM)
         // there is one per CPU/GPU boundary, dozens per generated token.
+        // From the CPU backend llama.cpp computes on: Oriel may register an
+        // x86-64-v3 build of it, and a pool made by the executable's own
+        // (baseline) copy would run its kernels on every worker thread.
         var tpp = c.ggml_threadpool_params_default(threads);
-        const tp = c.ggml_threadpool_new(&tpp);
+        const tp = if (cpuProc(ThreadpoolNew, "ggml_threadpool_new")) |new| new(&tpp) else c.ggml_threadpool_new(&tpp);
         c.llama_attach_threadpool(ctx, tp, tp);
 
         const vision: ?*c.mtmd_context = if (opts.mmproj) |path| loadVision(path, model, ngl > 0, threads) else null;
 
         const template: ?[]const u8 = if (c.llama_model_chat_template(model, null)) |t| std.mem.span(t) else null;
-        return .{ .model = model, .ctx = ctx, .threadpool = tp, .vision = vision, .ngl = ngl, .n_ubatch = batches.ubatch, .template = template, .format = chat_format.detect(template) };
+        return .{ .model = model, .ctx = ctx, .threadpool = tp, .vision = vision, .ngl = ngl, .n_ubatch = plan.batches.ubatch, .template = template, .format = chat_format.detect(template) };
+    }
+
+    /// The plan, on stderr (the app's log).
+    fn logPlan(opts: Options, plan: Plan) void {
+        if (plan.free == 0) return;
+        const free_mib = plan.free >> 20;
+        if (plan.ngl >= 999 and plan.n_overrides == 0) {
+            if (plan.need > 0) {
+                std.debug.print("ghostpen-llm: {d} of {d} MiB of free GPU memory: every layer on the GPU, a {d}-token context, prompt batches {d}/{d}\n", .{ plan.need >> 20, free_mib, plan.ctx, plan.batches.batch, plan.batches.ubatch });
+            } else {
+                std.debug.print("ghostpen-llm: {d} MiB of free GPU memory: every layer on the GPU (estimated), prompt batches {d}/{d}\n", .{ free_mib, plan.batches.batch, plan.batches.ubatch });
+            }
+            if (plan.ctx < opts.ctx) std.debug.print("ghostpen-llm: the context is {d} tokens instead of {d} so the whole model fits on the GPU\n", .{ plan.ctx, opts.ctx });
+        } else {
+            const layers = if (plan.ngl >= 999) plan.layers else plan.ngl;
+            std.debug.print("ghostpen-llm: the model doesn't fit the {d} MiB of free GPU memory: {d} of {d} layers on the GPU, {d} tensor groups in system RAM, a {d}-token context\n", .{ free_mib, layers, plan.layers, plan.n_overrides, plan.ctx });
+        }
     }
 
     /// The vision projector: on the GPU with the model; without it (null,
@@ -563,26 +572,7 @@ const ChatModel = struct {
         const trained: u32 = @intCast(@max(c.llama_model_n_ctx_train(model), 512));
         var n_ctx = @max(@min(opts.ctx, trained), 512);
         while (true) {
-            var cparams = c.llama_context_default_params();
-            cparams.n_ctx = n_ctx;
-            // The prompt batches (chosen with the plan): they size the
-            // logits and compute buffers, not the generation speed.
-            cparams.n_batch = batches.batch;
-            cparams.n_ubatch = batches.ubatch;
-            cparams.n_threads = threads;
-            cparams.n_threads_batch = threads;
-            cparams.no_perf = true;
-            cparams.abort_callback = abortCallback;
-            cparams.type_k = opts.kv_type;
-            cparams.type_v = opts.kv_type;
-            cparams.flash_attn_type = opts.flash_attn;
-            // Sliding-window layers (Gemma) cache only their window, not the
-            // whole context: llama.cpp's default sizes them for every token,
-            // 22 GB for Gemma 4 12B at 128k, so the context never fit. The
-            // prompt cache checks the window before reusing a prefix
-            // (`evalText`).
-            cparams.swa_full = false;
-            if (c.llama_init_from_model(model, cparams)) |ctx| return ctx;
+            if (c.llama_init_from_model(model, contextParams(opts, n_ctx, batches, threads))) |ctx| return ctx;
             if (n_ctx <= 2048) {
                 std.debug.print("ghostpen-llm: could not create a {d}-token context (out of memory?)\n", .{n_ctx});
                 return null;
@@ -592,10 +582,37 @@ const ChatModel = struct {
         }
     }
 
+    /// The context's parameters (also `measure`'s, so it measures what
+    /// loads).
+    fn contextParams(opts: Options, n_ctx: u32, batches: Batches, threads: i32) c.llama_context_params {
+        var cparams = c.llama_context_default_params();
+        cparams.n_ctx = n_ctx;
+        // The prompt batches (chosen with the plan): they size the
+        // logits and compute buffers, not the generation speed.
+        cparams.n_batch = batches.batch;
+        cparams.n_ubatch = batches.ubatch;
+        cparams.n_threads = threads;
+        cparams.n_threads_batch = threads;
+        cparams.no_perf = true;
+        cparams.abort_callback = abortCallback;
+        cparams.type_k = opts.kv_type;
+        cparams.type_v = opts.kv_type;
+        cparams.flash_attn_type = opts.flash_attn;
+        // Sliding-window layers (Gemma) cache only their window, not the
+        // whole context: llama.cpp's default sizes them for every token,
+        // 22 GB for Gemma 4 12B at 128k, so the context never fit. The
+        // prompt cache checks the window before reusing a prefix
+        // (`evalText`).
+        cparams.swa_full = false;
+        return cparams;
+    }
+
     fn deinit(self: *ChatModel) void {
         if (self.vision) |m| c.mtmd_free(m);
         c.llama_free(self.ctx);
-        if (self.threadpool) |tp| c.ggml_threadpool_free(tp);
+        if (self.threadpool) |tp| {
+            if (cpuProc(ThreadpoolFree, "ggml_threadpool_free")) |free| free(tp) else c.ggml_threadpool_free(tp);
+        }
         c.llama_model_free(self.model);
     }
 };
@@ -686,13 +703,20 @@ const Embedder = struct {
     }
 };
 
-/// The model's layer count (metadata only, nothing loaded).
-fn layerCount(opts: Options) i32 {
-    return modelMeta(opts).layers;
-}
-
+/// A model's geometry from its file's metadata (nothing loaded): what the
+/// fallback estimate (`estimate`) sizes a load from.
 const ModelMeta = struct {
     layers: i32 = 0,
+    /// The weights a load puts on the GPU: the file without the token
+    /// embeddings, which llama.cpp always keeps in system RAM (a model
+    /// whose output layer reuses them still has a GPU copy of those).
+    weights_gpu: u64 = 0,
+    /// K and V elements per token of the widest full-attention layer: the
+    /// flash-attention scratch in the compute buffers scales with it.
+    attn_width: u64 = 0,
+    /// The recurrent layers' state (hybrid models: Qwen3.5's gated delta
+    /// net), whatever the context: llama.cpp's conv and SSM states in f32.
+    recurrent_bytes: u64 = 0,
     /// KV-cache bytes per context token of the layers that cache the whole
     /// context (K and V, this model's geometry and the configured KV
     /// precision).
@@ -710,7 +734,8 @@ const ModelMeta = struct {
     experts: i32 = 0,
 };
 
-/// Layer count and KV size from the file's metadata (a vocab-only load).
+/// Layer count, KV size and weights from the file's metadata (a vocab-only
+/// load, and the header for what llama.cpp's metadata strings leave out).
 fn modelMeta(opts: Options) ModelMeta {
     var p = c.llama_model_default_params();
     p.vocab_only = true;
@@ -734,18 +759,28 @@ fn modelMeta(opts: Options) ModelMeta {
     const a = arch[0..@intCast(n)];
     // Per layer where the model varies them (Gemma 4: `[8, 8, 8, 8, 8, 1,
     // …]` KV heads and which layers slide), a single number otherwise.
+    // Arrays from the file's header: llama.cpp's metadata strings skip
+    // them, and Gemma 4's KV cache was estimated at 0 bytes.
     var heads: [max_kv_layers]u32 = undefined;
+    var swa_ints: [max_kv_layers]u32 = undefined;
     var swa: [max_kv_layers]bool = undefined;
-    var text: [4096]u8 = undefined;
+    var key: [128]u8 = undefined;
+    const heads_key = std.fmt.bufPrint(&key, "{s}.attention.head_count_kv", .{a}) catch return out;
+    const heads_kv = gguf.Header.ints(io, opts.model, heads_key, &heads);
+    const swa_key = std.fmt.bufPrint(&key, "{s}.attention.sliding_window_pattern", .{a}) catch return out;
+    const swa_read = gguf.Header.ints(io, opts.model, swa_key, &swa_ints);
+    // A single number there is a period, not a per-layer list.
+    const swa_n = if (swa_read.len > 1) swa_read.len else 0;
+    for (swa_read[0..swa_n], 0..) |v, i| swa[i] = v != 0;
     const geometry: KvGeometry = .{
         .layers = @intCast(@max(out.layers, 0)),
-        .heads_kv = parseInts(metaStr(m, "{s}.attention.head_count_kv", a, &text), &heads),
+        .heads_kv = heads_kv,
         .key_len = @intCast(@max(metaInt(m, "{s}.attention.key_length", a), 0)),
         .value_len = @intCast(@max(metaInt(m, "{s}.attention.value_length", a), 0)),
         .key_len_swa = @intCast(@max(metaInt(m, "{s}.attention.key_length_swa", a), 0)),
         .value_len_swa = @intCast(@max(metaInt(m, "{s}.attention.value_length_swa", a), 0)),
         .head_dim = headDim(m, a),
-        .swa = parseBools(metaStr(m, "{s}.attention.sliding_window_pattern", a, &text), &swa),
+        .swa = swa[0..swa_n],
         .swa_window = @intCast(@max(metaInt(m, "{s}.attention.sliding_window", a), 0)),
         .full_interval = @intCast(@max(metaInt(m, "{s}.full_attention_interval", a), 1)),
     };
@@ -753,7 +788,29 @@ fn modelMeta(opts: Options) ModelMeta {
     out.kv_per_token = kvElemBytes(elems.full, opts.kv_type);
     out.kv_swa_per_token = kvElemBytes(elems.swa, opts.kv_type);
     out.swa_window = if (elems.swa > 0) geometry.swa_window else 0;
+    out.attn_width = elems.widest;
+    if (geometry.full_interval > 1 and out.layers > 0) {
+        const recurrent: u64 = @intCast(out.layers - @divTrunc(out.layers, @as(i32, @intCast(geometry.full_interval))));
+        const conv: u64 = @intCast(@max(metaInt(m, "{s}.ssm.conv_kernel", a), 1));
+        const state: u64 = @intCast(@max(metaInt(m, "{s}.ssm.state_size", a), 0));
+        const inner: u64 = @intCast(@max(metaInt(m, "{s}.ssm.inner_size", a), 0));
+        const groups: u64 = @intCast(@max(metaInt(m, "{s}.ssm.group_count", a), 0));
+        out.recurrent_bytes = recurrent * 4 * ((conv - 1) * (inner + 2 * groups * state) + state * inner);
+    }
+    const file_size = (std.Io.Dir.cwd().statFile(io, opts.model, .{}) catch return out).size;
+    const embd = tensorBytes(opts.model, "token_embd.weight");
+    const tied = gguf.Header.tensor(io, opts.model, "output.weight") == null;
+    out.weights_gpu = file_size -| embd + if (tied) embd else 0;
     return out;
+}
+
+/// The bytes of tensor `name` in the file (0 when absent).
+fn tensorBytes(path: []const u8, name: []const u8) u64 {
+    const t = gguf.Header.tensor(io, path, name) orelse return 0;
+    if (t.type >= c.GGML_TYPE_COUNT) return 0;
+    const ty: c.ggml_type = @intCast(t.type);
+    const block: u64 = @intCast(@max(c.ggml_blck_size(ty), 1));
+    return t.elements / block * @as(u64, c.ggml_type_size(ty));
 }
 
 /// The head size when the metadata has no `key_length`: the embedding
@@ -808,10 +865,11 @@ const KvGeometry = struct {
 
     /// KV elements per token: the full-attention layers' and the
     /// sliding-window layers'.
-    fn elems(g: KvGeometry) struct { full: u64, swa: u64 } {
+    fn elems(g: KvGeometry) struct { full: u64, swa: u64, widest: u64 } {
         var full: u64 = 0;
         var swa: u64 = 0;
-        if (g.heads_kv.len == 0) return .{ .full = 0, .swa = 0 };
+        var widest: u64 = 0;
+        if (g.heads_kv.len == 0) return .{ .full = 0, .swa = 0, .widest = 0 };
         for (0..g.layers) |i| {
             // llama.cpp marks every layer but each `full_interval`th
             // recurrent: they hold a state, not a cache.
@@ -821,9 +879,12 @@ const KvGeometry = struct {
             const k: u64 = pick(if (slides) g.key_len_swa else 0, g.key_len, g.head_dim);
             const v: u64 = pick(if (slides) g.value_len_swa else 0, g.value_len, k);
             const n = heads * (k + v);
-            if (slides) swa += n else full += n;
+            if (slides) swa += n else {
+                full += n;
+                widest = @max(widest, n);
+            }
         }
-        return .{ .full = full, .swa = swa };
+        return .{ .full = full, .swa = swa, .widest = widest };
     }
 
     /// The first non-zero size.
@@ -845,29 +906,6 @@ fn parseInts(text: []const u8, out: []u32) []const u32 {
     return out[0..n];
 }
 
-/// `[true, false]` into `out`; the values read (empty when it isn't a list
-/// of booleans: a single number is a period no model here uses).
-fn parseBools(text: []const u8, out: []bool) []const bool {
-    var n: usize = 0;
-    var it = std.mem.tokenizeAny(u8, text, "[], ");
-    while (it.next()) |t| {
-        if (n == out.len) break;
-        out[n] = if (std.mem.eql(u8, t, "true")) true else if (std.mem.eql(u8, t, "false")) false else return out[0..0];
-        n += 1;
-    }
-    return out[0..n];
-}
-
-/// One `<arch>.<key>` value as llama.cpp prints it, in `buf` ("" when absent
-/// or longer than `buf`).
-fn metaStr(m: *c.llama_model, comptime fmt: []const u8, arch: []const u8, buf: []u8) []const u8 {
-    var key: [96]u8 = undefined;
-    const k = std.fmt.bufPrintZ(&key, fmt, .{arch}) catch return "";
-    const v = c.llama_model_meta_val_str(m, k.ptr, buf.ptr, buf.len);
-    if (v <= 0 or @as(usize, @intCast(v)) >= buf.len) return "";
-    return buf[0..@intCast(v)];
-}
-
 /// One `<arch>.<key>` integer from the model's metadata (0 when absent).
 fn metaInt(m: *c.llama_model, comptime fmt: []const u8, arch: []const u8) i32 {
     var key: [96]u8 = undefined;
@@ -884,53 +922,6 @@ fn metaInt(m: *c.llama_model, comptime fmt: []const u8, arch: []const u8) i32 {
 pub fn trainedCtx(process_io: std.Io, path: []const u8) u32 {
     return @import("gguf_context.zig").trainedCtx(process_io, path);
 }
-
-/// The split plan for the free memory right now: how many layers on the GPU
-/// (all of them when experts are held back) and how many blocks' expert
-/// weights in system RAM. Written into `patterns`/`overrides`. `moe` is
-/// false for dense models: no expert tensor exists to hold back, so the
-/// split rests on the layer count alone (`ngl = 999` would put the whole
-/// file on the GPU and abort at the first compute, out of memory).
-const Plan = struct { ngl: i32, n_overrides: usize };
-
-fn planSplit(opts: Options, gpus: usize, blocks: usize, moe: bool, batches: Batches, patterns: *[128][96]u8, overrides: *[129]c.llama_model_tensor_buft_override) Plan {
-    if (gpus == 0) return .{ .ngl = 0, .n_overrides = 0 };
-    var ngl: i32 = gpuLayers(opts, batches);
-    var n_overrides: usize = 0;
-    if (moe and opts.moe_pct > 0) {
-        // The user's share of the blocks whose experts go to RAM (rounded up,
-        // so even a small percentage does something) — but never less than
-        // what the GPU's free memory forces: with every block on the GPU, the
-        // experts left on the GPU still have to fit (highllama's estimator).
-        var n: usize = @min(@max(blocks * @as(usize, opts.moe_pct) / 100 + 1, 1), blocks);
-        const by_vram = moeCpuForVram(opts, blocks, batches);
-        if (by_vram > n) {
-            n = by_vram;
-            std.debug.print("ghostpen-llm: the GPU's memory needs more: {d} of {d} blocks' experts in system RAM\n", .{ n, blocks });
-        }
-        n_overrides = writeMoeOverrides(patterns, overrides, n);
-        std.debug.print("ghostpen-llm: MoE experts of {d} of {d} blocks in system RAM\n", .{ n_overrides, blocks });
-        // With experts held back, every block goes on the GPU: the expert
-        // tensors are the bulk of the weights, so the rest fits easily
-        // (highllama's `-ngl 99 --n-cpu-moe N`).
-        ngl = 999;
-    }
-    return .{ .ngl = ngl, .n_overrides = n_overrides };
-}
-
-/// The last successful split, remembered in GhostPen's config (`--plans`,
-/// the app passes ~/.config/ghostpen/llm-plans.json): the model loaded
-/// fine with `ngl` layers on the GPU, `experts` blocks' experts in system
-/// RAM and prompt batches `batch`/`ubatch`. A swap between models (or a
-/// restart) starts here instead of re-running the plan ladder; ignored,
-/// then forgotten, when the machine's memory changed underneath (the load
-/// fails).
-const Remembered = struct {
-    ngl: i32,
-    experts: usize,
-    batch: u32,
-    ubatch: u32,
-};
 
 /// Whether the cache can resume after a prefix of `common` tokens: with a
 /// sliding window of `n_swa` tokens, it must still hold the window before
@@ -955,20 +946,6 @@ test swaPrefixUsable {
     try std.testing.expect(swaPrefixUsable(600, 0, 1024));
 }
 
-/// Whether a fresh measurement fits more of the model on the GPU than the
-/// remembered split: more layers (dense), or fewer blocks' experts in system
-/// RAM (MoE).
-fn outgrown(cached: Remembered, measured: Plan, moe: bool) bool {
-    return if (moe) measured.n_overrides < cached.experts else measured.ngl > cached.ngl;
-}
-
-fn limitRemembered(cached: Remembered, measured: Plan) Remembered {
-    var safe = cached;
-    safe.ngl = @min(cached.ngl, measured.ngl);
-    safe.experts = @max(cached.experts, measured.n_overrides);
-    return safe;
-}
-
 test neutralizeRequest {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -986,29 +963,6 @@ test neutralizeRequest {
     try std.testing.expectEqualStrings("not json", try neutralizeRequest(a, "not json", &sp));
     const deep = "[" ** (max_request_depth + 2) ++ "]" ** (max_request_depth + 2);
     try std.testing.expectError(error.TooDeep, neutralizeRequest(a, deep, &sp));
-}
-
-test "cached GPU split respects current memory for dense and MoE models" {
-    const cached: Remembered = .{ .ngl = 999, .experts = 30, .batch = 512, .ubatch = 512 };
-    const moe = limitRemembered(cached, .{ .ngl = 999, .n_overrides = 39 });
-    try std.testing.expectEqual(@as(usize, 39), moe.experts);
-    try std.testing.expectEqual(@as(i32, 999), moe.ngl);
-    const dense = limitRemembered(.{ .ngl = 32, .experts = 0, .batch = 512, .ubatch = 512 }, .{ .ngl = 17, .n_overrides = 0 });
-    try std.testing.expectEqual(@as(i32, 17), dense.ngl);
-    const conservative = limitRemembered(moe, .{ .ngl = 999, .n_overrides = 30 });
-    try std.testing.expectEqual(moe, conservative);
-}
-
-test "a split remembered under memory pressure gives way to a roomier measurement" {
-    // Gemma 4 at 80k tokens, remembered at 14 layers while GPU memory was taken.
-    const cached: Remembered = .{ .ngl = 14, .experts = 0, .batch = 512, .ubatch = 512 };
-    try std.testing.expect(outgrown(cached, .{ .ngl = 999, .n_overrides = 0 }, false));
-    try std.testing.expect(!outgrown(cached, .{ .ngl = 14, .n_overrides = 0 }, false));
-    try std.testing.expect(!outgrown(cached, .{ .ngl = 9, .n_overrides = 0 }, false));
-    // MoE: fewer blocks' experts in RAM is more on the GPU.
-    const moe: Remembered = .{ .ngl = 999, .experts = 30, .batch = 512, .ubatch = 512 };
-    try std.testing.expect(outgrown(moe, .{ .ngl = 999, .n_overrides = 12 }, true));
-    try std.testing.expect(!outgrown(moe, .{ .ngl = 999, .n_overrides = 30 }, true));
 }
 
 test "KV geometry: Gemma 4's sliding-window layers cache only the window" {
@@ -1057,201 +1011,362 @@ test "KV geometry: a single KV head count and a hybrid model" {
     try std.testing.expectEqual(@as(u64, 0), hybrid.elems().swa);
 }
 
-test "metadata lists parse as llama.cpp prints them" {
+test "context lists parse (--measure-ctx)" {
     var ints: [8]u32 = undefined;
     try std.testing.expectEqualSlices(u32, &.{ 8, 8, 1 }, parseInts("[8, 8, 1]", &ints));
     try std.testing.expectEqualSlices(u32, &.{8}, parseInts("8", &ints));
     try std.testing.expectEqual(@as(usize, 0), parseInts("", &ints).len);
     try std.testing.expectEqual(@as(usize, 0), parseInts("[8, x]", &ints).len);
-    var bools: [8]bool = undefined;
-    try std.testing.expectEqualSlices(bool, &.{ true, true, false }, parseBools("[true, true, false]", &bools));
-    try std.testing.expectEqual(@as(usize, 0), parseBools("6", &bools).len);
 }
 
-const max_plan_entries = 64;
-/// Separates the parts of a key (paths never contain one).
-const key_sep = "\x1f";
+const default_measure_ctxs = [_]u32{ 65536, 131072, 262144 };
 
-/// A plan file entry as JSON.
-const PlanEntry = struct {
-    key: []const u8,
-    ngl: i32,
-    experts: usize,
-    batch: u32,
-    ubatch: u32,
+/// llama.cpp's accounting of a context and its model (src/llm_memory.cpp).
+const LlmMemory = extern struct {
+    gpu_model: u64,
+    gpu_context: u64,
+    gpu_compute: u64,
+    host_model: u64,
+    host_context: u64,
+    host_compute: u64,
 };
-const PlanFile = struct { plans: []PlanEntry = &.{} };
+extern fn ghostpen_llm_memory_breakdown(ctx: *const c.llama_context, out: *LlmMemory) bool;
 
-/// What identifies a plan: the model file (path and size — a re-download
-/// invalidates), the context, the KV precision, flash attention, the MoE
-/// percentage and the GPU count. All of them change what the planner
-/// would decide, not just what fits.
-fn planKey(buffer: []u8, opts: Options, gpus: usize) ?[]u8 {
-    var w: std.Io.Writer = .fixed(buffer);
-    const file = std.Io.Dir.cwd().statFile(io, opts.model, .{}) catch return null;
-    const kv: u8 = switch (opts.kv_type) {
-        c.GGML_TYPE_F16 => 1,
-        c.GGML_TYPE_Q4_0 => 4,
-        else => 8,
+/// `--measure`: the planner's estimate beside what llama.cpp would really
+/// take, every layer on the GPU, for each context in `ctxs` and each prompt
+/// batch step the planner tries. One JSON line each; 0 unless the model
+/// can't be read.
+fn measure(opts: Options, gpus: usize, threads: i32, ctxs: []const u32) u8 {
+    const file = std.Io.Dir.cwd().statFile(io, opts.model, .{}) catch |err| {
+        send(.{ .model = std.fs.path.basename(opts.model), .@"error" = @errorName(err) });
+        return 1;
     };
-    w.print("{s}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}" ++ key_sep ++ "{d}", .{
-        opts.model, file.size, opts.ctx, kv, @as(i32, opts.flash_attn), opts.moe_pct, gpus,
-    }) catch return null;
-    return w.buffered();
-}
-
-/// The remembered plan for `opts`, or null: nothing saved, no `--plans`,
-/// a malformed or unreadable file, or no entry for this key.
-fn planRemembered(opts: Options, gpus: usize) ?Remembered {
-    const path = plans_path orelse return null;
-    const data = std.Io.Dir.cwd().readFileAlloc(io, path, plan_gpa, .limited(64 * 1024)) catch return null;
-    defer plan_gpa.free(data);
-    var key_buf: [2048]u8 = undefined;
-    const want = planKey(&key_buf, opts, gpus) orelse return null;
-    var arena: std.heap.ArenaAllocator = .init(plan_gpa);
-    defer arena.deinit();
-    const parsed = std.json.parseFromSliceLeaky(PlanFile, arena.allocator(), data, .{ .ignore_unknown_fields = true }) catch return null;
-    for (parsed.plans) |e| {
-        if (!std.mem.eql(u8, e.key, want)) continue;
-        if (e.ngl <= 0 or e.experts > 0xffff) continue;
-        return .{ .ngl = e.ngl, .experts = e.experts, .batch = e.batch, .ubatch = e.ubatch };
+    const meta = modelMeta(opts);
+    var mparams = c.llama_model_default_params();
+    mparams.n_gpu_layers = if (gpus > 0) 999 else 0;
+    mparams.no_alloc = true;
+    mparams.load_mode = c.LLAMA_LOAD_MODE_NONE;
+    const model = c.llama_model_load_from_file(opts.model.ptr, mparams) orelse {
+        send(.{ .model = std.fs.path.basename(opts.model), .@"error" = "could not load the model" });
+        return 1;
+    };
+    defer c.llama_model_free(model);
+    const trained: u32 = @intCast(@max(c.llama_model_n_ctx_train(model), 512));
+    var free: usize = 0;
+    var total: usize = 0;
+    for (0..c.ggml_backend_dev_count()) |i| {
+        const dev = c.ggml_backend_dev_get(i) orelse continue;
+        if (c.ggml_backend_dev_type(dev) != c.GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+        c.ggml_backend_dev_memory(dev, &free, &total);
+        break;
     }
-    return null;
-}
-
-/// Record the split that loaded (replacing this key's entry; the oldest
-/// drops past the cap). Best effort: a failure just means the next load
-/// plans again from scratch.
-fn planRemember(opts: Options, gpus: usize, saved: Remembered) void {
-    const path = plans_path orelse return;
-    var arena_state: std.heap.ArenaAllocator = .init(plan_gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var key_buf: [2048]u8 = undefined;
-    const key = arena.dupe(u8, planKey(&key_buf, opts, gpus) orelse return) catch return;
-
-    var entries: std.ArrayList(PlanEntry) = .empty;
-    defer entries.deinit(arena);
-    if (std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 * 1024))) |data| {
-        const parsed = std.json.parseFromSliceLeaky(PlanFile, arena, data, .{ .ignore_unknown_fields = true }) catch return;
-        for (parsed.plans) |e| {
-            if (std.mem.eql(u8, e.key, key)) continue; // ours replaces it
-            entries.append(arena, e) catch return;
-        }
-    } else |_| {} // a fresh (or malformed) file: just add ours
-    entries.append(arena, .{ .key = key, .ngl = saved.ngl, .experts = saved.experts, .batch = saved.batch, .ubatch = saved.ubatch }) catch return;
-    while (entries.items.len > max_plan_entries) _ = entries.orderedRemove(0);
-    const out = std.json.Stringify.valueAlloc(arena, PlanFile{ .plans = entries.items }, .{}) catch return;
-    savePlanFile(arena, path, out);
-}
-
-/// Forget `opts`' entry (its load just failed: the memory situation
-/// changed since it was saved, so measure everything anew).
-fn planForget(opts: Options, gpus: usize) void {
-    const path = plans_path orelse return;
-    var arena_state: std.heap.ArenaAllocator = .init(plan_gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const data = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 * 1024)) catch return;
-    var key_buf: [2048]u8 = undefined;
-    const want = planKey(&key_buf, opts, gpus) orelse return;
-    const parsed = std.json.parseFromSliceLeaky(PlanFile, arena, data, .{ .ignore_unknown_fields = true }) catch return;
-    var entries: std.ArrayList(PlanEntry) = .empty;
-    defer entries.deinit(arena);
-    var found = false;
-    for (parsed.plans) |e| {
-        if (std.mem.eql(u8, e.key, want)) {
-            found = true;
+    for (ctxs) |want| for ([_]Batches{ .{}, Batches.ub512, Batches.small }) |batches| {
+        // As `createContext` loads it: capped at the trained context. The
+        // estimate sees what GhostPen asks for.
+        const n_ctx = @max(@min(want, trained), 512);
+        const ctx = c.llama_init_from_model(model, ChatModel.contextParams(opts, n_ctx, batches, threads)) orelse {
+            send(.{ .model = std.fs.path.basename(opts.model), .ctx = want, .batch = batches.batch, .ubatch = batches.ubatch, .@"error" = "could not create the context" });
+            continue;
+        };
+        defer c.llama_free(ctx);
+        var mem: LlmMemory = undefined;
+        if (!ghostpen_llm_memory_breakdown(ctx, &mem)) {
+            send(.{ .model = std.fs.path.basename(opts.model), .ctx = want, .batch = batches.batch, .ubatch = batches.ubatch, .@"error" = "no memory breakdown" });
             continue;
         }
-        entries.append(arena, e) catch return;
+        const est = estimate(meta, want, batches);
+        send(.{
+            .model = std.fs.path.basename(opts.model),
+            .path = opts.model,
+            .file_bytes = file.size,
+            .meta = meta,
+            .ctx = want,
+            .ctx_loaded = c.llama_n_ctx(ctx),
+            .ctx_train = trained,
+            .batch = batches.batch,
+            .ubatch = batches.ubatch,
+            .gpu_free = free,
+            .gpu_total = total,
+            .est = .{ .weights = est.weights, .kv = est.kv, .compute = est.compute, .total = est.total() },
+            .real = mem,
+            .real_gpu = mem.gpu_model + mem.gpu_context + mem.gpu_compute,
+        });
+    };
+    // What the planner does with the GPU memory free now.
+    if (gpus > 0) for (ctxs) |want| {
+        var o = opts;
+        o.ctx = want;
+        const p = planLoad(o, gpus, 0);
+        send(.{ .model = std.fs.path.basename(opts.model), .ctx = want, .plan = .{
+            .ctx = p.ctx,
+            .ngl = p.ngl,
+            .layers = p.layers,
+            .batch = p.batches.batch,
+            .ubatch = p.batches.ubatch,
+            .n_overrides = p.n_overrides,
+            .need = p.need,
+            .free = p.free,
+        } });
+    };
+    return 0;
+}
+
+/// What a load takes on the GPU by the model's metadata alone: the
+/// fallback when llama.cpp can't measure it (`planLoad`). The weights
+/// without the token embeddings (they stay in system RAM), the KV cache at
+/// this model's geometry and the configured precision, and the compute
+/// buffers: the logits of a micro-batch (micro-batch × vocabulary floats)
+/// or flash attention's f16 copy of a layer's K and V, whichever is larger
+/// (they take turns in the same memory), the attention mask (micro-batch ×
+/// context halves) and the rest. The logits of a whole batch (`n_batch`)
+/// are in system RAM, not here.
+/// Checked against llama.cpp's own accounting of real models
+/// (src/fixtures/estimator.jsonl).
+const Estimate = struct {
+    weights: u64,
+    kv: u64,
+    compute: u64,
+
+    fn total(e: Estimate) u64 {
+        return e.weights + e.kv + e.compute;
     }
-    if (!found) return;
-    const out = std.json.Stringify.valueAlloc(arena, PlanFile{ .plans = entries.items }, .{}) catch return;
-    savePlanFile(arena, path, out);
+};
+
+fn estimate(meta: ModelMeta, ctx: u32, batches: Batches) Estimate {
+    const ub: u64 = batches.ubatch;
+    return .{
+        .weights = meta.weights_gpu,
+        .kv = kvBytes(meta, ctx, batches.ubatch) + meta.recurrent_bytes,
+        .compute = @max(ub * meta.vocab * 4, @as(u64, ctx) * meta.attn_width * 2) + @as(u64, ctx) * ub * 2 + estimate_base,
+    };
 }
 
-/// The plan file, atomically (a half-written file would read as absent).
-fn savePlanFile(arena: std.mem.Allocator, path: []const u8, body: []const u8) void {
-    const dir = std.fs.path.dirname(path) orelse return;
-    std.Io.Dir.cwd().createDirPath(io, dir) catch return;
-    const tmp = std.fmt.allocPrint(arena, "{s}.tmp", .{std.fs.path.basename(path)}) catch return;
-    var tmp_dir = std.Io.Dir.cwd().openDir(io, dir, .{}) catch return;
-    defer tmp_dir.close(io);
-    tmp_dir.writeFile(io, .{ .sub_path = tmp, .data = body }) catch return;
-    tmp_dir.rename(tmp, tmp_dir, std.fs.path.basename(path), io) catch return;
+/// The compute buffers' part that depends on neither the context nor the
+/// vocabulary.
+const estimate_base: u64 = 192 << 20;
+
+test "the GPU estimate against llama.cpp's accounting of real models" {
+    // src/fixtures/estimator.jsonl: local models at 64k, 128k and 256k with
+    // each prompt-batch step, measured by scripts/estimator-check.sh
+    // (UPDATE_FIXTURE=1) as llama.cpp's CUDA backend sizes a load with every
+    // layer on the GPU. The estimate reads each model's own metadata, so the
+    // models must be on this machine (under the home directory, where the
+    // fixture names them); the others are skipped, all of them in CI.
+    //
+    // An estimate under the real size plans a load that runs out of memory;
+    // one far over it moves layers to the CPU that fit on the GPU, and every
+    // generated token pays for it (Qwen3.5 9B: 65 tok/s on the GPU, 20 split).
+    const home = std.mem.span(std.c.getenv("HOME") orelse return error.SkipZigTest);
+    const gpa = std.testing.allocator;
+    io = std.testing.io; // modelMeta reads the files
+    c.llama_log_set(quietLog, null);
+    c.llama_backend_init();
+    defer c.llama_backend_free();
+
+    const Row = struct { path: []const u8, ctx: u32, batch: u32, ubatch: u32, real_gpu: u64 };
+    var checked: usize = 0;
+    var failures: usize = 0;
+    var meta_path: []u8 = &.{};
+    defer gpa.free(meta_path);
+    var meta: ModelMeta = .{};
+    var lines = std.mem.tokenizeScalar(u8, @embedFile("fixtures/estimator.jsonl"), '\n');
+    while (lines.next()) |line| {
+        const parsed = try std.json.parseFromSlice(Row, gpa, line, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const r = parsed.value;
+        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ home, r.path }, 0);
+        defer gpa.free(path);
+        if (std.c.access(path, std.c.F_OK) != 0) continue;
+        // The rows of one model are together: read its metadata once.
+        if (!std.mem.eql(u8, meta_path, path)) {
+            meta = modelMeta(.{ .model = path });
+            gpa.free(meta_path);
+            meta_path = try gpa.dupe(u8, path);
+        }
+        const est = estimate(meta, r.ctx, .{ .batch = r.batch, .ubatch = r.ubatch }).total();
+        // At most 10% or 512 MiB over: room for what llama.cpp's accounting
+        // leaves out (the CUDA context, fragmentation).
+        const slack = @max(r.real_gpu / 10, 512 << 20);
+        checked += 1;
+        if (est >= r.real_gpu and est <= r.real_gpu + slack) continue;
+        failures += 1;
+        std.debug.print("{s} at {d}k, batches {d}/{d}: estimated {d} MiB, llama.cpp {d} MiB ({s})\n", .{
+            std.fs.path.basename(r.path),                                             r.ctx / 1024, r.batch, r.ubatch, est >> 20, r.real_gpu >> 20,
+            if (est < r.real_gpu) "under: out of memory" else "over: needless split",
+        });
+    }
+    if (checked == 0) return error.SkipZigTest;
+    if (failures > 0) std.debug.print("{d} of {d} estimates off\n", .{ failures, checked });
+    try std.testing.expectEqual(@as(usize, 0), failures);
 }
 
-/// GPU layers for the free memory of the first GPU: all of them when the
-/// weights plus the context fit, else the share that does (both reserves
-/// sized by the prompt batches: the micro-batch drives the compute
-/// buffers, the batch the logits buffer).
-fn gpuLayers(opts: Options, batches: Batches) i32 {
-    var free: usize = 0;
-    var total: usize = 0;
+fn quietLog(_: c.ggml_log_level, _: [*c]const u8, _: ?*anyopaque) callconv(.c) void {}
+
+/// Room left free on the GPU past what llama.cpp counts for a load: the
+/// GPU runtime's own allocations (cuBLAS's workspace, …) and fragmentation.
+const gpu_margin: u64 = 512 << 20;
+
+/// The shortest context the planner shortens a long one to so the whole
+/// model fits on the GPU, before it moves layers to the CPU instead: a split
+/// model pays the CPU's speed on every token (Qwen3.5 9B on an RTX 4070:
+/// 65 tok/s on the GPU, 20 with a third of its layers on the CPU), while
+/// few requests fill a long context.
+const min_fit_ctx: u32 = 32768;
+
+/// The prompt batches the planner tries, fastest first: the micro-batch
+/// drives prompt speed and the compute buffers.
+const batch_ladder = [_]Batches{ .{}, Batches.ub512, Batches.small };
+
+/// How a load uses the GPU (`planLoad`).
+const Plan = struct {
+    /// The context to create: the one asked for, or shorter so the whole
+    /// model fits on the GPU.
+    ctx: u32,
+    batches: Batches = Batches.small,
+    /// 999: every layer.
+    ngl: i32,
+    /// Tensors kept in system RAM (`tensor_buft_overrides`, null-terminated;
+    /// null: none): llama.cpp's fit puts MoE experts, or the feed-forward
+    /// weights of the last GPU layer, there.
+    overrides: ?[*]const c.llama_model_tensor_buft_override = null,
+    n_overrides: usize = 0,
+    /// The model's blocks and experts (0: dense), for the MoE setting.
+    layers: i32 = 0,
+    experts: i32 = 0,
+    /// GPU bytes llama.cpp counts for the load (0: estimated) and free.
+    need: u64 = 0,
+    free: u64 = 0,
+};
+
+/// llama.cpp's fit (src/llm_memory.cpp).
+extern fn ghostpen_llm_fit(path: [*:0]const u8, mparams: *c.llama_model_params, cparams: *c.llama_context_params, overrides: [*]c.llama_model_tensor_buft_override, margin: u64) c_int;
+
+/// The fit's overrides: they must live through the load (their patterns are
+/// llama.cpp's own static strings).
+var fit_overrides: []c.llama_model_tensor_buft_override = &.{};
+
+/// Free memory on the GPUs (0 when unknown).
+fn gpuFree() u64 {
+    var sum: u64 = 0;
     for (0..c.ggml_backend_dev_count()) |i| {
         const dev = c.ggml_backend_dev_get(i) orelse continue;
         if (c.ggml_backend_dev_type(dev) != c.GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+        var free: usize = 0;
+        var total: usize = 0;
         c.ggml_backend_dev_memory(dev, &free, &total);
-        break;
+        sum += free;
     }
-    if (free == 0) return 999; // unknown: try, then back off
-    const file = std.Io.Dir.cwd().statFile(io, opts.model, .{}) catch return 999;
-    // The KV cache at this model's geometry and the configured precision
-    // (assuming f16 at 64 KB/token here used to reserve gigabytes that the
-    // model never needs and park it all in system RAM), the logits buffer
-    // (n_batch entries of the vocabulary — 2 GB at 250k), and the rest of the
-    // compute buffers.
-    const meta = modelMeta(opts);
-    const kv: u64 = kvBytes(meta, opts.ctx, batches.ubatch);
-    const logits: u64 = @as(u64, batches.batch) * @as(u64, meta.vocab) * 4;
-    const compute: u64 = 650 * 1024 * 1024 + @as(u64, batches.ubatch / 512) * 750 * 1024 * 1024;
-    const reserve: u64 = compute + kv + logits;
-    if (file.size + reserve <= free) return 999;
-    if (free <= reserve) return 0;
-    const layers = layerCount(opts);
-    const share = @as(f64, @floatFromInt(free - reserve)) / @as(f64, @floatFromInt(file.size));
-    const n: i32 = @intFromFloat(@floor(@as(f64, @floatFromInt(layers)) * share));
-    std.debug.print("ghostpen-llm: {d} MiB of GPU memory free: {d} of {d} layers on the GPU\n", .{ free >> 20, n, layers });
-    return n;
+    return sum;
 }
 
-/// Blocks whose expert weights must go to system RAM so the rest fits the
-/// first GPU's free memory (highllama's estimator): the attention and dense
-/// weights of every block go to the GPU (`-ngl 99`), the experts left there
-/// are the ones to fit. 0 when it all fits.
-fn moeCpuForVram(opts: Options, blocks: usize, batches: Batches) usize {
-    if (blocks == 0) return 0;
-    var free: usize = 0;
-    var total: usize = 0;
-    for (0..c.ggml_backend_dev_count()) |i| {
-        const dev = c.ggml_backend_dev_get(i) orelse continue;
-        if (c.ggml_backend_dev_type(dev) != c.GGML_BACKEND_DEVICE_TYPE_GPU) continue;
-        c.ggml_backend_dev_memory(dev, &free, &total);
-        break;
+/// The plan for the free memory right now, measured: llama.cpp sizes a dry
+/// run of the load (the model loaded `no_alloc`, nothing allocated) with
+/// every layer on the GPU, at the context asked for and each batch step;
+/// the first that fits wins. Too big: the context is halved down to
+/// `min_fit_ctx` while that lets the whole model fit. Still too big:
+/// llama.cpp's fit (llama-server's --fit) splits it at the context asked
+/// for — the split costs most of the speed whatever the context. `extra`:
+/// what else goes on the GPU with it (the vision projector, the embedding
+/// model).
+fn planLoad(opts: Options, gpus: usize, extra: u64) Plan {
+    if (gpus == 0) return .{ .ctx = opts.ctx, .ngl = 0 };
+    const free = gpuFree();
+    if (free == 0) return .{ .ctx = opts.ctx, .ngl = 999 }; // unknown: try, then back off
+    const room = free -| (gpu_margin + extra);
+    var mp = c.llama_model_default_params();
+    mp.n_gpu_layers = 999;
+    mp.no_alloc = true;
+    mp.load_mode = c.LLAMA_LOAD_MODE_NONE;
+    const dry = c.llama_model_load_from_file(opts.model.ptr, mp) orelse return planEstimated(opts, free, room);
+    defer c.llama_model_free(dry);
+    const trained: u32 = @intCast(@max(c.llama_model_n_ctx_train(dry), 512));
+    const want = @max(@min(opts.ctx, trained), 512);
+    const floor = @min(want, @max(min_fit_ctx, opts.min_ctx));
+    const layers = c.llama_model_n_layer(dry);
+    var arch: [64]u8 = undefined;
+    const n = c.llama_model_meta_val_str(dry, "general.architecture", &arch, arch.len);
+    const experts = if (n > 0) metaInt(dry, "{s}.expert_count", arch[0..@intCast(n)]) else 0;
+    var n_ctx = want;
+    while (true) : (n_ctx = @max(n_ctx / 2, floor)) {
+        for (batch_ladder) |b| {
+            const need = dryRunGpu(dry, opts, n_ctx, b) orelse return planEstimated(opts, free, room);
+            if (need <= room) return .{ .ctx = n_ctx, .batches = b, .ngl = 999, .layers = layers, .experts = experts, .need = need, .free = free };
+        }
+        if (n_ctx <= floor) break;
     }
-    if (free == 0) return 0;
-    const file = std.Io.Dir.cwd().statFile(io, opts.model, .{}) catch return 0;
-    const weights_mib = file.size >> 20;
-    // The KV cache (this model's geometry and precision), the logits buffer
-    // (n_batch entries of the vocabulary), the CUDA + compute buffers, with a
-    // safety margin.
+    var split = planFit(opts, want, extra) orelse planEstimated(opts, free, room);
+    // The fit counts the output layer too.
+    if (split.ngl >= layers) split.ngl = 999;
+    split.layers = layers;
+    split.experts = experts;
+    split.free = free;
+    return split;
+}
+
+/// The GPU bytes of a dry-run context on `model` (loaded `no_alloc`), or
+/// null when llama.cpp can't size it.
+fn dryRunGpu(model: *c.llama_model, opts: Options, n_ctx: u32, batches: Batches) ?u64 {
+    const ctx = c.llama_init_from_model(model, ChatModel.contextParams(opts, n_ctx, batches, 1)) orelse return null;
+    defer c.llama_free(ctx);
+    var mem: LlmMemory = undefined;
+    if (!ghostpen_llm_memory_breakdown(ctx, &mem)) return null;
+    return mem.gpu_model + mem.gpu_context + mem.gpu_compute;
+}
+
+/// llama.cpp's split for a model too big for the GPU, at `n_ctx` with the
+/// small batches; null when it can't fit one.
+fn planFit(opts: Options, n_ctx: u32, extra: u64) ?Plan {
+    if (fit_overrides.len == 0) {
+        fit_overrides = std.heap.page_allocator.alloc(c.llama_model_tensor_buft_override, c.llama_max_tensor_buft_overrides()) catch return null;
+    }
+    fit_overrides[0] = .{ .pattern = null, .buft = null };
+    var mp = c.llama_model_default_params();
+    var cp = ChatModel.contextParams(opts, n_ctx, Batches.small, 1);
+    if (ghostpen_llm_fit(opts.model.ptr, &mp, &cp, fit_overrides.ptr, gpu_margin + extra) != 0) return null;
+    var count: usize = 0;
+    if (mp.tensor_buft_overrides != null) {
+        while (count < fit_overrides.len and fit_overrides[count].pattern != null) count += 1;
+    }
+    return .{
+        .ctx = n_ctx,
+        .ngl = if (mp.n_gpu_layers < 0) 999 else mp.n_gpu_layers,
+        .overrides = if (count > 0) fit_overrides.ptr else null,
+        .n_overrides = count,
+    };
+}
+
+/// The plan from the metadata alone (`estimate`), when llama.cpp can't
+/// measure: every layer at the first batches that fit, else the share of
+/// the layers that fits with the small ones.
+fn planEstimated(opts: Options, free: u64, room: u64) Plan {
     const meta = modelMeta(opts);
-    const kv_mib = kvBytes(meta, opts.ctx, batches.ubatch) >> 20;
-    const logits_mib = @as(u64, batches.batch) * @as(u64, meta.vocab) * 4 >> 20;
-    // Compute buffers: base + the activations, which scale with the
-    // micro-batch size.
-    const overhead_mib = 650 + ((@as(u64, opts.ctx) * 8) >> 10) + (batches.ubatch / 512) * 750 + logits_mib;
-    if (weights_mib + kv_mib + overhead_mib <= free >> 20) return 0; // all fits
-    const budget_mib = (free >> 20) -| (kv_mib + overhead_mib);
-    if (budget_mib == 0) return blocks;
-    // The experts are ~95% of a MoE model's weights, and the compute
-    // buffers need headroom: too thin a margin costs more than a few extra
-    // blocks in RAM (each failed load re-reads the whole file).
-    // At least 1 MiB: a tiny file over many blocks would divide by zero.
-    const per_block_mib = @max(95 * weights_mib / (100 * blocks), 1);
-    const need_mib = weights_mib -| budget_mib;
-    return @min(need_mib / per_block_mib + 1, blocks);
+    for (batch_ladder) |b| {
+        const est = estimate(meta, opts.ctx, b);
+        if (est.total() <= room) return .{ .ctx = opts.ctx, .batches = b, .ngl = 999, .layers = meta.layers, .experts = meta.experts, .free = free };
+    }
+    const est = estimate(meta, opts.ctx, Batches.small);
+    const reserve = est.kv + est.compute;
+    const share = if (room > reserve and est.weights > 0) @as(f64, @floatFromInt(room - reserve)) / @as(f64, @floatFromInt(est.weights)) else 0;
+    const ngl: i32 = @intFromFloat(@floor(@as(f64, @floatFromInt(meta.layers)) * @min(share, 1)));
+    return .{ .ctx = opts.ctx, .ngl = ngl, .layers = meta.layers, .experts = meta.experts, .free = free };
+}
+
+const ThreadpoolNew = *const fn (*c.struct_ggml_threadpool_params) callconv(.c) c.ggml_threadpool_t;
+const ThreadpoolFree = *const fn (c.ggml_threadpool_t) callconv(.c) void;
+
+/// A function of the registered CPU backend by name (its
+/// `get_proc_address`), or null.
+fn cpuProc(comptime T: type, name: [*:0]const u8) ?T {
+    const dev = c.ggml_backend_dev_by_type(c.GGML_BACKEND_DEVICE_TYPE_CPU) orelse return null;
+    const reg = c.ggml_backend_dev_backend_reg(dev) orelse return null;
+    const f = c.ggml_backend_reg_get_proc_address(reg, name) orelse return null;
+    return @ptrCast(f);
+}
+
+/// The size of the file at `path` (0: none, or unreadable).
+fn fileBytes(path: ?[:0]const u8) u64 {
+    const p = path orelse return 0;
+    return (std.Io.Dir.cwd().statFile(io, p, .{}) catch return 0).size;
 }
 
 /// The first `n` blocks' expert-tensor patterns as CPU-buffer overrides

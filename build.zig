@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) void {
             .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
         }),
     });
-    _ = oriel.addApp(b, dep, .{
+    const app = oriel.addApp(b, dep, .{
         .name = "ghostpen",
         .root_source_file = b.path("src/main.zig"),
         .icon = b.path("icon.png"), // High-resolution PNG (1024x1024 recommended)
@@ -140,6 +140,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // llama.cpp's memory accounting for the runner's `--measure`
+    // (src/llm_memory.cpp: its API is C++ only).
+    for ([_]?*std.Build.Step.Compile{ app.exe, app.dev_exe }) |maybe| {
+        const exe = maybe orelse continue;
+        addLlmMemory(b, dep, exe.root_module);
+    }
+
     b.installArtifact(cli);
     const run_cli = b.addRunArtifact(cli);
     if (b.args) |a| run_cli.addArgs(a);
@@ -162,6 +169,20 @@ pub fn build(b: *std.Build) void {
         .use_lld = target.result.ofmt != .macho,
     });
     b.step("test", "Run the unit tests").dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// src/llm_memory.cpp, compiled against the llama.cpp that Oriel builds
+/// (its private headers: `llama-ext.h`).
+fn addLlmMemory(b: *std.Build, dep: *std.Build.Dependency, module: *std.Build.Module) void {
+    const llama = dep.builder.lazyDependency("llama", .{}) orelse return;
+    module.addIncludePath(llama.path("include"));
+    module.addIncludePath(llama.path("src"));
+    module.addIncludePath(llama.path("ggml/include"));
+    module.addIncludePath(llama.path("common"));
+    module.addCSourceFile(.{
+        .file = b.path("src/llm_memory.cpp"),
+        .flags = &.{ "-std=c++17", "-O2", "-fno-sanitize=undefined" },
+    });
 }
 
 /// The `.version` in the Oriel dependency's build.zig.zon ("?" if unreadable).

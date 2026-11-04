@@ -2,6 +2,41 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [Unreleased]
+
+### Fixed
+
+- Built-in models stay on the GPU. The runner planned GPU memory from an
+  estimate that counted the logits buffer (in system RAM), the token
+  embeddings (also there) and twice the compute buffers: Qwen3.5 9B at a
+  128k context was planned at 9.5 GiB, needs 7.9, and ran with a third of
+  its layers on the CPU at 20 tok/s instead of 65. The runner now measures
+  each load with llama.cpp itself (a dry run that allocates nothing, as
+  llama-server's --fit), and when a model doesn't fit, llama.cpp's fit
+  decides what goes to system RAM.
+- Gemma 4's KV cache was estimated at 0 bytes: llama.cpp's metadata strings
+  skip arrays, and its per-layer KV heads are one. The estimate (now only a
+  fallback) reads them from the file.
+
+### Changed
+
+- A context too long for the whole model to fit on the GPU is shortened
+  (down to 32k tokens) rather than moving layers to the CPU, which slows
+  every token: Qwen3.5 9B with 7.4 GiB free runs at a 64k context at
+  69 tok/s. A prompt longer than the shortened context restarts the model
+  with all of it, and a request that asks for a context (Ollama's
+  `num_ctx`) gets at least that.
+- Splits are measured on every load, no longer remembered in
+  `~/.config/ghostpen/llm-plans.json`.
+
+### Added
+
+- `ghostpen --llm-helper --measure` and `scripts/estimator-check.sh`: the
+  GPU memory every local model takes at 64k, 128k and 256k by llama.cpp's
+  accounting, beside the estimate, and what the planner does with the free
+  memory now. A unit test holds the estimate to the recorded measurements
+  (`src/fixtures/estimator.jsonl`) for the models present.
+
 ## [0.4.8] - 2026-11-03
 
 ### Fixed
