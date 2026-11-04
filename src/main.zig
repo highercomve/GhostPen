@@ -257,7 +257,16 @@ fn resolveLocal(arena: std.mem.Allocator, profile: settings_mod.Profile, diag: *
 /// service shares with other apps.
 pub fn builtinConfig(arena: std.mem.Allocator, diag: *ai.Diag) ai.Error!local_llm.Config {
     const s = shared.get(io, arena) catch Settings{};
-    for (s.profiles) |p| if (p.isLocal()) return serviceCtx(s, try resolveLocal(arena, p, diag));
+    // The active profile when it's a built-in one, else the first built-in
+    // profile whose model is here (one whose model was deleted is skipped:
+    // /props and /slots would fail and clients fall back to a tiny context).
+    const active = s.activeProfile();
+    if (active.isLocal()) {
+        if (resolveLocal(arena, active, diag)) |cfg| return serviceCtx(s, cfg) else |_| {}
+    }
+    for (s.profiles) |p| if (p.isLocal()) {
+        if (resolveLocal(arena, p, diag)) |cfg| return serviceCtx(s, cfg) else |_| {}
+    };
     return serviceCtx(s, try resolveLocal(arena, .{ .id = "this-computer", .name = "Built-in", .provider = "local", .model = llm_models.default_id }, diag));
 }
 

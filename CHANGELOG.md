@@ -28,6 +28,11 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
   `num_ctx`) gets at least that.
 - Splits are measured on every load, no longer remembered in
   `~/.config/ghostpen/llm-plans.json`.
+- Built on Oriel 0.20.12: models on the CPU, or the CPU part of a split
+  model, run with AVX2 kernels (`libggml-cpu-x64v3.so`, loaded on x86-64
+  Linux when the CPU has AVX2/FMA/F16C). On a Ryzen 7 7800X3D, reading a
+  prompt on the CPU goes from about 34 to 430 tok/s, and writing from 23 to
+  39 tok/s. GPU use is unchanged.
 
 ### Added
 

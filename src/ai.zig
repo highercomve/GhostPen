@@ -72,8 +72,18 @@ pub const Error = error{ AiFailed, OutOfMemory };
 
 // ---- prompts ---------------------------------------------------------------------------
 
+/// Every action but Translate answers in the text's own language: without
+/// this, small models proofread or rewrite Spanish into English.
+const keep_language = " Write the result in the same language as the text; never translate it.";
+
 /// The system prompt of a built-in action, or null for an unknown id.
 pub fn builtinPrompt(arena: std.mem.Allocator, action: []const u8, lang: ?[]const u8, level: Level) !?[]const u8 {
+    const base = (try builtinBase(arena, action, lang, level)) orelse return null;
+    if (std.mem.eql(u8, action, "translate")) return base;
+    return try std.mem.concat(arena, u8, &.{ base, keep_language });
+}
+
+fn builtinBase(arena: std.mem.Allocator, action: []const u8, lang: ?[]const u8, level: Level) !?[]const u8 {
     const eq = std.mem.eql;
     if (eq(u8, action, "proofread"))
         return "Fix all spelling, grammar, syntax, and punctuation errors. Maintain the original tone. Return ONLY the finalized text. No conversational filler, notes, or wrapper quotes.";
@@ -106,7 +116,7 @@ pub fn builtinPrompt(arena: std.mem.Allocator, action: []const u8, lang: ?[]cons
 pub fn instructionPrompt(arena: std.mem.Allocator, instruction: []const u8) ![]const u8 {
     const safe = try arena.dupe(u8, instruction);
     std.mem.replaceScalar(u8, safe, '"', '\'');
-    return std.fmt.allocPrint(arena, "You are a precise text editor. Apply the following instruction to the user's text: \"{s}\". Return ONLY the resulting text \u{2014} no explanations, notes, preamble, or wrapper quotes.", .{safe});
+    return std.fmt.allocPrint(arena, "You are a precise text editor. Apply the following instruction to the user's text: \"{s}\". Keep the text's own language unless the instruction asks for another. Return ONLY the resulting text \u{2014} no explanations, notes, preamble, or wrapper quotes.", .{safe});
 }
 
 pub const ocr_system_prompt = "Extract all visible text from the image. Preserve line breaks and paragraph structure as closely as possible. Return ONLY the extracted text, with no markdown, no explanations, and no wrapper quotes.";
