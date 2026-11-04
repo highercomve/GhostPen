@@ -30,6 +30,12 @@ pub const Config = struct {
     /// A small embedding model (.gguf) for `embed`.
     embed_model: ?[]const u8 = null,
     ctx: u32 = 8192,
+    /// The shortest context the runner may start with. It shortens `ctx`
+    /// (down to 32k) when that lets the whole model fit on the GPU — every
+    /// token of a split model runs at the CPU's speed — unless a request
+    /// needs more: one that asks for a context, or a prompt that didn't fit
+    /// the shortened one (`chatImpl` restarts the runner then).
+    min_ctx: u32 = 0,
     gpu: bool = true,
     /// MoE models: the percentage of blocks whose expert weights stay in
     /// system RAM (100 = every expert; 0 = all on the GPU).
@@ -100,10 +106,6 @@ pub const Result = struct {
 
 pub const Error = error{ LocalFailed, OutOfMemory };
 
-/// Where the model runner keeps its remembered split plans (the app sets
-/// it at startup from GhostPen's config dir; null: plan from scratch).
-pub var plan_path: ?[]const u8 = null;
-
 /// The model load may read gigabytes from a cold disk.
 const load_timeout_ms = 10 * 60 * 1000;
 /// One answer, however slow the machine: then it's stopped (and the helper
@@ -151,9 +153,31 @@ const Runner = struct {
     /// `idle_minutes`.
     idle_override_ms: ?u64 = null,
     /// The context it was started with (what it got can be less: the helper
-    /// halves it when the memory runs out; asking again won't help).
+    /// shortens it so the model fits on the GPU, and halves it when the
+    /// memory runs out).
     requested_ctx: u32 = 0,
 };
+
+/// A runner started for `cfg` serves it: at least the context asked for,
+/// and what it got is at least the shortest `cfg` takes.
+fn serves(r: *const Runner, cfg: Config) bool {
+    return r.requested_ctx >= cfg.ctx and r.ctx >= cfg.min_ctx;
+}
+
+test serves {
+    var r: Runner = undefined;
+    r.requested_ctx = 131072;
+    r.ctx = 65536; // shortened to fit the GPU
+    try std.testing.expect(serves(&r, .{ .exe = "", .model = "", .ctx = 131072 }));
+    try std.testing.expect(serves(&r, .{ .exe = "", .model = "", .ctx = 65536, .min_ctx = 65536 }));
+    // A prompt that didn't fit: the whole context, split if it must be.
+    try std.testing.expect(!serves(&r, .{ .exe = "", .model = "", .ctx = 131072, .min_ctx = 131072 }));
+    try std.testing.expect(!serves(&r, .{ .exe = "", .model = "", .ctx = 262144 }));
+}
+
+/// The helper's answer to a prompt longer than its context (llm_helper's
+/// `evalText`).
+const too_long_for_context = "The text is too long for the built-in model's context";
 
 /// One runner's state: chat or embeddings.
 const Slot = struct {
@@ -244,6 +268,30 @@ fn chatImpl(
     comptime on_chunk: fn (@TypeOf(ctx), if (channels) ai_stream.Delta else []const u8) void,
     diag: *[]const u8,
 ) Error!Result {
+    var retry_full = false;
+    return chatOnce(channels, io, gpa, arena, cfg, req, ctx, on_chunk, diag, false, &retry_full) catch |err| {
+        if (!retry_full) return err;
+        log.info("the prompt needs more than the shortened context: restarting the built-in model with all of it", .{});
+        return chatOnce(channels, io, gpa, arena, cfg, req, ctx, on_chunk, diag, true, &retry_full);
+    };
+}
+
+/// One try of `chatImpl`; `full_ctx`: the runner gets the whole context
+/// even if the model then doesn't fit the GPU. Sets `retry_full` when the
+/// prompt didn't fit a context the runner shortened (nothing was answered).
+fn chatOnce(
+    comptime channels: bool,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cfg: Config,
+    req: Chat,
+    ctx: anytype,
+    comptime on_chunk: fn (@TypeOf(ctx), if (channels) ai_stream.Delta else []const u8) void,
+    diag: *[]const u8,
+    full_ctx: bool,
+    retry_full: *bool,
+) Error!Result {
     const s = &chat_slot;
     if (req.observer) |o| o.emit(.{ .stage = .waiting });
     s.mutex.lockUncancelable(io);
@@ -271,8 +319,12 @@ fn chatImpl(
         return error.LocalFailed;
     }
     var ccfg = chatConfig(cfg);
-    if (req.ctx) |n| ccfg.ctx = @max(ccfg.ctx, n);
-    const reused = if (s.runner) |r| std.mem.eql(u8, r.key, try keyOf(arena, ccfg)) and r.requested_ctx >= ccfg.ctx else false;
+    if (req.ctx) |n| {
+        ccfg.ctx = @max(ccfg.ctx, n);
+        ccfg.min_ctx = n;
+    }
+    if (full_ctx) ccfg.min_ctx = @max(ccfg.min_ctx, ccfg.ctx);
+    const reused = if (s.runner) |r| std.mem.eql(u8, r.key, try keyOf(arena, ccfg)) and serves(r, ccfg) else false;
     if (!reused) if (req.observer) |o| o.emit(.{ .stage = .loading_model, .stats = .{ .model = std.fs.path.basename(ccfg.model) } });
     const load_began = std.Io.Clock.awake.now(io);
     const r = try ensure(io, s, gpa, arena, ccfg, diag);
@@ -377,6 +429,12 @@ fn chatImpl(
         if (msg.@"error") |e| {
             diag.* = try arena.dupe(u8, e);
             r.last_used = .now(io, .awake);
+            // The runner shortened its context to fit the GPU, and this
+            // prompt needs more: once more with the whole context.
+            if (!full_ctx and r.ctx < r.requested_ctx and std.mem.startsWith(u8, e, too_long_for_context)) {
+                retry_full.* = true;
+                return error.LocalFailed;
+            }
             metrics.requestFailed(io);
             return error.LocalFailed;
         }
@@ -645,7 +703,7 @@ test "GPU fallback survives trailing crash reporter warnings" {
 fn ensure(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: Config, diag: *[]const u8) Error!*Runner {
     const key = try keyOf(arena, cfg);
     if (s.runner) |r| {
-        if (std.mem.eql(u8, r.key, key) and r.requested_ctx >= cfg.ctx) {
+        if (std.mem.eql(u8, r.key, key) and serves(r, cfg)) {
             r.idle_minutes = cfg.idle_minutes;
             return r;
         }
@@ -692,8 +750,8 @@ fn start(io: std.Io, s: *Slot, gpa: std.mem.Allocator, arena: std.mem.Allocator,
     if (cfg.mmproj) |m| try argv.appendSlice(arena, &.{ "--mmproj", m });
     if (cfg.embed_model) |m| try argv.appendSlice(arena, &.{ "--embed-model", m });
     try argv.appendSlice(arena, &.{ "--kv-type", cfg.kv_type, "--flash-attn", cfg.flash_attn });
+    if (cfg.min_ctx > 0) try argv.appendSlice(arena, &.{ "--min-ctx", try std.fmt.allocPrint(arena, "{d}", .{cfg.min_ctx}) });
     if (!cfg.gpu) try argv.append(arena, "--cpu");
-    if (cfg.gpu) if (plan_path) |p| try argv.appendSlice(arena, &.{ "--plans", p });
     if (cfg.moe_pct > 0) try argv.appendSlice(arena, &.{ "--moe-pct", try std.fmt.allocPrint(arena, "{d}", .{cfg.moe_pct}) });
     var child = std.process.spawn(io, .{
         .argv = argv.items,
