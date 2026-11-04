@@ -85,7 +85,6 @@ export default function MeetingRecorder({ onRecorded }: { onRecorded: (id: strin
   return (
     <section className={`mt-recorder ${recording ? "is-recording" : ""}`} aria-label="Meeting recorder">
       <header className="mt-workspace-head">
-        <h1>Meetings</h1>
         {(recording || starting || stopping || !status || status.captions_running) && <div className="mt-record-status" role="status">
           {recording ? <><span className="mt-record-dot" aria-hidden="true" /><strong>Recording <span className="mt-rec-clock">{elapsed(recording.seconds)}</span></strong></>
             : stopping ? "Finishing audio files…"

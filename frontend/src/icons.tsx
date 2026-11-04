@@ -24,10 +24,33 @@ export type IconName =
   | "meetings"
   | "sidebar"
   | "menu"
-  | "back";
+  | "back"
+  | "flask"
+  | "close"
+  | "check"
+  | "pointer"
+  | "lock";
 // Recording and library controls use the same 24-grid line icons.
 
 const PATHS: Record<IconName, ReactNode> = {
+  // flask (Playground)
+  flask: (
+    <>
+      <path d="M9 3h6M10 3v6L4.5 19a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 9V3" />
+      <path d="M7.5 15h9" />
+    </>
+  ),
+  close: <path d="M18 6 6 18M6 6l12 12" />,
+  // padlock (a setting that can't change right now)
+  lock: (
+    <>
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </>
+  ),
+  check: <path d="M20 6 9 17l-5-5" />,
+  // arrow cursor (click-through: the mouse passes over)
+  pointer: <path d="M5 3l14 7-6 2-2 6Z" />,
   menu: <path d="M3 6h18M3 12h18M3 18h18" />,
   back: <path d="M20 12H5M11 5l-7 7 7 7" />,
   settings: (

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import PageHeader from "./PageHeader";
+import { useEffect, useRef, useState, Fragment, type ChangeEvent, type InputHTMLAttributes, type KeyboardEvent } from "react";
 import {
   Settings as SettingsType,
   Profile,
@@ -37,7 +38,7 @@ import {
   systemAiDownload,
   type SystemAiStatus,
 } from "./api";
-import WhisperModels from "./WhisperModels";
+import WhisperModels, { whisperName } from "./WhisperModels";
 import Voices, { sampleFor } from "./Voices";
 import LocalModels, { CONTEXT_SIZES, DEFAULT_LOCAL, ctxLabel } from "./LocalModels";
 import AboutUpdates from "./AboutUpdates";
@@ -72,6 +73,24 @@ function DeviceOptions({ devices, selected }: { devices: AudioDevice[]; selected
   );
 }
 
+/** Whisper language codes by name; "auto" reads as what it does. */
+const LANGUAGE_NAMES: Record<string, string> = {
+  auto: "Auto-detect", en: "English", es: "Spanish", fr: "French", de: "German", it: "Italian",
+  pt: "Portuguese", nl: "Dutch", zh: "Chinese", ja: "Japanese", ko: "Korean", ru: "Russian", ar: "Arabic",
+};
+
+/** Captions' translation as one choice: off, English by Whisper, or another language by the AI profile. */
+type TranslateMode = "off" | "english" | "other";
+
+/** A key combo as the shortcut fields write it ("Ctrl+Shift+A"), or null when the key isn't a
+ *  combo worth capturing (plain typing, Super combos and unnamed keys are left to the field). */
+function comboFrom(e: KeyboardEvent): string | null {
+  if (e.metaKey || !(e.ctrlKey || e.altKey)) return null;
+  const key = /^Key([A-Z])$/.test(e.code) ? e.code.slice(3) : /^Digit(\d)$/.test(e.code) ? e.code.slice(5) : /^F\d{1,2}$/.test(e.code) ? e.code : null;
+  if (!key) return null;
+  return [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", key].filter(Boolean).join("+");
+}
+
 type Fields = Record<string, unknown>;
 const isObject = (v: unknown): v is Fields => typeof v === "object" && v !== null && !Array.isArray(v);
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -99,6 +118,103 @@ function mergeChanges(fresh: SettingsType, base: SettingsType, form: SettingsTyp
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** How long a change waits before it is saved: text and sliders keep changing while they are
+ *  used, so they wait for a pause; a checkbox or a choice is final at once. */
+const SAVE_AFTER_TYPING_MS = 700;
+const SAVE_AFTER_CHOICE_MS = 200;
+
+/** Which kind of control changed: typing and sliders save after a pause, choices almost at once. */
+const isTypedControl = (el: EventTarget) =>
+  el instanceof HTMLTextAreaElement ||
+  (el instanceof HTMLInputElement && !["checkbox", "radio"].includes(el.type));
+
+/**
+ * A field that keeps what is typed to itself and hands it over when it is finished (blur or Enter),
+ * so half a shortcut or half a port number is never saved: saving re-registers the shortcuts.
+ * With `captureCombo` a pressed key combo ("Ctrl+Shift+A") is finished at once.
+ * `onCommit` returns false for a value it refuses: the field goes back to the saved one.
+ */
+function DraftInput({
+  value,
+  onCommit,
+  captureCombo,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "onBlur" | "onKeyDown"> & {
+  value: string;
+  onCommit: (v: string) => boolean | void;
+  captureCombo?: boolean;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const commit = (v: string) => {
+    if (v === value) return;
+    if (onCommit(v) === false) setDraft(value);
+  };
+  return (
+    <input
+      {...rest}
+      value={draft}
+      onChange={(e: ChangeEvent<HTMLInputElement>) => setDraft(e.target.value)}
+      onBlur={() => commit(draft)}
+      onKeyDown={(e) => {
+        const combo = captureCombo ? comboFrom(e) : null;
+        if (combo) {
+          e.preventDefault();
+          setDraft(combo);
+          commit(combo);
+        } else if (e.key === "Enter") e.currentTarget.blur();
+        else if (e.key === "Escape") setDraft(value);
+      }}
+    />
+  );
+}
+
+const START_DISMISSED_KEY = "ghostpen-settings-start-dismissed";
+
+/** The first-run card at the top of the AI profile page: the hotkey, a model, and where
+ *  the speech tools live. Dismissed for good once closed (localStorage). */
+function GettingStarted({ hotkey, hotkeysUnavailable, android, goTo }: {
+  hotkey: string;
+  hotkeysUnavailable: boolean;
+  android: boolean;
+  goTo: (id: SettingsSection) => void;
+}) {
+  const [hidden, setHidden] = useState(() => {
+    try { return localStorage.getItem(START_DISMISSED_KEY) === "1"; } catch { return false; }
+  });
+  if (hidden) return null;
+  const dismiss = () => {
+    setHidden(true);
+    try { localStorage.setItem(START_DISMISSED_KEY, "1"); } catch { /* Storage may be unavailable. */ }
+  };
+  const link = (id: SettingsSection, label: string) => (
+    <button className="link-btn" type="button" onClick={() => goTo(id)}>{label}</button>
+  );
+  return (
+    <section className="pg-start settings-start" aria-label="Getting started">
+      <button type="button" className="settings-start-close" onClick={dismiss} aria-label="Dismiss getting started" title="Dismiss">×</button>
+      <h2>Getting started</h2>
+      <ol>
+        <li>
+          Pick a profile below, or download a model under {link("models", "Built-in models")}.
+        </li>
+        {android ? (
+          <li>Paste text in Playground and pick an action.</li>
+        ) : (
+          <li>
+            Select text in any app, then{" "}
+            {hotkeysUnavailable ? <>run <code>ghostpen --trigger</code> (bind it to a key in your desktop)</> : <>press <kbd>{hotkey}</kbd></>}
+            {" "}and pick an action.
+          </li>
+        )}
+        <li>
+          Speech tools: {link("captions", "Captions")}, {link("dictation", "Dictation")} and {link("meetings", "Meetings")} each have a page under Speech.
+        </li>
+      </ol>
+    </section>
+  );
+}
+
 export default function Settings() {
   const [settings, setSettings] = useState<SettingsType | null>(null);
   // The settings as last loaded or saved: what a save diffs the form against.
@@ -107,10 +223,13 @@ export default function Settings() {
   const [status, setStatus] = useState<Status | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [modelMsg, setModelMsg] = useState<string>("");
-  const [saved, setSaved] = useState(false);
-  const [saveError, setSaveError] = useState("");
+  // Changes save by themselves. `dirty`: edits not saved yet (waiting out their pause, or being
+  // saved); `saveError.retry`: a failed save can be tried again (a hotkey that didn't register
+  // is not one: the settings were saved).
+  const [saveError, setSaveError] = useState<{ text: string; retry: boolean } | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const failWith = (e: unknown) => setSaveError({ text: errorText(e), retry: false });
   // In the single app window the section is in the hash (#/settings/<id>): the app
   // sidebar lists the sections and goes to them.
   const sectionInHash = (): SettingsSection | null => {
@@ -158,18 +277,119 @@ export default function Settings() {
   const [capDevices, setCapDevices] = useState<AudioDevice[]>([]);
   const [dictDevices, setDictDevices] = useState<AudioDevice[]>([]);
   const [llm, setLlm] = useState<LlmStatus | null>(null);
-  // For the focus handler: an untouched form follows changes made elsewhere.
+  // The form's latest state and what it loaded, kept in refs too: a save that runs after a pause
+  // (or when the window is left) must see edits made a moment ago, not the render it started in.
+  const settingsRef = useRef<SettingsType | null>(null);
+  const baseRef = useRef<SettingsType | null>(null);
+  // Edits not saved yet; also what the focus handler checks: an untouched form follows changes made elsewhere.
   const dirtyRef = useRef(false);
-  dirtyRef.current = dirty;
+  const saveTimer = useRef<number | undefined>(undefined);
+  const running = useRef<Promise<void> | null>(null);
+  const rerun = useRef(false);
+  // The pause for the next edit, set by the control that changed (see `onChangeCapture` below).
+  const pauseRef = useRef(SAVE_AFTER_CHOICE_MS);
+  // The profile whose "Delete" is waiting for a second click, and the same for a custom action.
+  const [confirmDeleteProfile, setConfirmDeleteProfile] = useState<string | null>(null);
+  const [confirmDeleteAction, setConfirmDeleteAction] = useState<string | null>(null);
 
   const loadSettings = () =>
     getSettings()
       .then((s) => {
+        settingsRef.current = s;
+        baseRef.current = s;
         setSettings(s);
         setBase(s);
         setLoadError("");
       })
       .catch((e) => setLoadError(errorText(e)));
+
+  /**
+   * Save what the form changed. On top of the settings saved now, only the fields edited here: a
+   * form opened earlier doesn't undo what changed elsewhere since (the overlays' toggles, another
+   * window). Edits made while a save runs are saved right after it. The backend can reject after
+   * saving (e.g. a hotkey that didn't register): that is shown, but isn't retried.
+   */
+  const persist = (): Promise<void> => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = undefined;
+    if (running.current) {
+      rerun.current = true;
+      return running.current;
+    }
+    const run = async () => {
+      setSaving(true);
+      try {
+        do {
+          rerun.current = false;
+          const form = settingsRef.current;
+          const from = baseRef.current;
+          if (!dirtyRef.current || !form) break;
+          if (from && same(form, from)) {
+            // Edited and put back: nothing to save.
+            dirtyRef.current = false;
+            setDirty(false);
+            break;
+          }
+          let warning = "";
+          try {
+            const fresh = await getSettings();
+            const next = from ? mergeChanges(fresh, from, form) : form;
+            try {
+              await saveSettings(next);
+            } catch (e) {
+              const message = errorText(e);
+              if (!message.startsWith("Settings saved, but")) throw e;
+              warning = message;
+            }
+            if (settingsRef.current === form) {
+              settingsRef.current = next;
+              baseRef.current = next;
+              setSettings(next);
+              setBase(next);
+              dirtyRef.current = false;
+              setDirty(false);
+            } else {
+              // Edited meanwhile: what was saved is the base for the next round.
+              baseRef.current = form;
+              setBase(form);
+              rerun.current = true;
+            }
+            setSaveError(warning ? { text: warning, retry: false } : null);
+          } catch (e) {
+            setSaveError({ text: errorText(e), retry: true });
+            break;
+          }
+        } while (rerun.current);
+      } finally {
+        setSaving(false);
+        running.current = null;
+      }
+      getStatus().then(setStatus).catch(() => {});
+    };
+    running.current = run();
+    return running.current;
+  };
+  /** Save after `ms` of no further edits (each edit starts the wait again). */
+  const saveSoon = (ms: number) => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => void persist(), ms);
+  };
+  // Leaving the window or the page must not lose an edit that is still waiting.
+  useEffect(() => {
+    const flush = () => {
+      if (dirtyRef.current && !running.current) void persist();
+    };
+    const onHide = () => document.visibilityState === "hidden" && flush();
+    window.addEventListener("blur", flush);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("blur", flush);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+      flush();
+    };
+  }, []);
 
   useEffect(() => {
     loadSettings();
@@ -206,17 +426,22 @@ export default function Settings() {
   // shortcut fields become "recommended binding" reference rather than something we register.
   const onWayland = status?.session?.includes("Wayland") ?? false;
 
-  const update = (patch: Partial<SettingsType>) => {
-    setSettings({ ...settings, ...patch });
+  /** Apply an edit and save it soon: after the pause the changed control asked for, or `ms`. */
+  const update = (patch: Partial<SettingsType>, ms?: number) => {
+    const next = { ...(settingsRef.current ?? settings), ...patch };
+    settingsRef.current = next;
+    setSettings(next);
+    dirtyRef.current = true;
     setDirty(true);
-    setSaved(false);
-    setSaveError("");
+    setSaveError(null);
+    saveSoon(ms ?? pauseRef.current);
+    pauseRef.current = SAVE_AFTER_CHOICE_MS;
   };
 
-  const updateProfile = (id: string, patch: Partial<Profile>) => {
-    update({
-      profiles: settings.profiles.map((p) => (p.id === id ? { ...p, ...patch } : p)),
-    });
+  const updateProfile = (id: string, patch: Partial<Profile>, ms?: number) => {
+    // From the latest state: "Find models" finishes long after the render that started it.
+    const profiles = (settingsRef.current ?? settings).profiles;
+    update({ profiles: profiles.map((p) => (p.id === id ? { ...p, ...patch } : p)) }, ms);
   };
 
   const addProfile = () => {
@@ -227,11 +452,12 @@ export default function Settings() {
   const deleteProfile = (id: string) => {
     if (settings.profiles.length <= 1) return;
     const profiles = settings.profiles.filter((p) => p.id !== id);
+    // Gone at once: its confirmation was the step before.
     update({
       profiles,
       activeProfileId:
         settings.activeProfileId === id ? profiles[0].id : settings.activeProfileId,
-    });
+    }, 0);
   };
 
   const applyPreset = (name: string) => {
@@ -279,23 +505,16 @@ export default function Settings() {
   ];
 
   // "Use" in Built-in models: point the built-in profile at the model
-  // (creating the profile if needed) and make it active. Saved at once, on top
-  // of the saved settings: other unsaved edits in the form stay unsaved.
-  const useLocalModel = async (id: string) => {
-    const withModel = (profiles: Profile[], target: Profile | undefined) =>
-      target
-        ? profiles.map((p) => (p.id === target.id ? { ...p, model: id } : p))
-        : [...profiles, { id: "built-in", name: "Built-in (GhostPen)", provider: "local" as const, baseUrl: "", apiKey: "", model: id, temperature: 0.2 }];
+  // (creating the profile if needed) and make it active.
+  const useLocalModel = (id: string) => {
+    const profiles = settings.profiles;
     const targetId = localProfile?.id ?? "built-in";
-    try {
-      const saved = await getSettings();
-      const savedTarget = saved.profiles.find((p) => p.id === targetId);
-      await saveSettings({ ...saved, profiles: withModel(saved.profiles, savedTarget), activeProfileId: targetId });
-      setSettings({ ...settings, profiles: withModel(settings.profiles, localProfile), activeProfileId: targetId });
-      getStatus().then(setStatus).catch(() => {});
-    } catch (e) {
-      setModelMsg(String(e));
-    }
+    update({
+      profiles: localProfile
+        ? profiles.map((p) => (p.id === localProfile.id ? { ...p, model: id } : p))
+        : [...profiles, { id: "built-in", name: "Built-in (GhostPen)", provider: "local" as const, baseUrl: "", apiKey: "", model: id, temperature: 0.2 }],
+      activeProfileId: targetId,
+    }, 0);
   };
 
   const customActions = settings.customActions ?? [];
@@ -315,17 +534,18 @@ export default function Settings() {
   };
 
   const deleteCustomAction = (id: string) => {
-    update({ customActions: customActions.filter((a) => a.id !== id) });
+    setConfirmDeleteAction(null);
+    update({ customActions: customActions.filter((a) => a.id !== id) }, 0);
   };
 
   const captions = settings.captions;
-  const updateCaptions = (patch: Partial<CaptionsSettings>) => {
-    update({ captions: { ...captions, ...patch } });
+  const updateCaptions = (patch: Partial<CaptionsSettings>, ms?: number) => {
+    update({ captions: { ...captions, ...patch } }, ms);
   };
 
   const meetingsCfg: MeetingsSettings = settings.meetings ?? { enabled: false, dir: "", mic: true, proofread: true, speakers: true, speakerModel: "", expectedSpeakers: 0, liveSpeakers: true };
-  const updateMeetings = (patch: Partial<MeetingsSettings>) => {
-    update({ meetings: { ...meetingsCfg, ...patch } });
+  const updateMeetings = (patch: Partial<MeetingsSettings>, ms?: number) => {
+    update({ meetings: { ...meetingsCfg, ...patch } }, ms);
   };
 
   const dictation = settings.dictation;
@@ -338,101 +558,93 @@ export default function Settings() {
     update({ ocr: { ...ocr, ...patch } });
   };
 
-  // Captions and dictation share this model: saved right away, like a built-in model's Use.
+  // Captions and dictation share this model.
   const useWhisperModel = async (id: string) => {
-    const saved = await getSettings();
-    await saveSettings({ ...saved, captions: { ...saved.captions, model: id } });
-    setSettings({ ...settings, captions: { ...captions, model: id } });
+    updateCaptions({ model: id }, 0);
+    await persist();
     captionsStatus().then(setCapStatus).catch(() => {});
   };
 
-  // The backend can reject after saving (e.g. a hotkey that didn't register): show why.
-  const save = async () => {
-    if (!dirty || saving) return;
-    setSaving(true);
-    try {
-      // On top of the settings saved now, only the fields edited here: a
-      // form opened earlier doesn't undo what changed elsewhere since.
-      const fresh = await getSettings();
-      const next = base ? mergeChanges(fresh, base, settings) : settings;
-      await saveSettings(next);
-      setBase(next);
-      setSettings(next);
-      setDirty(false);
-      setSaved(true);
-      setSaveError("");
-    } catch (e) {
-      setSaved(false);
-      setSaveError(errorText(e));
-    } finally {
-      setSaving(false);
-    }
-    getStatus().then(setStatus).catch(() => {});
-  };
+  const setAutoUpdate = (on: boolean) => update({ autoUpdate: on });
 
+  // Closing waits for the last edit to be saved; if that fails the window stays, with the reason.
   const closeSettings = async () => {
-    if (dirty) {
-      try {
-        const s = await getSettings();
-        setSettings(s);
-        setBase(s);
-        setDirty(false);
-        setSaved(false);
-        setSaveError("");
-      } catch (e) {
-        setSaveError(e instanceof Error ? e.message : String(e));
-        return;
-      }
-    }
+    await persist();
+    if (dirtyRef.current) return;
     await hideWindow();
   };
 
   const currentSection = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0];
+  const goTo = (id: SettingsSection) => { setSection(id); window.scrollTo(0, 0); };
+  // About has little to save: no save status there unless a save is under way or failed, and in
+  // the app window (nothing to close) no footer at all.
+  const aboutIdle = section === "about" && !dirty && !saving && !saveError;
+  const showFooter = !aboutIdle || !singleWindow;
+
+  const translateMode: TranslateMode = captions.aiTranslate ? "other" : captions.whisperTranslate ? "english" : "off";
+  const setTranslateMode = (mode: TranslateMode) =>
+    updateCaptions({ whisperTranslate: mode === "english", aiTranslate: mode === "other" });
+  const speakersOn = meetingsCfg.speakers ?? true;
+  // Only the one-window layout has a choice of floating or not; a window per tool always floats.
+  const oneWindow = (settings.interfaceMode ?? "windows") === "single";
+  /** A shortcut field: types as usual (saved when you leave it), or takes a key combo pressed in it. */
+  const shortcutField = (value: string, onChange: (v: string) => void, placeholder: string) => (
+    <DraftInput
+      className="shortcut-input"
+      value={value}
+      placeholder={placeholder}
+      spellCheck={false}
+      autoComplete="off"
+      captureCombo
+      onCommit={onChange}
+    />
+  );
 
   return (
     <div className="settings">
       <div className="settings-shell">
-        <header className="settings-header" data-oriel-drag-region>
-          <div>
-            <span className="settings-eyebrow">GhostPen</span>
-            <h1>Settings</h1>
-          </div>
-          {active && (
-            <button className="settings-profile-summary" type="button" title="Edit AI profile" onClick={() => { setSection("ai"); window.scrollTo(0, 0); }}>
-              <span>AI profile in use</span>
-              <strong>{active.name}</strong>
-            </button>
-          )}
-        </header>
+        <PageHeader
+          className="settings-header"
+          title="Settings"
+          subtitle="Choose the AI, the speech models and how GhostPen behaves."
+          status={status}
+          onPillClick={() => goTo("ai")}
+        />
 
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="Settings sections">
-            {SECTIONS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`settings-nav-item ${section === item.id ? "active" : ""}`}
-                aria-current={section === item.id ? "page" : undefined}
-                onClick={() => { setSection(item.id); window.scrollTo(0, 0); }}
-              >
-                <span>{item.label}</span>
-                <small>{item.hint}</small>
-              </button>
+            {SECTIONS.map((item, i) => (
+              <Fragment key={item.id}>
+                {SECTIONS[i - 1]?.group !== item.group && <div className="settings-nav-group">{item.group}</div>}
+                <button
+                  type="button"
+                  className={`settings-nav-item ${section === item.id ? "active" : ""}`}
+                  aria-current={section === item.id ? "page" : undefined}
+                  onClick={() => goTo(item.id)}
+                >
+                  <span>{item.label}</span>
+                  <small>{item.hint}</small>
+                </button>
+              </Fragment>
             ))}
           </nav>
 
-          <main className="settings-main">
+          <main
+            className="settings-main"
+            onChangeCapture={(e) => { pauseRef.current = isTypedControl(e.target) ? SAVE_AFTER_TYPING_MS : SAVE_AFTER_CHOICE_MS; }}
+          >
             <header className="settings-section-header">
               <h2>{currentSection.label}</h2>
               <p>{currentSection.description}</p>
             </header>
 
       <div className="settings-panel" hidden={section !== "ai"}>
+      <GettingStarted hotkey={settings.hotkey} hotkeysUnavailable={!!status?.hotkeys_unavailable} android={android} goTo={goTo} />
 
       {/* Profiles */}
+      <div className="settings-grid">
       <section className="card">
         <h2>Choose a profile</h2>
-        <p className="muted small">The active profile handles text actions, dictation proofreading, and optional caption translation. Save after changing profiles.</p>
         <div className="profile-tabs">
           {settings.profiles.map((p) => (
             <button
@@ -449,7 +661,7 @@ export default function Settings() {
         </div>
 
         {active && (
-          <div className="profile-form">
+          <>
             <div className="settings-field-title">Where should the AI run?</div>
             <div className="settings-provider-options" role="group" aria-label="AI provider">
               <label className={`settings-provider-option ${!isLocal(active) && !isSystem(active) ? "selected" : ""}`}>
@@ -470,6 +682,13 @@ export default function Settings() {
                 </label>
               )}
             </div>
+          </>
+        )}
+      </section>
+
+      {active && (
+      <section className="card profile-form">
+        <h2>Settings for “{active.name}”</h2>
             {isSystem(active) ? (
               <>
                 <label>
@@ -512,7 +731,7 @@ export default function Settings() {
                 </label>
                 <div className="settings-callout">
                   <span>{localChoices.length === 0 ? "No built-in models are ready yet." : "Need a different model?"}</span>
-                  <button className="btn" type="button" onClick={() => { setSection("models"); window.scrollTo(0, 0); }}>Browse built-in models</button>
+                  <button className="btn" type="button" onClick={() => goTo("models")}>Browse built-in models</button>
                 </div>
               </>
             ) : (
@@ -535,8 +754,9 @@ export default function Settings() {
               <input value={active.baseUrl} onChange={(e) => updateProfile(active.id, { baseUrl: e.target.value })} placeholder="http://localhost:11434/v1" />
             </label>
             <label>
-              API key <span className="muted">(blank = no auth header)</span>
+              API key
               <input type="password" value={active.apiKey} onChange={(e) => updateProfile(active.id, { apiKey: e.target.value })} placeholder="sk-…" />
+              <span className="muted small">Leave blank when the service needs no key.</span>
             </label>
             <label>
               Model
@@ -564,11 +784,21 @@ export default function Settings() {
               <span className="muted small">Lower is more predictable; higher allows more variation.</span>
             </label>
             {settings.profiles.length > 1 && (
-              <button className="btn danger" type="button" onClick={() => deleteProfile(active.id)}>Delete profile</button>
+              <div className="settings-danger-zone">
+                {confirmDeleteProfile === active.id ? (
+                  <>
+                    <span>Delete “{active.name}”? This can’t be undone.</span>
+                    <button className="btn danger solid" type="button" onClick={() => { setConfirmDeleteProfile(null); deleteProfile(active.id); }}>Yes, delete profile</button>
+                    <button className="btn" type="button" onClick={() => setConfirmDeleteProfile(null)}>Keep it</button>
+                  </>
+                ) : (
+                  <button className="btn danger" type="button" onClick={() => setConfirmDeleteProfile(active.id)}>Delete profile…</button>
+                )}
+              </div>
             )}
-          </div>
-        )}
       </section>
+      )}
+      </div>
 
       </div>
 
@@ -579,12 +809,12 @@ export default function Settings() {
           <label>
             Voice
             <select value={settings.voiceEngine ?? "auto"} onChange={(e) => update({ voiceEngine: e.target.value as "auto" | "kokoro" | "system" })}>
-              <option value="auto">Auto — this device’s voices until a Kokoro model is downloaded</option>
+              <option value="auto">Automatic: this device’s voices until a Kokoro model is downloaded</option>
               <option value="system">This device’s voices (nothing to download)</option>
               <option value="kokoro">Kokoro (the voices below, offline)</option>
             </select>
           </label>
-          <button className="btn" type="button" onClick={() => ttsSpeak(sampleFor("en"), "en-us", "system").catch((e) => setSaveError(String(e)))}>
+          <button className="btn" type="button" onClick={() => ttsSpeak(sampleFor("en"), "en-us", "system").catch(failWith)}>
             ▶ Play this device’s voice
           </button>
         </section>
@@ -593,7 +823,6 @@ export default function Settings() {
       </div>
 
       <div className="settings-panel" hidden={section !== "models"}>
-      <p className="settings-panel-note">Downloading a model does not change your AI profile. Choose <b>Use</b> to switch to it immediately.</p>
       <LocalModels
         local={local}
         onLocalChange={updateLocal}
@@ -605,76 +834,38 @@ export default function Settings() {
 
       <div className="settings-panel" hidden={section !== "actions"}>
 
-      {/* Single-window mode (Android has only that one) */}
-      {!android && (
-        <section className="card">
-          <h2>Window layout</h2>
-          <label>
-            GhostPen opens
-            <select value={settings.interfaceMode ?? "windows"}
-              onChange={(e) => update({ interfaceMode: e.target.value as "windows" | "single" })}>
-              <option value="windows">A window per tool (the menu, Settings, Playground…)</option>
-              <option value="single">One app window, with the tools in a sidebar</option>
-            </select>
-          </label>
-          <p className="muted small">
-            In one app window the shortcut opens Actions there with the selected text; the result
-            still replaces the selection. Applies the next time GhostPen starts.
-          </p>
-          {runningLayout && !dirty && (base?.interfaceMode ?? "windows") !== runningLayout && (
-            <div className="settings-callout">
-              <span>Saved: restart GhostPen to switch to {base?.interfaceMode === "single" ? "one app window" : "a window per tool"}.</span>
-              <button className="btn" type="button" onClick={() => restartApp().catch((e) => setSaveError(String(e)))}>Restart now</button>
-            </div>
-          )}
-          <label className="checkbox">
-            <input type="checkbox" checked={captions.float ?? true}
-              onChange={(e) => updateCaptions({ float: e.target.checked })} />
-            Captions float over other windows (off: a page of the app window)
-          </label>
-          <label className="checkbox">
-            <input type="checkbox" checked={dictation.float ?? true}
-              onChange={(e) => updateDictation({ float: e.target.checked })} />
-            Dictation floats over other windows (off: a page of the app window)
-          </label>
-          <p className="muted small">With a window per tool, captions and dictation always float.</p>
-        </section>
-      )}
-
       {/* Shortcuts */}
       <section className="card">
         <h2>Keyboard shortcuts</h2>
-        {status?.hotkeys_unavailable ? (
-          <div className="kbd-note">
-            This desktop doesn’t let apps register global shortcuts — <b>bind the commands below
-            in its keyboard settings</b> (or your compositor). The values here are your own
-            reference (they aren’t registered).
-            <br />
-            On Hyprland, e.g.: <code>bind = CTRL SHIFT, A, exec, ghostpen --trigger</code>
-          </div>
-        ) : onWayland ? (
-          <p className="muted small">
-            Registered through the desktop’s shortcuts portal while GhostPen runs (it may ask you to
-            confirm them). Blank = unbound.
-          </p>
-        ) : (
-          <p className="muted small">
-            Registered globally while GhostPen runs. Blank = unbound. (On Wayland these are bound
-            in your compositor instead.)
-          </p>
-        )}
+        <p className="muted small">
+          {status?.hotkeys_unavailable ? (
+            <>No global shortcuts on this desktop: bind <code>ghostpen --trigger</code>, <code>--voice-input</code>, <code>--captions</code>, <code>--meetings</code> and <code>--summary</code> in its settings.</>
+          ) : onWayland ? (
+            <>Registered through your desktop’s shortcuts portal; it may ask you to confirm. Blank means unbound.</>
+          ) : (
+            <>Click a field and press the keys, with Ctrl or Alt. Blank means unbound.</>
+          )}
+        </p>
 
         <label>
-          Action menu <span className="muted">(ghostpen --trigger)</span>
-          <input value={settings.hotkey} onChange={(e) => update({ hotkey: e.target.value })} placeholder="Ctrl+Shift+A" />
+          Action menu
+          {shortcutField(settings.hotkey, (v) => update({ hotkey: v }), "Ctrl+Shift+A")}
         </label>
         <label>
-          Dictation <span className="muted">(ghostpen --voice-input)</span>
-          <input value={settings.dictationHotkey} onChange={(e) => update({ dictationHotkey: e.target.value })} placeholder="Ctrl+Shift+D" />
+          Dictation
+          {shortcutField(settings.dictationHotkey, (v) => update({ dictationHotkey: v }), "Ctrl+Shift+D")}
         </label>
         <label>
-          Live captions <span className="muted">(ghostpen --captions)</span>
-          <input value={settings.captionsHotkey} onChange={(e) => update({ captionsHotkey: e.target.value })} placeholder="Ctrl+Shift+L" />
+          Live captions
+          {shortcutField(settings.captionsHotkey, (v) => update({ captionsHotkey: v }), "Ctrl+Shift+L")}
+        </label>
+        <label>
+          Open Meetings
+          {shortcutField(settings.meetingsHotkey ?? "", (v) => update({ meetingsHotkey: v }), "Not set")}
+        </label>
+        <label>
+          Open Summarize a link
+          {shortcutField(settings.summaryHotkey ?? "", (v) => update({ summaryHotkey: v }), "Not set")}
         </label>
       </section>
 
@@ -690,12 +881,12 @@ export default function Settings() {
         </label>
         <p className="muted small">Hold <kbd>Shift</kbd> when you pick an action to get the other one, e.g. to translate text you can't edit (a web page, a chat).</p>
         <details className="settings-advanced">
-          <summary>Advanced copy and paste</summary>
+          <summary><span>Advanced: copy and paste</span></summary>
           <div className="settings-advanced-body">
             <label className="checkbox">
               <input type="checkbox" checked={settings.forceSynthetic}
                 onChange={(e) => update({ forceSynthetic: e.target.checked })} />
-              Force synthetic copy/paste on Wayland (needs libei; off = manual copy)
+              <span>Force synthetic copy/paste on Wayland<span className="checkbox-help">Needs libei. Off means you copy by hand.</span></span>
             </label>
             <label>
               Clipboard restore delay (ms)
@@ -739,7 +930,15 @@ export default function Settings() {
                 onChange={(e) => updateCustomAction(a.id, { model: e.target.value })}
               />
             </label>
-            <button className="btn danger" onClick={() => deleteCustomAction(a.id)}>Delete action</button>
+            {confirmDeleteAction === a.id ? (
+              <div className="settings-danger-zone">
+                <span>Delete “{a.label}”? This can’t be undone.</span>
+                <button className="btn danger solid" type="button" onClick={() => deleteCustomAction(a.id)}>Yes, delete action</button>
+                <button className="btn" type="button" onClick={() => setConfirmDeleteAction(null)}>Keep it</button>
+              </div>
+            ) : (
+              <button className="btn danger" type="button" onClick={() => setConfirmDeleteAction(a.id)}>Delete action…</button>
+            )}
           </div>
         ))}
         <button className="btn" onClick={addCustomAction}>+ Add custom action</button>
@@ -798,58 +997,48 @@ export default function Settings() {
       </div>
 
       <div className="settings-panel" hidden={section !== "speech"}>
-      {android && (dictation.engine ?? "auto") !== "whisper" ? (
+      {android && (dictation.engine ?? "auto") !== "whisper" && (
         <p className="settings-panel-note">
-          <b>Dictation</b> uses this device’s own speech recognition: nothing to download (change it in Dictation below).
+          <b>Dictation</b> uses this device’s own speech recognition: nothing to download (change it in <button className="link-btn" type="button" onClick={() => goTo("dictation")}>Dictation</button>).
           {" "}<b>Captions and meetings</b> use a Whisper model from this list: the device’s recognizer only hears the
-          microphone live, not what other apps play or a saved recording. Choosing <b>Use</b> applies it immediately.
+          microphone live, not what other apps play or a saved recording.
         </p>
-      ) : (
-        <p className="settings-panel-note">Captions and dictation share one speech model. Choosing <b>Use</b> applies it immediately; save the options below when you change them.</p>
       )}
       <WhisperModels activeModel={captions.model} onUse={useWhisperModel} />
+      </div>
 
+      <div className="settings-panel" hidden={section !== "captions"}>
       {/* Live captions (system audio) */}
       <section className="card">
-        <h2>Live Captions <span className="muted small">system audio → subtitles</span></h2>
         {capStatus && !capStatus.available && (
           <p className="muted small">
             This build does not include live captions.
           </p>
         )}
         <p className="muted small">
-          Captures what you hear (meetings, videos, podcasts), transcribes it on-device with
-          Whisper, and shows subtitles in a click-through overlay. Optionally translate via your
-          active AI profile.
+          Speech model: <b>{whisperName(captions.model)}</b>
+          {capStatus && !capStatus.model_ready && " (not downloaded)"}.{" "}
+          <button className="link-btn" type="button" onClick={() => goTo("speech")}>Change it in Speech models</button>
         </p>
-
-        <p className="muted small">
-          Model: <code>{captions.model}</code>
-          {capStatus && !capStatus.model_ready && " (not downloaded)"}, chosen in Speech models above.
-        </p>
-
 
         <label>
-          Source language
+          Spoken language
           <select value={captions.language} onChange={(e) => updateCaptions({ language: e.target.value })}>
-            {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+            {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{LANGUAGE_NAMES[l] ?? l}</option>)}
           </select>
         </label>
 
-        <label className="checkbox">
-          <input type="checkbox" checked={captions.whisperTranslate}
-            onChange={(e) => updateCaptions({ whisperTranslate: e.target.checked })} />
-          Translate to English with Whisper <span className="muted">(free, English-only target)</span>
+        <label>
+          Translate captions
+          <select value={translateMode} onChange={(e) => setTranslateMode(e.target.value as TranslateMode)}>
+            <option value="off">Don’t translate</option>
+            <option value="english">To English: on this computer, free</option>
+            <option value="other">To another language: uses your AI profile</option>
+          </select>
         </label>
-
-        <label className="checkbox">
-          <input type="checkbox" checked={captions.aiTranslate}
-            onChange={(e) => updateCaptions({ aiTranslate: e.target.checked })} />
-          Translate transcript via AI profile <span className="muted">(for non-English targets)</span>
-        </label>
-        {captions.aiTranslate && (
-          <label>
-            Target language
+        {translateMode === "other" && (
+          <label className="settings-sub">
+            Translate into
             <select value={captions.targetLang} onChange={(e) => updateCaptions({ targetLang: e.target.value })}>
               {TRANSLATE_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
@@ -858,19 +1047,19 @@ export default function Settings() {
 
         <label>
           Chunk length: {captions.chunkSeconds.toFixed(0)}s
-          <span className="muted small">lower = snappier captions, less context (may clip words); higher = more accurate, more lag</span>
+          <span className="muted small">Lower is snappier with less context (it may clip words); higher is more accurate with more lag.</span>
           <input type="range" min={1} max={15} step={1} value={captions.chunkSeconds}
             onChange={(e) => updateCaptions({ chunkSeconds: parseInt(e.target.value, 10) })} />
         </label>
 
         <label>
-          Capture device <span className="muted">(what to transcribe — “Auto” follows your current system output)</span>
+          What to caption
           <select value={captions.device} onChange={(e) => updateCaptions({ device: e.target.value })}>
-            <option value="">Auto — current system output (recommended)</option>
+            <option value="">Automatic: what you hear now (recommended)</option>
             <DeviceOptions devices={capDevices} selected={captions.device} />
           </select>
           <span className="muted small">
-            Pick a 🔊 system-audio source to caption what you hear; a 🎙 microphone to caption your voice.
+            Automatic follows your current system output. Pick a 🔊 system-audio source to caption what you hear; a 🎙 microphone to caption your voice.
           </span>
         </label>
 
@@ -880,172 +1069,242 @@ export default function Settings() {
             onChange={(e) => updateCaptions({ fontSize: parseInt(e.target.value, 10) })} />
         </label>
 
-        <button className="btn" onClick={() => openCaptions()}>Open captions overlay</button>
+        <div className="settings-actions">
+          <button className="btn" type="button" onClick={() => openCaptions()}>Open captions overlay</button>
+        </div>
       </section>
+      </div>
 
+      <div className="settings-panel" hidden={section !== "meetings"}>
       {/* Meetings (captions that record, keep and proofread) */}
       <section className="card">
-        <h2>Meetings <span className="muted small">record, transcribe and proofread</span></h2>
-        <p className="muted small">
-          In meeting mode (<b>🎙 Meeting</b> on the captions bar) captions also record the audio — and your
-          microphone, as “Me”. When they stop, the meeting is saved: transcribed again in full, its speakers
-          labelled and, if you like, proofread by your AI profile. Use a headset: through speakers the others
-          end up in your microphone too.
-        </p>
+        <p className="muted small">Use a headset: through speakers, the others end up in your microphone too.</p>
+
+        <h3>While recording</h3>
         <label className="checkbox">
           <input type="checkbox" checked={meetingsCfg.enabled} onChange={(e) => updateMeetings({ enabled: e.target.checked })} />
-          Start captions in meeting mode
+          <span>Start captions in meeting mode</span>
         </label>
         <label className="checkbox">
           <input type="checkbox" checked={meetingsCfg.mic} onChange={(e) => updateMeetings({ mic: e.target.checked })} />
-          Record my microphone too <span className="muted">(the dictation microphone below)</span>
+          <span>Record my microphone too, as “Me”<span className="checkbox-help">Uses the microphone chosen in <button className="link-btn" type="button" onClick={() => goTo("dictation")}>Dictation</button>.</span></span>
         </label>
+
+        <h3>Speakers</h3>
+        <label className="checkbox">
+          <input type="checkbox" checked={speakersOn} onChange={(e) => updateMeetings({ speakers: e.target.checked })} />
+          <span>Tell the speakers apart by voice<span className="checkbox-help">Needs a 26 MB speaker model, downloaded the first time.</span></span>
+        </label>
+        <div className={`settings-sub ${speakersOn ? "" : "is-off"}`}>
+          <label className="checkbox">
+            <input type="checkbox" disabled={!speakersOn} checked={meetingsCfg.liveSpeakers ?? true} onChange={(e) => updateMeetings({ liveSpeakers: e.target.checked })} />
+            <span>Label them live in the captions too<span className="checkbox-help">Live labels are a guess; when the meeting is saved they are redone over the whole recording.</span></span>
+          </label>
+          <label>
+            Number of other people
+            <select disabled={!speakersOn} value={meetingsCfg.expectedSpeakers ?? 0} onChange={(e) => updateMeetings({ expectedSpeakers: parseInt(e.target.value, 10) })}>
+              <option value={0}>Detect automatically</option>
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n === 1 ? "1 other person" : `${n} other people`}</option>)}
+            </select>
+            <span className="muted small">When you know it, it helps when two voices sound alike.</span>
+          </label>
+          <label>
+            Speaker model
+            <select disabled={!speakersOn} value={meetingsCfg.speakerModel ?? ""} onChange={(e) => updateMeetings({ speakerModel: e.target.value })}>
+              <option value="">WeSpeaker ResNet34, VoxCeleb (recommended, 26 MB)</option>
+              <option value="ecapa-tdnn-voxceleb">ECAPA-TDNN, VoxCeleb (64 MB; tells voices apart less well here)</option>
+            </select>
+            <span className="muted small">Known voices are kept per model: switching models means naming people again.</span>
+          </label>
+        </div>
+
+        <h3>When it ends</h3>
         <label className="checkbox">
           <input type="checkbox" checked={meetingsCfg.proofread} onChange={(e) => updateMeetings({ proofread: e.target.checked })} />
-          Proofread the transcript with the AI profile when saving <span className="muted">(a clean text next to the transcript)</span>
+          <span>Proofread the transcript with the AI profile<span className="checkbox-help">Also saves a cleaned-up version of the transcript: fixed punctuation and no filler words.</span></span>
         </label>
         <label className="checkbox">
           <input type="checkbox" checked={meetingsCfg.summary ?? false} onChange={(e) => updateMeetings({ summary: e.target.checked })} />
-          Summarize it too <span className="muted">(else the meeting's Summary tab does it when you ask)</span>
+          <span>Summarize it too<span className="checkbox-help">Off means the meeting’s Summary tab writes it when you ask.</span></span>
         </label>
-        <label className="checkbox">
-          <input type="checkbox" checked={meetingsCfg.speakers ?? true} onChange={(e) => updateMeetings({ speakers: e.target.checked })} />
-          Tell the speakers apart by voice <span className="muted">(a speaker model, 26 MB, downloaded the first time)</span>
-        </label>
-        {(meetingsCfg.speakers ?? true) && (
-          <>
-            <label className="checkbox">
-              <input type="checkbox" checked={meetingsCfg.liveSpeakers ?? true} onChange={(e) => updateMeetings({ liveSpeakers: e.target.checked })} />
-              Label them live in the captions too <span className="muted">(a guess; saving redoes it over the whole meeting)</span>
-            </label>
-            <label>
-              People besides you
-              <select value={meetingsCfg.expectedSpeakers ?? 0} onChange={(e) => updateMeetings({ expectedSpeakers: parseInt(e.target.value, 10) })}>
-                <option value={0}>Find out</option>
-                {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
-              <span className="muted small">When you know it, it helps when two voices sound alike.</span>
-            </label>
-            <label>
-              Speaker model
-              <select value={meetingsCfg.speakerModel ?? ""} onChange={(e) => updateMeetings({ speakerModel: e.target.value })}>
-                <option value="">WeSpeaker ResNet34, VoxCeleb (recommended, 26 MB)</option>
-                <option value="ecapa-tdnn-voxceleb">ECAPA-TDNN, VoxCeleb (64 MB; tells voices apart less well here)</option>
-              </select>
-              <span className="muted small">Known voices are kept per model: switching models means naming people again.</span>
-            </label>
-          </>
-        )}
+
+        <h3>Where meetings are saved</h3>
         <label>
-          Folder
-          <input value={meetingsCfg.dir} placeholder={defaultMeetingsDir || "Documents/GhostPen/Meetings"} onChange={(e) => updateMeetings({ dir: e.target.value })} />
-          <span className="muted small">Empty = the default above. Each meeting is a folder with the audio, meeting.json and Markdown.</span>
+          <span>Folder{meetingsCfg.dir === "" && <span className="settings-default-tag">Default</span>}</span>
+          <div className="row">
+            {/* Blank in the settings means the default folder: it is shown as the real path, not as a hint. */}
+            <DraftInput
+              value={meetingsCfg.dir || defaultMeetingsDir}
+              placeholder="Documents/GhostPen/Meetings"
+              spellCheck={false}
+              onCommit={(v) => {
+                const dir = v.trim();
+                updateMeetings({ dir: dir === defaultMeetingsDir ? "" : dir });
+              }}
+            />
+            <button className="btn" type="button" disabled={meetingsCfg.dir === ""} onClick={() => updateMeetings({ dir: "" }, 0)}>Reset to default</button>
+          </div>
+          <span className="muted small">Each meeting gets its own folder with the audio, meeting.json and Markdown.</span>
         </label>
-        <button className="btn" onClick={() => openMeetings()}>Open Meetings</button>
+        <div className="settings-actions">
+          <button className="btn" type="button" onClick={() => openMeetings()}>Open Meetings</button>
+        </div>
       </section>
+      </div>
 
+      <div className="settings-panel" hidden={section !== "dictation"}>
       {/* Voice dictation (microphone) */}
-      <section className="card">
-        <h2>Dictation <span className="muted small">speak to type</span></h2>
-        <p className="muted small">
-          {android ? (
-            <>Start it from Dictation in the sidebar, then stop: the text is copied, ready to paste
-            anywhere. You can have your active AI profile proofread it first.</>
-          ) : (
-            <>Start dictation with your shortcut or <code>ghostpen --voice-input</code>, then stop to
-            copy or paste the transcript. You can have your active AI profile proofread it first.</>
-          )}
+      {android && (
+        <p className="muted small settings-lead">
+          Start it from Dictation in the sidebar, then stop: the text is copied, ready to paste anywhere.
         </p>
-
+      )}
+      <div className="settings-grid">
+      <section className="card">
+        <h2>Listening</h2>
         {android && (
           <label>
             Speech recognition
             <select value={dictation.engine ?? "auto"} onChange={(e) => updateDictation({ engine: e.target.value as "auto" | "whisper" | "system" })}>
-              <option value="auto">Auto — this device’s, when it has one (recommended)</option>
+              <option value="auto">Automatic: this device’s, when it has one (recommended)</option>
               <option value="system">This device’s speech recognition (nothing to download)</option>
-              <option value="whisper">Whisper (offline, the model chosen above)</option>
+              <option value="whisper">Whisper (offline, the model chosen in Speech models)</option>
             </select>
           </label>
         )}
 
         <label>
-          Microphone <span className="muted">(“Auto” follows your default input device)</span>
+          Microphone
           <select value={dictation.device} onChange={(e) => updateDictation({ device: e.target.value })}>
-            <option value="">Auto — default microphone (recommended)</option>
+            <option value="">Automatic: your default microphone (recommended)</option>
             <DeviceOptions devices={dictDevices} selected={dictation.device} />
           </select>
-          {!android && (
-            <span className="muted small">
-              Captions listen to your <em>output</em> (what you hear); dictation always listens to a
-              real <em>input</em> — monitor sources aren’t offered here.
-            </span>
-          )}
         </label>
 
         <label>
           Spoken language
           <select value={dictation.language} onChange={(e) => updateDictation({ language: e.target.value })}>
-            {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+            {CAPTION_LANGUAGES.map((l) => <option key={l} value={l}>{LANGUAGE_NAMES[l] ?? l}</option>)}
           </select>
         </label>
 
+      </section>
+
+      <section className="card">
+        <h2>When you finish</h2>
         <label className="checkbox">
           <input type="checkbox" checked={dictation.proofread}
             onChange={(e) => updateDictation({ proofread: e.target.checked })} />
-          Proofread with the AI profile before copying <span className="muted">(off = raw transcript)</span>
+          <span>Proofread with the AI profile before copying<span className="checkbox-help">Off means you get the raw transcript.</span></span>
         </label>
         {/* Android: apps can't paste into another app; the text is always copied. */}
         {!android && (
           <label className="checkbox">
             <input type="checkbox" checked={dictation.paste ?? true}
               onChange={(e) => updateDictation({ paste: e.target.checked })} />
-            Paste at the cursor when finished <span className="muted">(off = copy only, to review first)</span>
+            <span>Paste at the cursor when finished<span className="checkbox-help">Off means the text is only copied, so you can review it first.</span></span>
           </label>
         )}
+        {android && <p className="muted small">The text is always copied: apps can’t paste into another app on Android.</p>}
       </section>
+      </div>
 
+      </div>
+
+      <div className="settings-panel" hidden={section !== "general"}>
+      {android ? (
+        <p className="settings-panel-note">GhostPen on Android is always one app window: there is nothing to arrange here.</p>
+      ) : (
+        <div className="settings-grid">
+        <section className="card">
+          <h2>Window layout</h2>
+          <label>
+            GhostPen opens
+            <select value={settings.interfaceMode ?? "windows"}
+              onChange={(e) => update({ interfaceMode: e.target.value as "windows" | "single" })}>
+              <option value="windows">A window per tool (the menu, Settings, Playground…)</option>
+              <option value="single">One app window, with the tools in a sidebar</option>
+            </select>
+          </label>
+          <p className="muted small">
+            {oneWindow && "The shortcut opens Actions in the app window with the selected text; the result still replaces the selection. "}
+            Applies the next time GhostPen starts.
+          </p>
+          {runningLayout && !dirty && (base?.interfaceMode ?? "windows") !== runningLayout && (
+            <div className="settings-callout">
+              <span>Saved: restart GhostPen to switch to {base?.interfaceMode === "single" ? "one app window" : "a window per tool"}.</span>
+              <button className="btn" type="button" onClick={() => restartApp().catch(failWith)}>Restart now</button>
+            </div>
+          )}
+        </section>
+
+        <section className="card">
+          <h2>Captions and dictation</h2>
+          <div className={`settings-sub-flat ${oneWindow ? "" : "is-off"}`}>
+            <label className="checkbox">
+              <input type="checkbox" disabled={!oneWindow} checked={captions.float ?? true}
+                onChange={(e) => updateCaptions({ float: e.target.checked })} />
+              <span>Captions float over other windows<span className="checkbox-help">Off makes captions a page of the app window.</span></span>
+            </label>
+            <label className="checkbox">
+              <input type="checkbox" disabled={!oneWindow} checked={dictation.float ?? true}
+                onChange={(e) => updateDictation({ float: e.target.checked })} />
+              <span>Dictation floats over other windows<span className="checkbox-help">Off makes dictation a page of the app window.</span></span>
+            </label>
+          </div>
+          {!oneWindow && (
+            <p className="muted small">
+              Fixed for now: with a window per tool, captions and dictation always float. Choose “One app window” to change this.
+            </p>
+          )}
+        </section>
+        </div>
+      )}
       </div>
 
       <div className="settings-panel" hidden={section !== "service"}>
       {/* Model & speech service (what other local apps connect to) */}
+      <div className="settings-grid">
       <section className="card">
-        <h2>
-          Model &amp; speech service{" "}
-          <span className="muted small">built-in and speech models, served to other apps</span>
-        </h2>
-        <p className="muted small">
-          GhostPen serves its <b>Built-in</b> chat models and the speech models (transcription,
-          OpenAI-compatible API) on <code>http://{server.host}:{server.port}</code>. Apps like
-          GhostReel or <code>ghostpen-cli</code> use it; the address is advertised as{" "}
-          <code>http://127.0.0.1:{server.port}</code> on this machine whatever the setting.
-        </p>
+        <h2>Who can connect</h2>
         <label>
           Reachable from
           <select value={server.host} onChange={(e) => updateServer({ host: e.target.value })}>
-            <option value="127.0.0.1">This computer only — 127.0.0.1 (recommended)</option>
-            <option value="0.0.0.0">All networks — 0.0.0.0 (other machines can use your models)</option>
+            <option value="127.0.0.1">This computer only (recommended)</option>
+            <option value="0.0.0.0">Other devices on your network (no password)</option>
           </select>
-          <span className="muted small">
-            All networks is open to your LAN with no password — anyone could use your models and
-            GPU. Only for a trusted network.
-          </span>
         </label>
+        {server.host === "0.0.0.0" && (
+          <div className="settings-warning" role="note">
+            <b>Anyone on your network can use your models and GPU, and there is no password.</b>{" "}
+            Choose this only on a network you trust.
+          </div>
+        )}
         <label>
           Port
-          <input
+          <DraftInput
             type="number"
+            className="narrow-field"
             min={1024}
             max={65535}
-            value={server.port}
-            onChange={(e) => {
-              const n = parseInt(e.target.value, 10);
-              if (n >= 1024 && n <= 65535) updateServer({ port: n });
+            value={String(server.port)}
+            onCommit={(v) => {
+              const n = parseInt(v, 10);
+              if (!(n >= 1024 && n <= 65535)) return false;
+              updateServer({ port: n });
             }}
           />
           <span className="muted small">Takes effect the next time GhostPen starts.</span>
         </label>
+        <p className="muted small settings-url-line">
+          Apps on this computer connect to <code className="settings-url">{`http://127.0.0.1:${server.port}`}</code>
+        </p>
+      </section>
+
+      <section className="card">
+        <h2>Context window for other apps</h2>
         <label>
-          Context window for other apps
+          Room per request
           <select
             value={server.ctxTokens ?? 0}
             onChange={(e) => updateServer({ ctxTokens: parseInt(e.target.value, 10) })}
@@ -1057,54 +1316,51 @@ export default function Settings() {
               </option>
             ))}
           </select>
-          <span className="muted small">
-            Room for the prompt and the answer in chat requests from other apps. Larger uses more
-            memory. An app can still ask for more per request; the model's maximum is the limit.
-          </span>
+          <span className="muted small">Larger uses more memory. An app can still ask for more per request.</span>
         </label>
       </section>
+      </div>
 
       </div>
 
       <div className="settings-panel" hidden={section !== "about"}>
-      <AboutUpdates autoUpdate={settings.autoUpdate ?? true} onAutoUpdate={(on) => update({ autoUpdate: on })} />
-      {status && (
-        <section className="card diag">
-          <h2>Copy and paste</h2>
-          <p className="muted small">Useful when shortcuts, copy and paste, or input control do not work as expected.</p>
-          <div className="diag-grid">
-            <span>Clipboard</span><b>{status.clipboard_backend}</b>
-            <span>Input synthesis</span><b>{status.input_available ? "available" : "unavailable"}</b>
-            <span>Mode</span><b>{status.manual_mode ? "manual copy" : "automatic"}</b>
-          </div>
-        </section>
-      )}
+      <AboutUpdates
+        autoUpdate={settings.autoUpdate ?? true}
+        onAutoUpdate={setAutoUpdate}
+        extra={status && (
+          <section className="card diag">
+            <h2>Copy and paste</h2>
+            <div className="diag-grid">
+              <span>Clipboard</span><b>{status.clipboard_backend === "oriel" ? "Built in" : status.clipboard_backend}</b>
+              <span>Typing into other apps</span><b>{status.input_available ? "Works" : "Not available"}</b>
+              <span>Paste method</span><b>{status.manual_mode ? "Copy only, paste yourself" : "Automatic"}</b>
+            </div>
+          </section>
+        )}
+      />
       </div>
-          </main>
-        </div>
-
-        <div className="footer settings-footer">
-          <div className="settings-save-feedback" role="status" aria-live="polite">
-            {saveError ? <span className="save-error">⚠ {saveError}</span>
-              : saved ? <span className="save-ok">Saved ✓</span>
-              : dirty ? <span className="settings-unsaved">Unsaved changes</span>
-              : <span className="muted">All changes saved</span>}
+          {showFooter && (
+          <div className="footer settings-footer">
+            <div className="settings-save-feedback" role="status" aria-live="polite">
+              {saveError ? (
+                <span className="save-error">
+                  ⚠ {saveError.text}
+                  {saveError.retry && (
+                    <button className="btn" type="button" onClick={() => void persist()}>Retry</button>
+                  )}
+                </span>
+              ) : dirty || saving ? (
+                <span className="settings-saving">Saving…</span>
+              ) : (
+                <span className="muted">All changes saved</span>
+              )}
+            </div>
+            {!singleWindow && (
+              <button className="btn" type="button" onClick={closeSettings}>Close</button>
+            )}
           </div>
-          {singleWindow ? (
-            // Nothing to close in the app window: only throwing changes away.
-            dirty && (
-              <button className="btn" type="button" onClick={closeSettings} disabled={saving}>
-                Discard changes
-              </button>
-            )
-          ) : (
-            <button className="btn" type="button" onClick={closeSettings} disabled={saving}>
-              {dirty ? "Discard & close" : "Close"}
-            </button>
           )}
-          <button className="btn primary" type="button" onClick={save} disabled={!dirty || saving}>
-            {saving ? "Saving…" : "Save changes"}
-          </button>
+          </main>
         </div>
       </div>
     </div>

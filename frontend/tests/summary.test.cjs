@@ -112,6 +112,9 @@ const toggle = () => screen.getByRole('switch', { name: 'Show thinking' });
 const paper = () => document.querySelector('.summary-paper article');
 const copy = () => screen.getByRole('button', { name: /^(Copy|Copied)$/ });
 const read = () => screen.getByRole('button', { name: /Read summary/ });
+// Result-only actions are not shown until there is a summary.
+const copyShown = () => screen.queryByRole('button', { name: /^(Copy|Copied)$/ });
+const readShown = () => screen.queryByRole('button', { name: /Read summary/ });
 
 test('heading-free thinking never appears in the summary or enables Copy/TTS, including cancellation', async () => {
   await mount();
@@ -120,12 +123,12 @@ test('heading-free thinking never appears in the summary or enables Copy/TTS, in
     await delta('thinking', part);
     assert.equal(paper(), null);
     assert.equal(document.body.textContent.includes('Analyze'), false);
-    assert.equal(copy().disabled, true);
-    assert.equal(read().disabled, true);
+    assert.equal(copyShown(), null);
+    assert.equal(readShown(), null);
   }
   await click(screen.getByRole('button', { name: 'Stop', exact: true }));
-  assert.equal(copy().disabled, true);
-  assert.equal(read().disabled, true);
+  assert.equal(copyShown(), null);
+  assert.equal(readShown(), null);
   assert.equal(paper(), null);
   assert.ok(calls.some((c) => c.name === 'cancel_ai'));
   assert.equal(calls.some((c) => ['copy_text', 'tts_speak'].includes(c.name)), false);
@@ -134,7 +137,7 @@ test('heading-free thinking never appears in the summary or enables Copy/TTS, in
 test('export saves the finished summary, through the menu, and offers nothing before it exists', async () => {
   await mount();
   const ex = () => screen.getByRole('button', { name: /^Export$/ });
-  assert.equal(ex().disabled, true, 'nothing to export yet');
+  assert.equal(screen.queryByRole('button', { name: /^Export$/ }), null, 'nothing to export yet');
   snapshot = { ...empty, state: 'ready', markdown: answer, revision: 4 };
   await unmount();
   await mount();
@@ -198,8 +201,8 @@ test('thinking becomes visible during a continuous stream without waiting for a 
   }
   const region = screen.queryByRole('region', { name: 'Model thinking' });
   assert.ok(region?.textContent.includes('Step 0.'), 'Thinking must render before the stream pauses');
-  assert.equal(copy().disabled, true);
-  assert.equal(read().disabled, true);
+  assert.equal(copyShown(), null);
+  assert.equal(readShown(), null);
   await status('ready');
   assert.match(screen.getByRole('region', { name: 'Model thinking' }).textContent, /Step 19/);
 });
@@ -295,8 +298,8 @@ test('received thinking remains available after cancellation without enabling Co
   await click(toggle());
   assert.match(screen.getByRole('alert').textContent, /Cancelled/);
   assert.match(screen.getByRole('region', { name: 'Model thinking' }).textContent, /Private reasoning/);
-  assert.equal(copy().disabled, true);
-  assert.equal(read().disabled, true);
+  assert.equal(copyShown(), null);
+  assert.equal(readShown(), null);
 });
 
 test('structured stream and reopened snapshot give identical summary, thinking and Copy/TTS payloads', async () => {
@@ -364,13 +367,13 @@ test('a new run clears both channels and overflow errors leave thinking out of r
   await mount();
   await status('fetching');
   assert.equal(paper(), null);
-  assert.equal(copy().disabled, true);
+  assert.equal(copyShown(), null);
   await delta('thinking', 'More private reasoning.');
   act(() => emitStatus('error', "The model's output exceeded the 1 MiB limit. Try a shorter summary."));
   await tick();
   assert.match(screen.getByRole('alert').textContent, /exceeded the 1 MiB limit/);
-  assert.equal(copy().disabled, true);
-  assert.equal(read().disabled, true);
+  assert.equal(copyShown(), null);
+  assert.equal(readShown(), null);
 });
 
 test('old/corrupt settings default to hidden and thinking HTML stays inert', async () => {

@@ -5,6 +5,7 @@ import { listen } from "./events";
 import { renderMarkdown } from "./markdown";
 import { renderDiagrams, exportDiagrams } from "./diagrams";
 import { openExternal } from "./oriel";
+import PageHeader from "./PageHeader";
 
 // What the Zig side reports while it fetches and summarizes
 // (src/main.zig's summarize_link): the stage, the page it found and the
@@ -271,13 +272,12 @@ export default function Summary() {
       "--reader-font": reader.font === "serif" ? 'Georgia, "Times New Roman", serif' : '"Trebuchet MS", sans-serif',
       "--reader-leading": reader.spacing === "comfortable" ? 1.85 : 1.55,
     } as CSSProperties}>
-      <header className="summary-head" data-oriel-drag-region>
-        <div className="summary-heading">
-          <span className="summary-eyebrow"><Icon name="link" /> GhostPen / Link reader</span>
-          <h1>Summary<span className="summary-heading-dot">.</span></h1>
-          <p>A little less reading. A lot more understanding.</p>
-        </div>
-        <div className="summary-head-btns">
+      <PageHeader
+        className="summary-head"
+        title="Summarize a link"
+        subtitle="Paste a web page or a file and get the key points."
+      >
+        {(summary || voicePlaying) && <div className="summary-head-btns">
           <button
             className={`summary-copy ${exported ? "done" : ""}`}
             title="Save the summary as a file (Markdown or PDF)"
@@ -330,8 +330,8 @@ export default function Summary() {
               {voicePlaying ? "■ Stop" : <><Icon name="read" />Read page</>}
             </button>
           )}
-        </div>
-      </header>
+        </div>}
+      </PageHeader>
 
       <details className="summary-source" open={!html}>
         <summary hidden={!html}><Icon name="link" /> Summarize another link or file <span>+</span></summary>
@@ -342,7 +342,7 @@ export default function Summary() {
             void go();
           }}
         >
-          <label className="summary-label" htmlFor="summary-url">Start with a link or a file</label>
+          <label className="summary-label" htmlFor="summary-url">Link or file</label>
           <div className="summary-url-field">
             <Icon name="link" />
             <input
@@ -355,7 +355,21 @@ export default function Summary() {
               spellCheck={false}
               onChange={(e) => setUrl(e.target.value)}
             />
+            <button
+              type="button"
+              className="summary-paste"
+              disabled={running}
+              title="Fill the box with what you last copied"
+              onClick={() => clipboardText().then((t) => { if (t.trim()) setUrl(t.trim()); }).catch(() => {})}
+            >
+              Paste
+            </button>
           </div>
+          {url.trim() && !TARGET_SHAPE.test(url.trim()) && (
+            <p className="summary-url-hint" role="status">
+              That isn't a link or a file path. Start it with https://, ~/, / or ./
+            </p>
+          )}
           <div className="summary-options">
             <div className="summary-depth">
               <span className="summary-depth-label">How much detail?</span>
@@ -374,15 +388,40 @@ export default function Summary() {
                 ))}
               </div>
             </div>
-            <button className="summary-go" type="submit" disabled={!canGo}>
-              {running ? <span className="spinner summary-go-spinner" /> : <Icon name="send" className="summary-go-icon" />}
-              {running ? "Summarizing…" : "Summarize"}
-            </button>
+            {!html && (
+              <details className="summary-opts">
+                <summary>Options</summary>
+                <div className="summary-opts-pop">
+                  <label className="summary-thinking-switch" title="Ask the model to think first, and show what it thought">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={reader.showThinking}
+                      onChange={(e) => setReader((r) => ({ ...r, showThinking: e.target.checked }))}
+                    />
+                    <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
+                    <span>Show thinking</span>
+                  </label>
+                </div>
+              </details>
+            )}
+            <div className="summary-go-wrap">
+              {!url.trim() && !running && <span className="summary-go-reason" id="summary-go-reason">Paste a link or file first</span>}
+              <button
+                className="summary-go"
+                type="submit"
+                disabled={!canGo}
+                aria-describedby={!url.trim() && !running ? "summary-go-reason" : undefined}
+              >
+                {running ? <span className="spinner summary-go-spinner" /> : <Icon name="send" className="summary-go-icon" />}
+                {running ? "Summarizing…" : "Summarize"}
+              </button>
+            </div>
           </div>
         </form>
       </details>
 
-      <div className="summary-reader-bar" aria-label="Reading preferences">
+      {html && <div className="summary-reader-bar" aria-label="Reading preferences">
         <details className="summary-reader-settings">
           <summary><Icon name="concise" /> Reading settings</summary>
           <div className="summary-reader-options">
@@ -414,12 +453,12 @@ export default function Summary() {
           <output aria-live="polite" aria-label="Current font size">{reader.size}px</output>
           <button aria-label="Increase font size" disabled={reader.size >= 24} onClick={() => setReader((r) => ({ ...r, size: Math.min(24, r.size + 1) }))}>A<span>+</span></button>
         </div>
-      </div>
+      </div>}
       <main className="summary-body" ref={bodyRef}>
         {state.state === "error" && (
           <div className="summary-error" role="alert">
-            <span className="summary-eyebrow">Let's try again</span>
-            <h2>We couldn't read this link.</h2>
+            <span className="summary-eyebrow">Couldn't summarize</span>
+            <h2>We couldn't read this link or file.</h2>
             <p className="summary-error-title">{state.message || "Check the URL and try summarizing again."}</p>
             {state.title ? <p className="hint">{state.title}</p> : null}
           </div>
@@ -458,7 +497,7 @@ export default function Summary() {
         {html ? (
           <div className="summary-paper">
             <div className="summary-paper-meta">
-              <span className="summary-eyebrow">The essentials</span>
+              <span className="summary-eyebrow">Summary</span>
               <span>{running ? "Writing…" : "Ready to read"}</span>
             </div>
             {state.title && <h2 className="summary-document-title">{state.title}</h2>}
@@ -470,17 +509,32 @@ export default function Summary() {
               <div className="summary-mini-page"><span /><i /><i /><i /><b /><i /><i /></div>
               <span className="summary-illustration-badge"><Icon name="concise" /></span>
             </div>
-            <span className="summary-eyebrow">From the page to the point</span>
-            <h2>Big ideas. Less noise.</h2>
-            <p>Drop in a link and we'll bring the key ideas,<br className="summary-empty-break" /> useful details, and takeaways into focus.</p>
-            <div className="summary-empty-note"><Icon name="link" /> Articles, essays, and webpages</div>
+            <h2>Paste a link or a file path above</h2>
+            <p>Press Enter or Summarize. The summary streams in here.</p>
+            <dl className="summary-help">
+              <div>
+                <dt>You can paste</dt>
+                <dd>A web page link (<code>https://…</code>).</dd>
+                <dd>A file on this computer (<code>~/notes.md</code>, <code>/path/to/doc.txt</code>): text, Markdown, code, logs and saved .html pages. PDFs and other binary files aren't read.</dd>
+              </div>
+              <div>
+                <dt>You get</dt>
+                <dd>Key points in Markdown, as brief or as detailed as you choose.</dd>
+              </div>
+              <div>
+                <dt>Then you can</dt>
+                <dd>Copy it, export it as Markdown or PDF, or have it read aloud.</dd>
+              </div>
+            </dl>
           </div>
         )}
       </main>
-      <footer className="summary-footer">
-        <span><span className={`summary-status-dot ${running ? "busy" : ""}`} />{running ? "Making sense of your source" : summary ? "Your reading, distilled" : "A fresh perspective starts here"}</span>
-        <span>{running ? "Esc to stop" : "Made with GhostPen"}</span>
-      </footer>
+      {running && (
+        <footer className="summary-footer">
+          <span><span className="summary-status-dot busy" />Working on your source</span>
+          <span>Esc to stop</span>
+        </footer>
+      )}
     </div>
   );
 }

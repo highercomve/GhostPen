@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { Fragment, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "./events";
 import LevelBar from "./LevelBar";
+import Ghost from "./Ghost";
 import { Icon, IconName } from "./icons";
 import {
   Status,
@@ -31,6 +32,7 @@ import {
   TRANSLATE_LANGUAGES,
 } from "./api";
 import { singleWindow } from "./mode";
+import { ModelPill } from "./PageHeader";
 
 type View =
   | { kind: "menu" }
@@ -48,6 +50,9 @@ const ACTIONS: { id: string; label: string; hint: string; icon: IconName }[] = [
   { id: "expand", label: "Expand", hint: "Add detail & elaborate", icon: "expand" },
   { id: "__read", label: "Read", hint: "This text, out loud", icon: "read" },
 ];
+
+// How much of the captured text the preview shows before "Show all".
+const PREVIEW_CHARS = 140;
 
 /** What a menu action is doing (ghostpen://ai-progress from the backend). */
 interface AiProgress {
@@ -126,6 +131,10 @@ export default function Menu() {
   const [prompt, setPrompt] = useState("");
   // Transient "Copied ✓" feedback after copying the whole selection to the clipboard.
   const [copied, setCopied] = useState(false);
+  // The text came out of an image (Extract Text), not from the selection or the clipboard.
+  const [extracted, setExtracted] = useState(false);
+  // The preview shows the first lines; "Show more" opens all of it, so you can check what was captured.
+  const [expanded, setExpanded] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -144,6 +153,8 @@ export default function Menu() {
     } catch {
       setSelection({ kind: "empty" });
     }
+    setExtracted(false);
+    setExpanded(false);
   }, []);
 
   // Whether Shift is down (keys and clicks): Shift+action shows the result.
@@ -180,6 +191,10 @@ export default function Menu() {
     [level],
   );
 
+  // Where the preview text came from. The backend only copies the selection itself when it can
+  // send keystrokes; in manual mode the text is whatever was already on the clipboard.
+  const sourceLabel = extracted ? "Text from image" : status?.manual_mode ? "From clipboard" : "Selected text";
+
   const empty = isEmptySelection(selection) || (isTextSelection(selection) && selection.text.trim().length === 0);
 
   // Run the freeform instruction from the prompt bar over the current selection.
@@ -205,6 +220,8 @@ export default function Menu() {
       const text = await extractImageText();
       setCopied(false);
       setSelection({ kind: "text", text });
+      setExtracted(true);
+      setExpanded(false);
       setView({ kind: "menu" });
     } catch (e) {
       setView({ kind: "error", message: String(e) });
@@ -596,13 +613,34 @@ export default function Menu() {
   return (
     <div className="menu">
       <header className="menu-head" data-oriel-drag-region>
-        <span className="brand">GhostPen</span>
+        <span className="brand">
+          <Ghost mood="idle" size={18} />
+          GhostPen
+        </span>
+        {/* The profile and model share the header row (they used to take a row of their own). */}
+        {status && (
+          <span className="head-model">
+            <ModelPill status={status} />
+            {status.manual_mode && <span className="badge">manual</span>}
+          </span>
+        )}
         <span className="head-btns">
-          <button className="icon-btn" title="Playground" onClick={() => openPlayground().catch((e) => console.warn("open playground:", e))}>
-            🧪
+          <button
+            className="icon-btn labelled"
+            title="Playground: try an action on any text"
+            aria-label="Open Playground"
+            onClick={() => openPlayground().catch((e) => console.warn("open playground:", e))}
+          >
+            <Icon name="flask" />
+            Playground
           </button>
-          <button className="icon-btn" title="Settings" onClick={() => openSettings().catch((e) => console.warn("open settings:", e))}>
-            ⚙️
+          <button
+            className="icon-btn"
+            title="Settings"
+            aria-label="Open Settings"
+            onClick={() => openSettings().catch((e) => console.warn("open settings:", e))}
+          >
+            <Icon name="settings" />
           </button>
         </span>
       </header>
@@ -614,17 +652,12 @@ export default function Menu() {
         </header>
       )}
 
-      {status && (
-        <div className="dest" title="Active AI destination">
-          → {status.active_profile} · <code>{status.active_model}</code>
-          {status.manual_mode && <span className="badge">manual</span>}
-        </div>
-      )}
-
       {view.kind === "menu" && isImageSelection(selection) && (
         <div className="image-mode">
           <figure className="image-capture">
-            <img src={selection.preview} alt="Captured image" />
+            <div className="image-capture-frame">
+              <img src={selection.preview} alt="Captured image" />
+            </div>
             <figcaption className="image-capture-meta">
               <Icon name="image" className="image-capture-icon" />
               Image on clipboard · {selection.width} × {selection.height}
@@ -634,7 +667,7 @@ export default function Menu() {
           <button ref={cursorRef} className="extract-cta selected" onClick={doExtractText}>
             <Icon name="scan" className="extract-cta-icon" />
             <span className="extract-cta-text">
-              <span className="extract-cta-label">Extract Text</span>
+              <span className="extract-cta-label">Extract text</span>
               <span className="extract-cta-hint">Read the text out of the image</span>
             </span>
           </button>
@@ -647,14 +680,13 @@ export default function Menu() {
 
       {view.kind === "menu" && !isImageSelection(selection) && (
         <>
-          <div className={`selection ${empty ? "empty" : ""}`}>
+          <div className={`selection ${empty ? "empty" : ""} ${expanded ? "expanded" : ""}`}>
             {isTextSelection(selection) ? (
               <>
-                <span className="selection-text-wrap">
-                  {selection.text.length > 140 ? selection.text.slice(0, 140) + "…" : selection.text}
-                </span>
                 <div className="copy-bar">
-                  <span className="copy-bar-count">{selection.text.length} chars</span>
+                  <span className="copy-bar-count">
+                    <strong>{sourceLabel}</strong> · {selection.text.length.toLocaleString()} chars
+                  </span>
                   <button
                     className={`copy-bar-btn ${copied ? "done" : ""}`}
                     title="Copy the whole text (Ctrl+C)"
@@ -665,6 +697,14 @@ export default function Menu() {
                     <kbd>Ctrl+C</kbd>
                   </button>
                 </div>
+                <span className="selection-text-wrap">
+                  {expanded || selection.text.length <= PREVIEW_CHARS ? selection.text : selection.text.slice(0, PREVIEW_CHARS) + "…"}
+                </span>
+                {selection.text.length > PREVIEW_CHARS && (
+                  <button className="selection-more" aria-expanded={expanded} onClick={() => setExpanded((x) => !x)}>
+                    {expanded ? "Show less" : "Show all"}
+                  </button>
+                )}
               </>
             ) : (
               <span>
@@ -678,21 +718,29 @@ export default function Menu() {
           <LevelBar level={level} setLevel={setLevel} />
           <div className="actions">
             {menuItems.map((a, i) => (
-              <button
-                key={a.id}
-                ref={i === cursor ? cursorRef : undefined}
-                className={`action ${i === cursor ? "selected" : ""}`}
-                disabled={empty}
-                onClick={() => a.activate()}
-                title={a.id === "__read" ? "Read the selected text aloud" : "Shift+click (or Shift+number): preview the result here, paste it after reading"}
-                onMouseEnter={() => setCursor(i)}
-              >
-                <Icon name={a.icon} className="action-icon" />
-                <span className="action-text">
-                  <span className="action-label">{a.label}</span>
-                  <span className="action-hint">{a.hint}</span>
-                </span>
-              </button>
+              <Fragment key={a.id}>
+                {/* Read and Translate act on the text rather than rewrite it: a rule sets them apart. */}
+                {a.id === "__read" && <div className="actions-sep" role="separator" />}
+                <button
+                  ref={i === cursor ? cursorRef : undefined}
+                  className={`action ${i === cursor ? "selected" : ""}`}
+                  disabled={empty}
+                  onClick={() => a.activate()}
+                  title={
+                    (a.id === "__read" ? "Read the selected text aloud" : "Shift+click (or Shift+number): preview the result here, paste it after reading") +
+                    (i < 9 ? ` · press ${i + 1}` : "")
+                  }
+                  aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
+                  onMouseEnter={() => setCursor(i)}
+                >
+                  <Icon name={a.icon} className="action-icon" />
+                  <span className="action-text">
+                    <span className="action-label">{a.label}</span>
+                    <span className="action-hint">{a.hint}</span>
+                  </span>
+                  {i < 9 && <kbd className="action-key" aria-hidden="true">{i + 1}</kbd>}
+                </button>
+              </Fragment>
             ))}
           </div>
           <form
@@ -718,6 +766,10 @@ export default function Menu() {
               <Icon name="send" />
             </button>
           </form>
+          <p className="menu-foot">
+            <span title="Hold Shift while you pick an action to see the result here before it is pasted"><kbd>Shift</kbd> + action shows the result, doesn’t paste</span>
+            <span><kbd>Esc</kbd> close</span>
+          </p>
         </>
       )}
 

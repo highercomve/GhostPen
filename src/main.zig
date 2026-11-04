@@ -175,6 +175,8 @@ pub const Events = struct {
     /// `speaker`: "me" for the microphone in meeting mode, else "".
     @"ghostpen://caption": struct { text: []const u8, translated: bool, speaker: []const u8 = "", name: []const u8 = "" },
     @"ghostpen://caption-error": []const u8,
+    /// ~10 Hz audio level (0..1) while captions listen: the overlay's meter.
+    @"ghostpen://caption-level": f32,
     /// `message`: an error that kept the dictated text ("" otherwise).
     @"ghostpen://dictation": struct { text: []const u8, state: []const u8, message: []const u8 = "" },
     @"ghostpen://dictation-level": f32,
@@ -806,6 +808,9 @@ pub const Commands = struct {
     }
 
     pub fn save_settings(arena: std.mem.Allocator, args: struct { settings: Settings }) !void {
+        // Settings save as they change: the hotkeys are registered again
+        // only when one of them changed (on Wayland each is a portal call).
+        const before = shared.get(io, arena) catch null;
         shared.set(io, gpa, args.settings) catch |err| return oriel.ipc.fail("Could not save the settings ({s}).", .{@errorName(err)});
         // Switched to an endpoint (a local server may need the GPU memory):
         // the built-in model goes now, not after its idle timeout. Off the
@@ -816,6 +821,7 @@ pub const Commands = struct {
         captions.settingsChanged();
         dictation.settingsChanged();
         tts.setEngine(args.settings.voiceEngine);
+        if (before) |b| if (sameHotkeys(b, args.settings)) return;
         const failed = registerHotkeys(arena, args.settings);
         if (failed.len > 0) return oriel.ipc.fail("Settings saved, but a hotkey wasn't registered: {s}", .{failed});
     }
@@ -1000,9 +1006,14 @@ pub const Commands = struct {
 
     /// Streaming variant: `ghostpen://chunk` per delta, then `done` (the
     /// final text, which replaces the chunks) or `error`, to the Playground.
-    pub fn process_text_stream(arena: std.mem.Allocator, args: struct { action: []const u8, targetLang: ?[]const u8 = null, level: ?[]const u8 = null, text: []const u8 }) !void {
+    /// `instruction` (the Playground's prompt bar) replaces the action with a
+    /// freeform one, like the menu's process_ai_custom.
+    pub fn process_text_stream(arena: std.mem.Allocator, args: struct { action: []const u8, targetLang: ?[]const u8 = null, level: ?[]const u8 = null, text: []const u8, instruction: ?[]const u8 = null }) !void {
         const s = try shared.get(io, arena);
-        const r = try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
+        const r: Resolved = if (args.instruction) |ins|
+            .{ .profile = s.activeProfile(), .system = try ai.instructionPrompt(arena, ins) }
+        else
+            try resolveAction(arena, s, args.action, args.targetLang, parseLevel(args.level));
         const Emit = struct {
             fn chunk(_: void, delta: []const u8) void {
                 events.emitTo(windowFor("playground"), .@"ghostpen://chunk", delta) catch {};
@@ -1434,14 +1445,22 @@ var hotkey_arena: std.heap.ArenaAllocator = .init(gpa);
 /// No global shortcuts on this desktop (see `Status.hotkeys_unavailable`).
 var hotkeys_unavailable: std.atomic.Value(bool) = .init(false);
 
-/// Register the three hotkeys; the ones that failed, as text ("" when all
+/// Register the hotkeys; the ones that failed, as text ("" when all
 /// did). A desktop without the GlobalShortcuts portal isn't a failure of a
 /// hotkey: `hotkeys_unavailable` says so once, and Settings explains it.
+fn sameHotkeys(a: Settings, b: Settings) bool {
+    const eql = std.mem.eql;
+    return eql(u8, a.hotkey, b.hotkey) and eql(u8, a.dictationHotkey, b.dictationHotkey) and eql(u8, a.captionsHotkey, b.captionsHotkey) and
+        eql(u8, a.meetingsHotkey, b.meetingsHotkey) and eql(u8, a.summaryHotkey, b.summaryHotkey);
+}
+
 fn registerHotkeys(arena: std.mem.Allocator, s: Settings) []const u8 {
     const binds = [_]struct { id: []const u8, trigger: []const u8 }{
         .{ .id = "menu", .trigger = s.hotkey },
         .{ .id = "dictation", .trigger = s.dictationHotkey },
         .{ .id = "captions", .trigger = s.captionsHotkey },
+        .{ .id = "meetings", .trigger = s.meetingsHotkey },
+        .{ .id = "summary", .trigger = s.summaryHotkey },
     };
     for (binds) |b| _ = oriel.global_shortcut.unregister(b.id);
     _ = hotkey_arena.reset(.retain_capacity);
@@ -1467,6 +1486,13 @@ fn onHotkey(id: []const u8) void {
         dictation.toggle();
     } else if (std.mem.eql(u8, id, "captions")) {
         captions.toggle();
+    } else if (std.mem.eql(u8, id, "meetings") or std.mem.eql(u8, id, "summary")) {
+        const Open = struct {
+            fn run(label: []const u8) void {
+                showWindow(label, false);
+            }
+        };
+        App.runOnMain(if (std.mem.eql(u8, id, "meetings")) "meetings" else "summary", Open.run);
     }
 }
 
@@ -1572,7 +1598,7 @@ fn setup() !void {
         .{ .label = "playground", .title = "GhostPen Playground", .url = "index.html#/playground", .width = 640, .height = 620, .visible = false, .hide_on_close = true },
         .{ .label = "meetings", .title = "GhostPen Meetings", .url = "index.html#/meetings", .width = 1040, .height = 760, .visible = false, .hide_on_close = true },
         .{ .label = "summary", .title = "GhostPen Summary", .url = "index.html#/summary", .width = 780, .height = 850, .visible = false, .hide_on_close = true },
-        .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 520, .height = 200, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
+        .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 560, .height = 170, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
         .{ .label = "captions", .title = "GhostPen Captions", .url = "index.html#/captions", .width = 900, .height = 170, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
     };
     for (windows) |w| {
@@ -1699,10 +1725,14 @@ pub fn main(init: std.process.Init) !u8 {
     if (llmDirs(init.arena.allocator())) |d| {
         @import("models.zig").search_dirs = d.others;
     } else |_| {}
+    // `ghostpen say [TEXT...]` (src/say.zig): speak aloud, for scripts and agents.
+    if (args.len > 1 and std.mem.eql(u8, args[1], "say"))
+        return @import("say.zig").run(io, gpa, init.arena.allocator(), init.environ_map, args[2..], tts_ready);
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             std.debug.print(
-                \\Usage: ghostpen [--trigger | --voice-input | --captions | --settings | --playground | --tray]
+                \\Usage: ghostpen [--trigger | --voice-input | --captions | --settings | --playground | --summary | --meetings | --tray]
+                \\       ghostpen say [OPTIONS] [TEXT...]   (speak aloud; `ghostpen say --help`)
                 \\       ghostpen logs [-f | --follow]
                 \\
                 \\A running GhostPen receives these flags from later launches, so a
@@ -1796,8 +1826,8 @@ pub fn main(init: std.process.Init) !u8 {
 /// The menu: a frameless floating panel, shown by the trigger.
 const windows_config: App.WindowOptions = .{
     .title = "GhostPen",
-    .width = 420,
-    .height = 640,
+    .width = 460,
+    .height = 720,
     .resizable = false,
     .decorations = false,
     .always_on_top = true,

@@ -445,6 +445,27 @@ pub fn say(gpa: std.mem.Allocator, req: Request) !tts.Result {
     return r;
 }
 
+/// What `ghostpen say` asks a running GhostPen to read (POST /speak): like
+/// `say`, but it logs instead of printing and waits its turn, so sayings from
+/// several agents follow each other. Read aloud and Stop in the windows
+/// (`speak`) still cut in, as they always did.
+var say_mutex: std.Io.Mutex = .init;
+
+pub fn sayQueued(gpa: std.mem.Allocator, req: Request) !tts.Result {
+    if (!ready) return error.NoDataDir;
+    say_mutex.lockUncancelable(shared_io);
+    defer say_mutex.unlock(shared_io);
+    const p = plan(req);
+    for ([_][]const u8{ p.model_id, p.voice_id }) |id| {
+        if (id.len == 0) continue;
+        log.info("say: downloading {s}", .{label(id)});
+        try fetch(id, null);
+    }
+    const r = try tts.speak(gpa, req.text, p.options);
+    logResult(r);
+    return r;
+}
+
 // ---- the catalog for Settings → Voices -----------------------------------------------------
 
 pub const Entry = struct {

@@ -449,6 +449,9 @@ fn start(arena: std.mem.Allocator) ![]const u8 {
     if (current) |old| old.release();
     latest = sess.retain();
     current = sess.retain();
+    // Listening now: say so (the overlay's own window may have loaded after
+    // ghostpen://dictation-show went out, as the first time it opens).
+    update("", "listening");
     return device;
 }
 
@@ -505,7 +508,9 @@ fn startFromToggle() void {
     };
 }
 
-const Status = struct { model_ready: bool, model: []const u8, proofread: bool, language: []const u8 };
+/// `listening`: a session is open (a page that loads after the start event
+/// learns it here).
+const Status = struct { model_ready: bool, model: []const u8, proofread: bool, language: []const u8, listening: bool };
 
 pub const Commands = struct {
     pub fn dictation_list_devices(arena: std.mem.Allocator) ![]const captions.Device {
@@ -520,6 +525,7 @@ pub const Commands = struct {
             .model = s.captions.model,
             .proofread = proofread_live.load(.acquire),
             .language = try arena.dupe(u8, language(&lang_buf)),
+            .listening = isRunning(),
         };
     }
 

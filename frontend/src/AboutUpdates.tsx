@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { listen } from "./events";
 import { openExternal } from "./oriel";
 import {
@@ -16,18 +16,41 @@ import {
 } from "./api";
 
 const KIND_TEXT: Record<string, string> = {
-  windows: "Installed with the Windows installer: GhostPen updates itself.",
-  appimage: "Running as an AppImage: GhostPen updates the AppImage itself.",
-  macos_app: "Installed as a macOS app: GhostPen updates itself.",
-  package: "Installed with your system's package manager (deb/rpm): update it there, or download the new version.",
-  source: "Built from source: GhostPen shows new releases but doesn't replace itself.",
+  windows: "Windows installer: GhostPen updates itself.",
+  appimage: "AppImage: GhostPen updates itself.",
+  macos_app: "macOS app: GhostPen updates itself.",
+  package: "Installed by your package manager (deb/rpm): update it there.",
+  source: "Source build: GhostPen tells you about new releases. Update it the way you installed it.",
 };
 
 /**
  * Settings → About & updates: the version, "Check for updates", installing
- * one (where GhostPen can replace itself), and the automatic-updates switch.
+ * one (where GhostPen can replace itself), and the automatic-updates switch (saved like any setting).
+ * `extra` is a card Settings puts beside them.
  */
-export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate: (on: boolean) => void }) {
+/** How the graphics backend reads to a person: on or off, and which one when it is named. */
+function gpuText(backend: string): string {
+  const b = (backend || "").trim();
+  const low = b.toLowerCase();
+  if (!b || low === "cpu" || low === "none") return "Off (CPU only)";
+  if (low === "gpu") return "On";
+  const names: Record<string, string> = { cuda: "CUDA", vulkan: "Vulkan", metal: "Metal", rocm: "ROCm", opencl: "OpenCL" };
+  return `On (${names[low] ?? b})`;
+}
+
+const SESSION_NAMES: Record<string, string> = {
+  wayland: "Wayland",
+  x11: "X11",
+  windows: "Windows",
+  macos: "macOS",
+  android: "Android",
+};
+
+export default function AboutUpdates(props: {
+  autoUpdate: boolean;
+  onAutoUpdate: (on: boolean) => void | Promise<void>;
+  extra?: ReactNode;
+}) {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [sys, setSys] = useState<SystemInfo | null>(null);
   const [copied, setCopied] = useState(false);
@@ -88,10 +111,14 @@ export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate:
         ["Build", sys.build],
         ["CPU cores", String(sys.cpus)],
         ...(sys.memory_mb > 0 ? [["Memory", `${(sys.memory_mb / 1024).toFixed(1)} GB`] as [string, string]] : []),
-        ["GPU backend", sys.gpu || "CPU"],
+        ["GPU acceleration", gpuText(sys.gpu)],
         ["Window layout", sys.layout === "single" ? "One app window" : "A window per tool"],
-        ["Session", sys.session],
-        ["On-device engines", [sys.system_ai && "Gemini Nano", sys.speech_recognition && "speech recognition", sys.system_voice && "voices"].filter(Boolean).join(", ") || "none"],
+        ["Display system", SESSION_NAMES[sys.session] ?? sys.session],
+        // The phone's own engines, listed only where the device has them: a computer has none to
+        // report (it uses GhostPen's built-in models and voices, set under their own sections).
+        ...(sys.system_ai || sys.speech_recognition || sys.system_voice
+          ? [["Provided by this device", [sys.system_ai && "Gemini Nano", sys.speech_recognition && "speech recognition", sys.system_voice && "voices"].filter(Boolean).join(", ")] as [string, string]]
+          : []),
       ]
     : [];
   const copyDetails = async () => {
@@ -101,23 +128,9 @@ export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate:
   };
 
   return (
-    <>
-    {sys && (
-      <section className="card">
-        <h2>This build</h2>
-        <dl className="about-sys">
-          {rows.map(([k, v]) => (
-            <div key={k}>
-              <dt>{k}</dt>
-              <dd>{v}</dd>
-            </div>
-          ))}
-        </dl>
-        <button className="btn" type="button" onClick={copyDetails}>{copied ? "Copied ✓" : "Copy details"}</button>
-      </section>
-    )}
+    <div className="settings-grid">
     <section className="card">
-      <h2>About &amp; updates</h2>
+      <h2>Updates</h2>
       <div className="about-row">
         <div>
           <b>GhostPen {info?.version ?? ""}</b>
@@ -165,18 +178,38 @@ export default function AboutUpdates(props: { autoUpdate: boolean; onAutoUpdate:
 
       <label className="checkbox">
         <input type="checkbox" checked={props.autoUpdate} onChange={(e) => props.onAutoUpdate(e.target.checked)} />
-        Update automatically
-        <span className="muted">
-          {info?.can_install === false
-            ? " (checks and tells you about new versions)"
-            : " (installs new versions in the background; they start next time)"}
-        </span>
+        {info?.can_install === false ? (
+          <span>
+            Check for updates automatically
+            <span className="checkbox-help">Tells you when a new version is out.</span>
+          </span>
+        ) : (
+          <span>
+            Update automatically
+            <span className="checkbox-help">Installs new versions in the background; they start the next time GhostPen opens.</span>
+          </span>
+        )}
       </label>
       <p className="muted small">
-        Releases are signed; GhostPen only installs an update whose signature matches the key built into it.{" "}
+        {info?.can_install !== false && "Releases are signed; GhostPen only installs an update whose signature matches. "}
         <a href="#" onClick={(e) => { e.preventDefault(); if (info) openExternal(info.releases_url); }}>Release notes</a>
       </p>
     </section>
-    </>
+    {props.extra}
+    {sys && (
+      <section className="card">
+        <h2>This build</h2>
+        <dl className="about-sys">
+          {rows.map(([k, v]) => (
+            <div key={k}>
+              <dt>{k}</dt>
+              <dd>{v}</dd>
+            </div>
+          ))}
+        </dl>
+        <button className="btn" type="button" onClick={copyDetails}>{copied ? "Copied ✓" : "Copy details"}</button>
+      </section>
+    )}
+    </div>
   );
 }

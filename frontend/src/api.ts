@@ -51,6 +51,9 @@ export interface Settings {
   hotkey: string;
   dictationHotkey: string;
   captionsHotkey: string;
+  /** Open the Meetings / Summary windows ("" = unbound). */
+  meetingsHotkey?: string;
+  summaryHotkey?: string;
   activeProfileId: string;
   profiles: Profile[];
   forceSynthetic: boolean;
@@ -312,9 +315,10 @@ export const clipboardText = () => invoke<string>("clipboard_text");
 /** Playground: transform text directly, no clipboard involved. */
 export const processText = (action: string, targetLang: string | null, level: Level, text: string) =>
   invoke<string>("process_text", { action, targetLang, level, text });
-/** Streaming variant: emits ghostpen://chunk / ::done / ::error events. */
-export const processTextStream = (action: string, targetLang: string | null, level: Level, text: string) =>
-  invoke<void>("process_text_stream", { action, targetLang, level, text });
+/** Streaming variant: emits ghostpen://chunk / ::done / ::error events.
+ *  `instruction` (the prompt bar) replaces the action with a freeform one. */
+export const processTextStream = (action: string, targetLang: string | null, level: Level, text: string, instruction?: string) =>
+  invoke<void>("process_text_stream", { action, targetLang, level, text, instruction: instruction ?? null });
 export const openPlayground = () => invoke<void>("open_playground");
 /** Hide the window this page runs in (Oriel: the window API, no command).
  *  In the single app window a page doesn't hide the app: nothing happens. */
@@ -385,6 +389,8 @@ export interface DictationStatus {
   proofread: boolean;
   /** Spoken language ("auto" or an ISO code) — mirrors settings.dictation.language. */
   language: string;
+  /** A session is listening (the overlay may have missed its start event). */
+  listening?: boolean;
 }
 
 /** Payload of the `ghostpen://dictation` event. */

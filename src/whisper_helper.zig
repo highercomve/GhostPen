@@ -77,6 +77,15 @@ const Loaded = struct {
     dtw: bool = false,
 };
 
+extern fn ggml_set_abort_callback(callback: ?*const fn ([*:0]const u8) callconv(.c) void) ?*const fn ([*:0]const u8) callconv(.c) void;
+
+fn exitOnAbort(message: [*:0]const u8) callconv(.c) void {
+    var buf: [2304]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "ggml: {s}\n", .{std.mem.span(message)}) catch std.mem.span(message);
+    _ = std.c.write(2, line.ptr, line.len);
+    std.c._exit(70);
+}
+
 pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
     io = process_io;
     out_writer = std.Io.File.stdout().writerStreaming(io, &out_buf);
@@ -86,6 +95,11 @@ pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8
     }
 
     whisper.silenceLogs();
+    // ggml aborts on a GPU allocation it can't make (the GPU is full: a
+    // built-in model holds it). Exit instead of abort(): models.zig reads the
+    // message on stderr and retries on the CPU either way, and the desktop
+    // doesn't report a crash (with a core dump) each time.
+    _ = ggml_set_abort_callback(&exitOnAbort);
     const gpus: usize = if (cpu) 0 else oriel.ggml_gpu.load(io);
     send(.{ .ready = true, .gpu = if (gpus > 0) (oriel.ggml_gpu.gpuName() orelse "GPU") else null });
 

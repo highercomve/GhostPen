@@ -32,6 +32,7 @@ const std = @import("std");
 const main = @import("main.zig");
 const models = @import("models.zig");
 const model_server = @import("model_server.zig");
+const tts = @import("tts.zig");
 
 const log = std.log.scoped(.stt_server);
 const gpa = std.heap.smp_allocator;
@@ -270,6 +271,8 @@ const max_active = 2;
 /// Chat and embedding requests running or queued for their runner (one
 /// runs at a time; each waiting one holds its body and a connection).
 var chat_queued: std.atomic.Value(u32) = .init(0);
+/// Sayings waiting for the voice (POST /speak, `ghostpen say`).
+var speak_queued: std.atomic.Value(u32) = .init(0);
 var embed_queued: std.atomic.Value(u32) = .init(0);
 const max_queued = 4;
 
@@ -323,6 +326,13 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
             .data => |body| (try model_server.chatReply(io, arena, request, body)) orelse return, // streamed
             .refused => |r| r,
         };
+    } else if (std.mem.eql(u8, path, "/speak") and request.head.method == .POST) blk: {
+        if (!admit(&speak_queued, max_queued)) break :blk busy(arena, request, "busy: too much waiting to be said, retry later");
+        defer _ = speak_queued.fetchSub(1, .acq_rel);
+        break :blk switch (try readJsonBody(io, arena, request)) {
+            .data => |body| try speakReply(arena, body),
+            .refused => |r| r,
+        };
     } else if (std.mem.eql(u8, path, "/v1/audio/transcriptions") and request.head.method == .POST) blk: {
         // Each request can hold hundreds of MB (the upload and its PCM) while
         // it waits for the one whisper model: a few at a time.
@@ -344,6 +354,28 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
 }
 
 /// A 503 before the body is read (the connection closes).
+/// POST /speak {"input": "...", "lang"?, "voice"?, "model"?}: read it aloud
+/// on this computer with the built-in voice, after what's already being
+/// said; answers once it's done. GhostPen's own (not OpenAI's
+/// /v1/audio/speech, which returns the audio instead of playing it).
+fn speakReply(arena: std.mem.Allocator, body: []const u8) !Reply {
+    const Args = struct { input: []const u8 = "", text: []const u8 = "", lang: []const u8 = "", voice: []const u8 = "", model: []const u8 = "" };
+    const a = std.json.parseFromSliceLeaky(Args, arena, body, .{ .ignore_unknown_fields = true }) catch
+        return model_server.errorReply(.bad_request, "expected {\"input\": \"text to say\"}", arena);
+    const text = std.mem.trim(u8, if (a.input.len > 0) a.input else a.text, " \t\r\n");
+    if (text.len == 0) return model_server.errorReply(.bad_request, "nothing to say: \"input\" is empty", arena);
+    const r = tts.sayQueued(gpa, .{ .text = text, .lang = a.lang, .voice = a.voice, .model = a.model }) catch |err| {
+        log.warn("speak: {s}", .{@errorName(err)});
+        return model_server.errorReply(.service_unavailable, if (err == error.NoDataDir) "GhostPen has no voice here" else tts.speakMessage(err), arena);
+    };
+    defer {
+        gpa.free(r.voice);
+        gpa.free(r.lang);
+        gpa.free(r.backend);
+    }
+    return .{ .body = try std.json.Stringify.valueAlloc(arena, .{ .voice = r.voice, .lang = r.lang, .seconds = r.audio_s }, .{}) };
+}
+
 fn busy(arena: std.mem.Allocator, request: *std.http.Server.Request, message: []const u8) Reply {
     request.head.keep_alive = false;
     return model_server.errorReply(.service_unavailable, message, arena);

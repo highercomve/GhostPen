@@ -99,41 +99,113 @@ export default function Voices() {
   const deleteButtons = (id: string, size: number) =>
     confirmDelete === id ? (
       <>
-        <button className="btn danger" onClick={() => remove(id)}>Delete {formatBytes(size)}?</button>
         <button className="btn" onClick={() => setConfirmDelete(null)}>Keep</button>
+        <button className="btn danger solid llm-delete" onClick={() => remove(id)}>Delete {formatBytes(size)}?</button>
       </>
     ) : (
-      <button className="btn" onClick={() => setConfirmDelete(id)}>Delete</button>
+      <button className="btn danger llm-delete" onClick={() => setConfirmDelete(id)}>Delete…</button>
     );
 
   const models = catalog?.models ?? [];
   const voices = catalog?.voices ?? [];
   const pct = progress && progress.total > 0 ? Math.min(100, (progress.done / progress.total) * 100) : 0;
 
+  // "English (US) · Heart" → the language and the voice's name.
+  const splitLabel = (label: string): [string, string] => {
+    const at = label.indexOf(" · ");
+    return at < 0 ? ["Other", label] : [label.slice(0, at), label.slice(at + 3)];
+  };
+  // Grouped by language (catalog order), the groups with a downloaded voice first.
+  const groups: { language: string; voices: typeof voices }[] = [];
+  for (const v of voices) {
+    const language = splitLabel(v.label)[0];
+    const g = groups.find((x) => x.language === language);
+    if (g) g.voices.push(v);
+    else groups.push({ language, voices: [v] });
+  }
+  // A voice name used by more than one language ("Dora") says which one it is.
+  const nameCount = new Map<string, number>();
+  for (const v of voices) {
+    const n = splitLabel(v.label)[1];
+    nameCount.set(n, (nameCount.get(n) ?? 0) + 1);
+  }
+  const languageName = (v: (typeof voices)[number]): string => {
+    try {
+      const n = v.lang ? new Intl.DisplayNames(["en"], { type: "language" }).of(v.lang) : undefined;
+      if (n && n !== v.lang) return n;
+    } catch { /* An unknown code: use the group's own name. */ }
+    return splitLabel(v.label)[0];
+  };
+  const voiceName = (v: (typeof voices)[number]): string => {
+    const n = splitLabel(v.label)[1];
+    return (nameCount.get(n) ?? 0) > 1 ? `${n} · ${languageName(v)}` : n;
+  };
+  const hasDownloaded = (g: (typeof groups)[number]) => g.voices.some((v) => v.downloaded);
+  groups.sort((a, b) => Number(hasDownloaded(b)) - Number(hasDownloaded(a)));
+  const downloadedCount = voices.filter((v) => v.downloaded).length;
+
+  const voiceRow = (v: (typeof voices)[number]) => {
+    const p = progress && progress.id === v.id ? progress : null;
+    const showPct = p && p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0;
+    const speaking = inUse && state?.voice === v.id;
+    return (
+      <div key={v.id} className={`llm-row voice-row ${v.downloaded ? "downloaded" : ""} ${speaking ? "active" : ""}`}>
+        <div className="llm-info">
+          <div>
+            <b>{voiceName(v)}</b>{" "}
+            <span className="muted small">{formatBytes(v.size)}</span>
+            {v.downloaded && <span className="llm-badge downloaded">✓ Downloaded</span>}
+            {speaking && <span className="llm-badge">Playing</span>}
+          </div>
+          {p && (
+            <div className="llm-progress">
+              <div className="llm-bar"><div style={{ width: `${showPct}%` }} /></div>
+              <span className="muted small">
+                {`${formatBytes(p.done)} of ${formatBytes(p.total || v.size)}`}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="llm-actions">
+          {!p && (
+            <button
+              className="btn"
+              onClick={() => play(v.id, v.lang ?? "en-us")}
+              title={v.downloaded && modelReady ? "Hear a sample of this voice" : `Hear a sample of this voice. Downloads ${formatBytes((v.downloaded ? 0 : v.size) + (modelReady ? 0 : modelSize))} first.`}
+            >
+              {busySample && state?.voice === v.id ? "■ Stop" : "▶ Preview"}
+            </button>
+          )}
+          {p ? null : v.downloaded ? (
+            deleteButtons(v.id, v.size)
+          ) : (
+            <button className="btn download" disabled={busy} onClick={() => download(v.id, v.size)}>Download</button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <section className="card">
       <h2>
         Voice model <span className="muted small">what reads your text aloud</span>
       </h2>
-      <p className="muted small">
-        The built-in voice runs on this computer. Speak it from the menu's
-        result (<b>🔊 Speak</b>, or press <kbd>S</kbd>) and from the summary
-        window (read the summary or the whole page). The first Speak downloads
-        the model and the voice for its language, or fetch them below.
-        {catalog && <> Runs on <b>{catalog.backend}</b>{catalog.gpu ? ` (${catalog.gpu})` : ""}.</>}
-      </p>
+      {catalog && (
+        <p className="muted small">Runs on <b>{catalog.backend}</b>{catalog.gpu ? ` (${catalog.gpu})` : ""}.</p>
+      )}
 
       <div className="llm-list">
         {models.map((m) => {
           const p = progress && progress.id === m.id ? progress : null;
           const showPct = p && p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0;
           return (
-            <div key={m.id} className="llm-row">
+            <div key={m.id} className={`llm-row ${m.downloaded ? "downloaded" : ""}`}>
               <div className="llm-info">
                 <div>
                   <b>{m.label}</b> <span className="muted small">{formatBytes(m.size)}</span>
-                  {m.downloaded && <span className="llm-badge">downloaded</span>}
-                  {inUse && m.downloaded && <span className="llm-badge muted">in use</span>}
+                  {m.downloaded && <span className="llm-badge downloaded">✓ Downloaded</span>}
+                  {inUse && m.downloaded && <span className="llm-badge">In use</span>}
                 </div>
                 <span className="muted small">{m.note}</span>
                 {p && (
@@ -149,7 +221,7 @@ export default function Voices() {
                 {p ? null : m.downloaded ? (
                   deleteButtons(m.id, m.size)
                 ) : (
-                  <button className="btn" disabled={busy} onClick={() => download(m.id, m.size)}>Download</button>
+                  <button className="btn download" disabled={busy} onClick={() => download(m.id, m.size)}>Download</button>
                 )}
               </div>
             </div>
@@ -157,52 +229,20 @@ export default function Voices() {
         })}
       </div>
 
-      <h3>Voice packs</h3>
-      <p className="muted small">
-        Read and Speak pick a voice of the text's language (guessed, or the translation's) that is on this computer.
-      </p>
-      <div className="llm-list">
-        {voices.map((v) => {
-          const p = progress && progress.id === v.id ? progress : null;
-          const showPct = p && p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0;
-          return (
-            <div key={v.id} className={`llm-row ${inUse && state?.voice === v.id ? "active" : ""}`}>
-              <div className="llm-info">
-                <div>
-                  <b>{v.label}</b> <span className="muted small">{formatBytes(v.size)}</span>
-                  {v.downloaded && <span className="llm-badge">downloaded</span>}
-                  {inUse && state?.voice === v.id && <span className="llm-badge">playing</span>}
-                </div>
-                <span className="muted small">{v.lang}</span>
-                {p && (
-                  <div className="llm-progress">
-                    <div className="llm-bar"><div style={{ width: `${showPct}%` }} /></div>
-                    <span className="muted small">
-                      {`${formatBytes(p.done)} of ${formatBytes(p.total || v.size)}`}
-                    </span>
-                  </div>
-                )}
-              </div>
-              <div className="llm-actions">
-                {!p && (
-                  <button
-                    className="btn"
-                    onClick={() => play(v.id, v.lang ?? "en-us")}
-                    title={v.downloaded && modelReady ? "Hear this voice" : `Hear this voice (downloads ${formatBytes((v.downloaded ? 0 : v.size) + (modelReady ? 0 : modelSize))} first)`}
-                  >
-                    {busySample && state?.voice === v.id ? "■ Stop" : "▶ Play"}
-                  </button>
-                )}
-                {p ? null : v.downloaded ? (
-                  deleteButtons(v.id, v.size)
-                ) : (
-                  <button className="btn" disabled={busy} onClick={() => download(v.id, v.size)}>Download</button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <h3>Voice packs{downloadedCount > 0 && ` · ${downloadedCount} downloaded`}</h3>
+      {groups.map((g) => (
+        <div key={g.language} className="voice-group">
+          <div className="voice-group-title">
+            {g.language}
+            <span className="muted small">
+              {hasDownloaded(g) ? `${g.voices.filter((v) => v.downloaded).length} of ${g.voices.length} downloaded` : `${g.voices.length} to download`}
+            </span>
+          </div>
+          <div className="llm-list">
+            {[...g.voices].sort((a, b) => Number(b.downloaded) - Number(a.downloaded)).map(voiceRow)}
+          </div>
+        </div>
+      ))}
 
       <h3>Phoneme data</h3>
       <p className="muted small">

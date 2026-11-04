@@ -103,6 +103,10 @@ const Session = struct {
     worker_thread: ?std.Thread = null,
     buf_mutex: std.Io.Mutex = .init,
     samples: std.ArrayList(f32) = .empty,
+    /// The audio level meter (under buf_mutex): the loudest part heard and
+    /// how many samples since the last ghostpen://caption-level (~10 Hz).
+    level_peak: f32 = 0,
+    level_samples: usize = 0,
     source: ?[:0]u8 = null,
     model: []u8,
     language: []u8,
@@ -178,16 +182,32 @@ const Session = struct {
     /// Owns the audio stream: opened, read and closed on this thread.
     fn append(s: *Session, part: []const f32) void {
         s.buf_mutex.lockUncancelable(main.io);
-        defer s.buf_mutex.unlock(main.io);
         if (s.rec) |r| r.writeOthers(part);
         if (s.mode == .captions) appendTo(&s.samples, part);
+        const lvl = s.noteLevel(part);
+        s.buf_mutex.unlock(main.io);
+        if (lvl) |l| events.emit(.@"ghostpen://caption-level", l);
     }
 
     fn appendMic(s: *Session, part: []const f32) void {
         s.buf_mutex.lockUncancelable(main.io);
-        defer s.buf_mutex.unlock(main.io);
         if (s.rec) |r| r.writeMe(part);
         if (s.mode == .captions) appendTo(&s.mic_samples, part);
+        const lvl = s.noteLevel(part);
+        s.buf_mutex.unlock(main.io);
+        if (lvl) |l| events.emit(.@"ghostpen://caption-level", l);
+    }
+
+    /// Under buf_mutex: the level to send, once a tenth of a second of audio
+    /// (from either source) came in since the last one.
+    fn noteLevel(s: *Session, part: []const f32) ?f32 {
+        s.level_peak = @max(s.level_peak, models.level(part));
+        s.level_samples += part.len;
+        if (s.level_samples < rate / 10) return null;
+        const l = s.level_peak;
+        s.level_peak = 0;
+        s.level_samples = 0;
+        return l;
     }
 
     fn appendTo(list: *std.ArrayList(f32), part: []const f32) void {

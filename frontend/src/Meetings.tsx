@@ -3,11 +3,17 @@ import { listen } from "./events";
 import { renderMarkdown } from "./markdown";
 import { renderDiagrams } from "./diagrams";
 import { Icon } from "./icons";
+import { singleWindow } from "./mode";
 import MeetingRecorder from "./MeetingRecorder";
+import PageHeader, { ModelPill } from "./PageHeader";
+import { whisperName } from "./WhisperModels";
 import MeetingNotes, { flushMeetingNotes } from "./MeetingNotes";
 import { MeetingChatProgressView, StatsForNerds } from "./MeetingChatDiagnostics";
 import {
   copyText,
+  getStatus,
+  openSettings,
+  type Status,
   meetingsDelete,
   meetingsExport,
   meetingsGet,
@@ -68,6 +74,41 @@ const STATE_LABEL: Record<string, string> = {
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 const SPEAKER_COLORS = 8;
 
+/** One person in the speaker row: the voices the diarizer split off that
+ * carry the same name, shown as one chip. */
+interface SpeakerGroup {
+  key: string;
+  name: string;
+  ids: string[];
+  /** The voice to act on: the one that talks most. */
+  main: string;
+  share: number;
+  known: boolean;
+  hasEmbedding: boolean;
+  color: number;
+}
+
+function groupSpeakers(speakers: MeetingSpeaker[], talk: Record<string, number>): SpeakerGroup[] {
+  const byName = new Map<string, SpeakerGroup>();
+  let next = 0;
+  for (const sp of speakers) {
+    const key = sp.id === "me" ? "me" : sp.name.trim().toLowerCase();
+    let g = byName.get(key);
+    if (!g) {
+      // Colours follow the order people first appear, so they stay put.
+      g = { key, name: sp.name, ids: [], main: sp.id, share: 0, known: false, hasEmbedding: false, color: sp.id === "me" ? 0 : (next++ % (SPEAKER_COLORS - 1)) + 1 };
+      byName.set(key, g);
+    }
+    const t = talk[sp.id] ?? 0;
+    if (g.ids.length === 0 || t > (talk[g.main] ?? 0)) g.main = sp.id;
+    g.ids.push(sp.id);
+    g.share += t;
+    g.known ||= !!sp.voice;
+    g.hasEmbedding ||= !!sp.embedding?.length;
+  }
+  return [...byName.values()];
+}
+
 function clock(seconds: number): string {
   const t = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
   const h = Math.floor(t / 3600);
@@ -78,17 +119,77 @@ function clock(seconds: number): string {
 
 function duration(ms: number): string {
   const m = Math.round(ms / 60000);
-  if (m < 1) return `${Math.max(1, Math.round(ms / 1000))} s`;
+  // Whole seconds rounded down, like the player's clock, so the two agree.
+  if (m < 1) return `${Math.max(1, Math.floor(ms / 1000))} s`;
   if (m < 60) return `${m} min`;
   return `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
 const busyState = (s: string) => s !== "ready" && s !== "error";
 
-/** The speaker's colour slot, stable by their position in the list. */
-function colorOf(speakers: MeetingSpeaker[], id: string): number {
-  const i = speakers.findIndex((s) => s.id === id);
-  return id === "me" ? 0 : ((i < 0 ? 0 : i) % (SPEAKER_COLORS - 1)) + 1;
+// A meeting that was never renamed is titled "Meeting 2026-11-03 09:55". The
+// window shows "Recording · Nov 3, 09:55" for it; the stored title is untouched.
+const DEFAULT_TITLE = /^Meeting (\d{4}-\d{2}-\d{2} \d{2}:\d{2})(?:-\d+)?$/;
+const LOCAL_TIME = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/;
+
+function parseLocal(s: string): Date | null {
+  const m = LOCAL_TIME.exec(s);
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : null;
+}
+
+/** "Nov 3" (with the year when it isn't this one). */
+function shortDate(d: Date): string {
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }) });
+}
+
+const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+/** "Today 09:55", "Yesterday 09:55", "Oct 29, 09:43". */
+function friendlyWhen(local: string): string {
+  const d = parseLocal(local);
+  if (!d) return local;
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (day === today) return `Today ${hhmm(d)}`;
+  if (day === today - 86400000) return `Yesterday ${hhmm(d)}`;
+  return `${shortDate(d)}, ${hhmm(d)}`;
+}
+
+/** The title to show: the default timestamp title becomes "Recording · Nov 3, 09:55". */
+function displayTitle(title: string, startedLocal: string): string {
+  const t = title.trim();
+  const m = DEFAULT_TITLE.exec(t);
+  if (t && !m) return t;
+  const d = parseLocal(m ? m[1] : startedLocal);
+  return d ? `Recording · ${shortDate(d)}, ${hhmm(d)}` : t || "Recording";
+}
+
+const isDefaultTitle = (title: string) => !title.trim() || DEFAULT_TITLE.test(title.trim());
+
+/** "en" → "English"; codes the browser doesn't know stay as they are. */
+function languageName(code: string): string {
+  try {
+    return new Intl.DisplayNames(undefined, { type: "language" }).of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** The headings of a summary, with an id each, for the table of contents. */
+interface TocEntry { id: string; text: string; level: number }
+function summaryWithToc(markdown: string | undefined): { html: string; toc: TocEntry[] } {
+  if (!markdown) return { html: "", toc: [] };
+  const html = renderMarkdown(markdown);
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
+  const toc: TocEntry[] = [];
+  doc.querySelectorAll("h1, h2, h3").forEach((h, i) => {
+    const id = `mt-sum-${i}`;
+    h.id = id;
+    toc.push({ id, text: h.textContent?.trim() ?? "", level: Number(h.tagName[1]) });
+  });
+  return { html: doc.body.firstElementChild?.innerHTML ?? html, toc: toc.filter((t) => t.text) };
 }
 
 /** The index of the line being said at `t` (the last one started, until
@@ -197,6 +298,11 @@ export default function Meetings() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<"transcript" | "final" | "summary" | "notes" | "chat">("transcript");
+  // A meeting opens on its clean text when it has one, else on the transcript,
+  // until the user picks a tab; from then on their choice stays for the session.
+  const tabPicked = useRef(false);
+  const autoTab = useRef<{ id: string; clean: boolean } | null>(null);
+  const pickTab = (t: typeof tab) => { tabPicked.current = true; setTab(t); };
   const [find, setFind] = useState("");
   const [loadingList, setLoadingList] = useState(true);
   const detailRequest = useRef(0);
@@ -218,10 +324,16 @@ export default function Meetings() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState("");
   const [speakerMenu, setSpeakerMenu] = useState<string | null>(null);
+  const [forgetAsk, setForgetAsk] = useState<string | null>(null);
+  // The open "⋯" menu of one person in the Speakers panel, and which of its two views.
+  const [rowMenu, setRowMenu] = useState<{ key: string; view: "main" | "merge" } | null>(null);
+  const [activeToc, setActiveToc] = useState<string | null>(null);
+  const summaryRef = useRef<HTMLDivElement>(null);
   const [lineMenu, setLineMenu] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [menuOpen, setMenuOpen] = useState<"export" | "rerun" | null>(null);
-  const [voicesOpen, setVoicesOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState<"export" | "rerun" | "more" | null>(null);
+  // The profile and model that answer the chat (the active AI profile).
+  const [chatStatus, setChatStatus] = useState<Status | null>(null);
   // Questions about the meeting: the box, the answer it replaces (Edit), the ones in flight.
   const [askDraft, setAskDraft] = useState("");
   const [askReplace, setAskReplace] = useState<MeetingNote | null>(null);
@@ -246,9 +358,11 @@ export default function Meetings() {
   const anyMenu = menuOpen !== null || speakerMenu !== null || lineMenu !== null || ctxMenu !== null;
   const closeMenus = () => {
     setSpeakerMenu(null);
+    setRowMenu(null);
     setLineMenu(null);
     setMenuOpen(null);
     setCtxMenu(null);
+    setConfirmDelete(false);
   };
   const menuEntry = useRef(false);
   useEffect(() => {
@@ -414,6 +528,12 @@ export default function Meetings() {
 
   useEffect(() => { chatAtBottom.current = true; }, [selected, tab]);
 
+  // The chat's empty state names the model that answers.
+  useEffect(() => {
+    if (tab !== "chat") return;
+    getStatus().then(setChatStatus).catch(() => {});
+  }, [tab]);
+
   // Mermaid fences (a summary or an answer may have them) render once their
   // document is final: while an answer still streams the nodes change every
   // chunk, which would redraw the whole diagram per token.
@@ -494,6 +614,7 @@ export default function Meetings() {
   };
 
   const forgetVoice = async (name: string) => {
+    setForgetAsk(null);
     try {
       await meetingsForgetVoice(name);
       refreshVoices();
@@ -546,6 +667,60 @@ export default function Meetings() {
     for (const k of Object.keys(out)) out[k] = total > 0 ? out[k] / total : 0;
     return out;
   }, [meeting]);
+
+  const speakerGroups = useMemo(() => (meeting ? groupSpeakers(meeting.speakers, talk) : []), [meeting, talk]);
+  const groupColor = (id: string) => speakerGroups.find((g) => g.ids.includes(id))?.color ?? 0;
+  const byShare = useMemo(() => [...speakerGroups].sort((a, b) => b.share - a.share), [speakerGroups]);
+  const summaryDoc = useMemo(() => summaryWithToc(meeting?.summary), [meeting?.summary]);
+
+  // Pick the opening tab once per meeting; if the clean text only arrives later
+  // (proofreading finishes), move to it unless the user is playing the audio.
+  useEffect(() => {
+    if (!detail || tabPicked.current) return;
+    const clean = detail.meeting.final.length > 0;
+    const prev = autoTab.current;
+    const sameMeeting = prev?.id === detail.id;
+    if (sameMeeting && (prev.clean || !clean)) return;
+    autoTab.current = { id: detail.id, clean };
+    if (sameMeeting && playing) return;
+    setTab(clean ? "final" : "transcript");
+  }, [detail]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { if (speakerMenu !== "panel") { setRowMenu(null); setForgetAsk(null); } }, [speakerMenu]);
+
+  // "On this page": the section being read is the one whose heading most
+  // recently passed the top of the summary's scroll area. The first section is
+  // active at the very top and the last one at the very bottom (a short last
+  // section may never reach the top).
+  useEffect(() => {
+    const root = summaryRef.current;
+    if (tab !== "summary" || !root || summaryDoc.toc.length < 2) return;
+    const heads = summaryDoc.toc.flatMap((t) => { const el = document.getElementById(t.id); return el ? [el] : []; });
+    if (!heads.length) return;
+    const LINE = 24; // px below the container's top edge
+    const update = () => {
+      const scrollable = root.scrollHeight - root.clientHeight > 2;
+      const atTop = root.scrollTop <= 1;
+      const atEnd = scrollable && root.scrollTop + root.clientHeight >= root.scrollHeight - 2;
+      let at = 0;
+      if (atEnd) at = heads.length - 1;
+      else if (!atTop) {
+        const top = root.getBoundingClientRect().top;
+        heads.forEach((h, i) => { if (h.getBoundingClientRect().top - top <= LINE) at = i; });
+      }
+      setActiveToc(heads[at].id);
+    };
+    update();
+    root.addEventListener("scroll", update, { passive: true });
+    let io: IntersectionObserver | undefined;
+    if (typeof IntersectionObserver !== "undefined") {
+      // The top margin puts the observed edge on the same line as `update`, so
+      // a heading crossing it (ratio 1 <-> partial) re-runs the check.
+      io = new IntersectionObserver(update, { root, rootMargin: `-${LINE}px 0px 0px 0px`, threshold: [0, 1] });
+      heads.forEach((h) => io!.observe(h));
+    }
+    return () => { root.removeEventListener("scroll", update); io?.disconnect(); };
+  }, [tab, summaryDoc, detail?.id]);
 
   // Follow the playing line, unless the user scrolled in the last few seconds.
   useEffect(() => {
@@ -645,6 +820,7 @@ export default function Meetings() {
       else if (e.key.toLowerCase() === "l") seek(el.currentTime + 10);
       else if (e.key === "Escape") {
         setSpeakerMenu(null);
+        setRowMenu(null);
         setLineMenu(null);
         setMenuOpen(null);
       }
@@ -655,24 +831,37 @@ export default function Meetings() {
 
   // ---- speakers ----
 
-  const renameSpeaker = (id: string, name: string) => {
+  // A chip stands for every voice with its name: renaming renames them all.
+  const renameSpeaker = (group: SpeakerGroup, name: string) => {
     if (!meeting) return;
     const n = name.trim();
     setRenaming(null);
-    if (!n || n === meeting.speakers.find((s) => s.id === id)?.name) return;
-    save({ speakers: meeting.speakers.map((s) => (s.id === id ? { ...s, name: n } : s)) });
+    if (!n || n === group.name) return;
+    save({ speakers: meeting.speakers.map((s) => (group.ids.includes(s.id) ? { ...s, name: n } : s)) });
   };
 
-  const mergeSpeaker = (from: string, into: string) => {
-    if (!meeting || from === into) return;
+  /** Fold the voices `from` into the voice `into` (lines and all). */
+  const mergeVoices = (from: string[], into: string) => {
+    if (!meeting) return;
+    const gone = from.filter((id) => id !== into);
+    if (!gone.length) return;
     setSpeakerMenu(null);
-    const name = (id: string) => meeting.speakers.find((s) => s.id === id)?.name ?? id;
     save({
-      speakers: meeting.speakers.filter((s) => s.id !== from),
-      segments: meeting.segments.map((s) => (s.speaker === from ? { ...s, speaker: into } : s)),
-      final: meeting.final.map((s) => (s.speaker === from ? { ...s, speaker: into } : s)),
+      speakers: meeting.speakers.filter((s) => !gone.includes(s.id)),
+      segments: meeting.segments.map((s) => (gone.includes(s.speaker) ? { ...s, speaker: into } : s)),
+      final: meeting.final.map((s) => (gone.includes(s.speaker) ? { ...s, speaker: into } : s)),
     });
-    flash(`${name(from)} merged into ${name(into)}`);
+  };
+
+  const mergeSpeaker = (from: SpeakerGroup, into: SpeakerGroup) => {
+    if (from.key === into.key) return;
+    mergeVoices(from.ids, into.main);
+    flash(`${from.name} merged into ${into.name}`);
+  };
+
+  const combineVoices = (group: SpeakerGroup) => {
+    mergeVoices(group.ids, group.main);
+    flash(`${group.ids.length} voices of ${group.name} combined`);
   };
 
   /** Give one line (of the open tab) to `speaker` ("" = a new speaker). */
@@ -801,19 +990,41 @@ export default function Meetings() {
     };
   }, []);
 
+  // The Meetings section of Settings: a page of the app window in single-window
+  // mode; else the Settings window (it opens on its first section).
+  const openMeetingSettings = () => {
+    if (singleWindow) window.location.hash = "/settings/meetings";
+    else openSettings().catch((e) => setError(String(e)));
+  };
+
   // ---- render ----
 
   const live = detail ? progress[detail.id] : undefined;
   const liveState = live && meeting && live.state !== meeting.state && busyState(live.state) ? live : undefined;
   const state = liveState?.state ?? meeting?.state;
+  // Nothing was said (or transcription failed): no speakers, find or full player to show.
+  const noSpeech = !!meeting && !!state && !busyState(state) && meeting.segments.length === 0;
+  // A silent recording has nothing for the other tabs: it shows only the recovery panel.
+  const view = noSpeech ? "transcript" : tab;
+
+  const wideHeader = useWideHeader();
 
   return (
     <div className={`meetings ${opened ? "opened" : "browsing"}`} onClick={closeMenus}>
       {/* Phones: the dimmed backdrop behind a menu shown as a bottom sheet. */}
       {anyMenu && <div className="mt-sheet-scrim" onClick={(e) => { e.stopPropagation(); closeMenus(); }} />}
+      <PageHeader
+        className="mt-page-head"
+        title="Meetings"
+        subtitle="Record a meeting, then read, search, summarize or ask about it."
+      >
+        {/* Wide windows: Record sits in the header; narrow ones hide the
+            header, so it heads the main column instead (one recorder at a time). */}
+        {wideHeader && <MeetingRecorder onRecorded={recordingSelected} />}
+      </PageHeader>
       <aside className="mt-side">
         <div className="mt-side-head">
-          <h2>Conversations</h2>
+          <h2>Saved meetings</h2>
           <button className="mt-icon-btn" aria-label="Open the meetings folder" title="Open the meetings folder" onClick={() => meetingsOpenFolder().catch((e) => setError(String(e)))}>
             <Icon name="folder" />
           </button>
@@ -832,7 +1043,7 @@ export default function Meetings() {
             <div className="mt-empty">
               {query ? "No meeting matches." : (
                 <>
-                  Your saved conversations will appear here. Record a meeting to begin.
+                  Saved meetings appear here. Choose Record meeting to start one.
                 </>
               )}
             </div>
@@ -855,9 +1066,9 @@ export default function Meetings() {
               >
                 <span className="mt-item-avatar" aria-hidden="true"><Icon name="mic" /></span>
                 <span className="mt-item-text">
-                <span className="mt-item-title">{m.title || "Meeting"}</span>
+                <span className="mt-item-title" title={displayTitle(m.title, m.startedLocal)}>{displayTitle(m.title, m.startedLocal)}</span>
                 <span className="mt-item-meta">
-                  {m.startedLocal} · {st === "recording" ? "In progress" : duration(m.durationMs)}
+                  {isDefaultTitle(m.title) ? "" : `${friendlyWhen(m.startedLocal)} · `}{st === "recording" ? "In progress" : duration(m.durationMs)}
                   {st !== "ready" && (
                     <span className={`mt-badge ${st}`}>
                       {STATE_LABEL[st] ?? st}
@@ -872,25 +1083,9 @@ export default function Meetings() {
           })}
         </div>
         <div className="mt-side-foot" onClick={(e) => e.stopPropagation()}>
-          <button className="mt-voices-btn" onClick={() => setVoicesOpen(!voicesOpen)}>
-            <span className="mt-voices-glyph" aria-hidden="true">🗣</span> Known voices{known.length ? ` (${known.length})` : ""} {voicesOpen ? "▴" : "▾"}
+          <button className="mt-voices-btn" onClick={openMeetingSettings} title="Where meetings are saved, speaker detection, proofreading and summaries">
+            <span className="mt-voices-glyph" aria-hidden="true"><Icon name="settings" /></span> Meeting settings
           </button>
-          {voicesOpen && (
-            <div className="mt-voices">
-              {known.length === 0 && (
-                <div className="mt-voices-empty">
-                  None yet. Rename a speaker, then pick <b>Remember this voice</b> in their menu: later meetings name them.
-                </div>
-              )}
-              {known.map((v) => (
-                <div key={`${v.family}/${v.name}`} className="mt-voice">
-                  <span>{v.name}</span>
-                  <span className="mt-voice-n">{v.meetings} meeting{v.meetings === 1 ? "" : "s"}</span>
-                  <button title={`Forget ${v.name}'s voice`} onClick={() => forgetVoice(v.name)}>✕</button>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </aside>
 
@@ -910,7 +1105,7 @@ export default function Meetings() {
             <div className="mt-menu-sep" />
             {ctxMenu.confirm ? (
               <button className="danger" onClick={() => { const id = ctxMenu.id; setCtxMenu(null); removeId(id); }}>
-                Delete “{m?.title || "Meeting"}” for good
+                Delete “{m ? displayTitle(m.title, m.startedLocal) : "Meeting"}” for good
               </button>
             ) : (
               <button className="danger" disabled={busy} title={busy ? "Wait until it's saved" : undefined} onClick={() => setCtxMenu({ ...ctxMenu, confirm: true })}>
@@ -922,8 +1117,8 @@ export default function Meetings() {
       })()}
 
       <main className="mt-main">
-        <MeetingRecorder onRecorded={recordingSelected} />
-        <button className="mt-back" onClick={() => window.history.back()}>‹ Conversations</button>
+        {!wideHeader && <MeetingRecorder onRecorded={recordingSelected} />}
+        <button className="mt-back" onClick={() => window.history.back()}>‹ Meetings</button>
         {error && (
           <div className="mt-error" role="alert">
             {error}<button aria-label="Dismiss error" onClick={() => setError(null)}>×</button>
@@ -969,18 +1164,23 @@ export default function Meetings() {
                       setEditingTitle(true);
                     }}
                   >
-                    {meeting.title || "Meeting"}
+                    {displayTitle(meeting.title, meeting.startedLocal)}
                   </h2>
                 )}
                 <div className="mt-meta">
-                  {meeting.startedLocal} · {state === "recording" ? "Recording in progress" : duration(meeting.durationMs)}
-                  {meeting.language && meeting.language !== "auto" ? ` · ${meeting.language}` : ""}
-                  {meeting.model ? ` · whisper ${meeting.model}` : ""}
+                  {[
+                    // The default title already carries the date and time.
+                    isDefaultTitle(meeting.title) ? "" : friendlyWhen(meeting.startedLocal),
+                    state === "recording" ? "Recording in progress" : duration(meeting.durationMs),
+                    state === "ready" && !meeting.segments.length ? "No speech found" : "",
+                    meeting.language && meeting.language !== "auto" ? languageName(meeting.language) : "",
+                    meeting.model ? whisperName(meeting.model).replace(/, \d-bit/, "") : "",
+                  ].filter(Boolean).join(" · ")}
                 </div>
               </div>
               <div className="mt-actions" onClick={(e) => e.stopPropagation()}>
-                <div className="mt-dropdown">
-                  <button className="mt-btn" disabled={!meeting.segments.length} onClick={() => setMenuOpen(menuOpen === "export" ? null : "export")}>
+                {!noSpeech && <div className="mt-dropdown">
+                  <button className="mt-btn" disabled={!meeting.segments.length} title={meeting.segments.length ? "Copy the summary or the text" : "Nothing to copy yet"} onClick={() => setMenuOpen(menuOpen === "export" ? null : "export")}>
                     Copy ▾
                   </button>
                   {menuOpen === "export" && (
@@ -992,13 +1192,15 @@ export default function Meetings() {
                       <button onClick={() => doExport("srt", "Subtitles")}>Subtitles (SRT)</button>
                     </div>
                   )}
-                </div>
-                <div className="mt-dropdown">
-                  <button className="mt-btn" disabled={!editable} onClick={() => setMenuOpen(menuOpen === "rerun" ? null : "rerun")}>
-                    Redo ▾
+                </div>}
+                {/* A silent recording's only step is "Transcribe again", in its own panel. */}
+                {!noSpeech && <div className="mt-dropdown">
+                  <button className="mt-btn" disabled={!editable} title={editable ? "Run a step of the processing again" : "Wait until the meeting is processed"} onClick={() => setMenuOpen(menuOpen === "rerun" ? null : "rerun")}>
+                    Re-process ▾
                   </button>
                   {menuOpen === "rerun" && (
                     <div className="mt-menu">
+                      <div className="mt-menu-label">Run again</div>
                       <button onClick={() => rerun("summary")}>{meeting.summary ? "Summarize again" : "Summarize"}</button>
                       <button onClick={() => rerun("proofread")}>Proofread again</button>
                       <button onClick={() => rerun("speakers")}>Find the speakers again</button>
@@ -1007,20 +1209,31 @@ export default function Meetings() {
                       </button>
                     </div>
                   )}
-                </div>
-                <button className="mt-btn" onClick={() => meetingsOpenFolder(detail.id).catch((e) => setError(String(e)))} title={detail.folder}>
-                  Folder
-                </button>
-                {confirmDelete ? (
-                  <>
-                    <button className="mt-btn danger solid" onClick={remove}>Delete for good</button>
-                    <button className="mt-btn" onClick={() => setConfirmDelete(false)}>Keep</button>
-                  </>
-                ) : (
-                  <button className="mt-btn danger" disabled={detail.busy} onClick={() => setConfirmDelete(true)}>
-                    Delete
+                </div>}
+                <div className="mt-dropdown">
+                  <button className="mt-btn mt-more" aria-label="More actions" aria-haspopup="menu" title="More actions" onClick={() => { setConfirmDelete(false); setMenuOpen(menuOpen === "more" ? null : "more"); }}>
+                    ⋯
                   </button>
-                )}
+                  {menuOpen === "more" && (
+                    <div className="mt-menu" role="menu">
+                      <button role="menuitem" onClick={() => { setMenuOpen(null); meetingsOpenFolder(detail.id).catch((e) => setError(String(e))); }} title={detail.folder}>
+                        Open the meeting's folder
+                      </button>
+                      <div className="mt-menu-sep" />
+                      {confirmDelete ? (
+                        <>
+                          <div className="mt-menu-label">This can't be undone</div>
+                          <button role="menuitem" className="danger solid" onClick={remove}>Delete for good</button>
+                          <button role="menuitem" onClick={() => setConfirmDelete(false)}>Keep it</button>
+                        </>
+                      ) : (
+                        <button role="menuitem" className="danger" disabled={detail.busy} title={detail.busy ? "Wait until it's saved" : undefined} onClick={() => setConfirmDelete(true)}>
+                          Delete meeting…
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </header>
 
@@ -1037,86 +1250,197 @@ export default function Meetings() {
             )}
             {meeting.message && !busyState(meeting.state) && <div className={`mt-note ${meeting.state}`}>{meeting.message}</div>}
 
-            {meeting.speakers.length > 0 && (
-              <div className="mt-speakers" onClick={(e) => e.stopPropagation()}>
-                {meeting.speakers.map((sp) => (
-                  <div key={sp.id} className={`mt-speaker c${colorOf(meeting.speakers, sp.id)}`}>
-                    {renaming === sp.id ? (
-                      <input
-                        className="mt-speaker-input"
-                        autoFocus
-                        value={nameDraft}
-                        onChange={(e) => setNameDraft(e.target.value)}
-                        onBlur={() => renameSpeaker(sp.id, nameDraft)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                          if (e.key === "Escape") setRenaming(null);
-                        }}
-                      />
-                    ) : (
-                      <button
-                        className="mt-speaker-name"
-                        disabled={!editable}
-                        title="Rename (every line follows)"
-                        onClick={() => {
-                          setNameDraft(sp.name);
-                          setRenaming(sp.id);
-                        }}
-                      >
-                        <span className="mt-dot" />
-                        {sp.name}
-                        {sp.voice && <span className="mt-known" title={`Known voice: ${sp.voice}`}>✓</span>}
-                        {talk[sp.id] !== undefined && <span className="mt-share">{Math.round(talk[sp.id] * 100)}%</span>}
-                      </button>
-                    )}
-                    {editable && (
-                      <button className="mt-speaker-more" title="More…" onClick={() => setSpeakerMenu(speakerMenu === sp.id ? null : sp.id)}>
-                        ▾
-                      </button>
-                    )}
-                    {speakerMenu === sp.id && (
-                      <div className="mt-menu">
-                        <button
-                          disabled={!sp.embedding?.length}
-                          title={sp.embedding?.length ? "Later meetings label this voice with the name" : "This speaker's voice wasn't analysed (Redo → Find the speakers again)"}
-                          onClick={() => rememberVoice(sp)}
-                        >
-                          Remember this voice as “{sp.name}”
-                        </button>
-                        {meeting.speakers.length > 1 && <div className="mt-menu-label">Merge {sp.name} into</div>}
-                        {meeting.speakers
-                          .filter((o) => o.id !== sp.id)
-                          .map((o) => (
-                            <button key={o.id} onClick={() => mergeSpeaker(sp.id, o.id)}>
-                              {o.name}
-                            </button>
+            {!noSpeech && (() => {
+              const pct = (g: SpeakerGroup) => (g.share > 0 && g.share < 0.01 ? "under 1%" : `${Math.round(g.share * 100)}%`);
+              const tip = (g: SpeakerGroup) =>
+                `${g.name}: ${pct(g)} of the talking${g.ids.length > 1 ? ` (${g.ids.length} voices found, shown as one)` : ""}`;
+              const open = speakerMenu === "panel";
+              const talkers = byShare.filter((g) => g.share > 0);
+              // A badge marks the exception: "New voice" only means something
+              // when other voices in this meeting were recognised.
+              const others = byShare.filter((g) => g.key !== "me");
+              const anyKnown = others.some((g) => g.known);
+              const allKnown = others.length > 0 && others.every((g) => g.known);
+              const rememberOf = (g: SpeakerGroup) => {
+                const sp = meeting.speakers.find((x) => x.id === g.main && x.embedding?.length) ?? meeting.speakers.find((x) => g.ids.includes(x.id) && x.embedding?.length);
+                if (sp) { setRowMenu(null); rememberVoice({ ...sp, name: g.name }); }
+              };
+              return (
+                <div className="mt-speakers-wrap" onClick={(e) => e.stopPropagation()}>
+                  <div className="mt-speakers-row">
+                    <button
+                      className={`mt-speakers-btn ${open ? "open" : ""}`}
+                      aria-expanded={open}
+                      aria-haspopup="true"
+                      title="Rename, merge and remember the voices in this meeting"
+                      onClick={() => setSpeakerMenu(open ? null : "panel")}
+                    >
+                      <span className="mt-dots" aria-hidden="true">
+                        {byShare.slice(0, 5).map((g) => <span key={g.key} className={`mt-dot c${g.color}`} />)}
+                      </span>
+                      Speakers{byShare.length ? ` (${byShare.length})` : ""} <span aria-hidden="true">{open ? "▴" : "▾"}</span>
+                    </button>
+                    {byShare.length > 1 && talkers.length > 0 && (
+                      <div className="mt-share">
+                        <div className="mt-share-top">
+                          <span className="mt-share-caption">Share of speech</span>
+                          <div className="mt-share-bar" role="img" aria-label={`Share of speech: ${talkers.map((g) => `${g.name} ${pct(g)}`).join(", ")}`}>
+                            {talkers.map((g) => (
+                              <span key={g.key} className={`c${g.color}`} style={{ flexGrow: g.share }} title={tip(g)} />
+                            ))}
+                          </div>
+                        </div>
+                        <div className="mt-share-legend" aria-hidden="true">
+                          {talkers.slice(0, 5).map((g) => (
+                            <span key={g.key} className={`mt-share-key c${g.color}`} title={tip(g)}>
+                              <span className="mt-dot" />{g.name} {pct(g)}
+                            </span>
                           ))}
+                          {talkers.length > 5 && <span className="mt-share-key" title={talkers.slice(5).map((g) => `${g.name} ${pct(g)}`).join(", ")}>+{talkers.length - 5} more</span>}
+                        </div>
                       </div>
                     )}
                   </div>
-                ))}
-              </div>
-            )}
+                  {open && (
+                    <div className="mt-menu mt-spk-panel" role="group" aria-label="Speakers">
+                      {byShare.length === 0 && <div className="mt-voices-empty">No speakers were found in this meeting.</div>}
+                      {byShare.map((g) => {
+                        const menu = rowMenu?.key === g.key ? rowMenu : null;
+                        return (
+                          <div key={g.key} className={`mt-spk-row c${g.color}`}>
+                            <div className="mt-spk-main">
+                              <span className="mt-dot" aria-hidden="true" />
+                              {renaming === g.key ? (
+                                <input
+                                  className="mt-speaker-input"
+                                  autoFocus
+                                  aria-label={`New name for ${g.name}`}
+                                  value={nameDraft}
+                                  onFocus={(e) => e.currentTarget.select()}
+                                  onChange={(e) => setNameDraft(e.target.value)}
+                                  onBlur={() => renameSpeaker(g, nameDraft)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setRenaming(null);
+                                  }}
+                                />
+                              ) : editable ? (
+                                <button
+                                  className="mt-spk-name editable"
+                                  title={`Click to rename · ${tip(g)}`}
+                                  onClick={() => {
+                                    setNameDraft(g.name);
+                                    setRenaming(g.key);
+                                    setRowMenu(null);
+                                  }}
+                                >
+                                  {g.name}<span className="mt-spk-edit" aria-hidden="true">✎</span>
+                                </button>
+                              ) : (
+                                <span className="mt-spk-name" title={tip(g)}>{g.name}</span>
+                              )}
+                              {!g.known && anyKnown && g.key !== "me" && <span className="mt-new" title="Not matched to a voice you saved. Use ⋯ → Remember this voice to name them in later meetings.">New voice</span>}
+                              <span className="mt-spk-share" title={tip(g)}>
+                                {g.ids.length > 1 && <span className="mt-spk-voices" title="GhostPen found several separate voices for this person">{g.ids.length} voices</span>}
+                              </span>
+                              <button
+                                className={`mt-spk-more ${menu ? "open" : ""}`}
+                                aria-label={`More actions for ${g.name}`}
+                                aria-haspopup="menu"
+                                aria-expanded={!!menu}
+                                title="More actions"
+                                onClick={() => setRowMenu(menu ? null : { key: g.key, view: "main" })}
+                              >
+                                ⋯
+                              </button>
+                            </div>
+                            {menu && menu.view === "main" && (
+                              <div className="mt-spk-menu" role="menu" aria-label={`Actions for ${g.name}`}>
+                                {g.ids.length > 1 && (
+                                  <button role="menuitem" disabled={!editable} onClick={() => { setRowMenu(null); combineVoices(g); }} title={`Put the lines of all ${g.ids.length} voices under one speaker`}>
+                                    Treat as one person ({g.ids.length} voices)
+                                  </button>
+                                )}
+                                <button
+                                  role="menuitem"
+                                  disabled={!editable || !g.hasEmbedding}
+                                  title="Later meetings label this voice with this name"
+                                  onClick={() => rememberOf(g)}
+                                >
+                                  Remember this voice
+                                </button>
+                                {!g.hasEmbedding && <div className="mt-spk-hint">Not analysed yet: use Re-process → Find the speakers again.</div>}
+                                {byShare.length > 1 && (
+                                  <button role="menuitem" disabled={!editable} onClick={() => setRowMenu({ key: g.key, view: "merge" })}>
+                                    Merge into another speaker…
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                            {menu && menu.view === "merge" && (
+                              <div className="mt-spk-menu" role="menu" aria-label={`Merge ${g.name} into`}>
+                                <div className="mt-menu-label">Give {g.name}'s lines to</div>
+                                {byShare.filter((o) => o.key !== g.key).map((o) => (
+                                  <button key={o.key} role="menuitem" className={`mt-spk-target c${o.color}`} onClick={() => { setRowMenu(null); mergeSpeaker(g, o); }}>
+                                    <span className="mt-dot" aria-hidden="true" />{o.name}
+                                  </button>
+                                ))}
+                                <button role="menuitem" className="mt-spk-back" onClick={() => setRowMenu({ key: g.key, view: "main" })}>‹ Back</button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {allKnown && <div className="mt-spk-all">All voices recognized</div>}
+                      <div className="mt-menu-sep" />
+                      <div className="mt-menu-label">Known voices{known.length ? ` (${known.length})` : ""}</div>
+                      <div className="mt-voices">
+                        {known.length === 0 && (
+                          <div className="mt-voices-empty">
+                            None yet. Use ⋯ → <b>Remember this voice</b> on a named speaker: later meetings name them.
+                          </div>
+                        )}
+                        {known.map((v) => (
+                          <span key={`${v.family}/${v.name}`} className={`mt-voice ${forgetAsk === v.name ? "asking" : ""}`} title={`${v.name}: heard in ${v.meetings} meeting${v.meetings === 1 ? "" : "s"}`}>
+                            <span className="mt-voice-name">{v.name}</span>
+                            <span className="mt-voice-n">{v.meetings} meeting{v.meetings === 1 ? "" : "s"}</span>
+                            {forgetAsk === v.name ? (
+                              <span className="mt-voice-ask" role="group" aria-label={`Forget ${v.name}'s voice?`}>
+                                <span>Forget {v.name}?</span>
+                                <button className="danger" autoFocus onClick={() => forgetVoice(v.name)}>Forget</button>
+                                <button onClick={() => setForgetAsk(null)}>Keep</button>
+                              </span>
+                            ) : (
+                              <button title={`Forget ${v.name}'s voice`} aria-label={`Forget ${v.name}'s voice`} onClick={() => setForgetAsk(v.name)}>✕</button>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="mt-toolbar">
-              <div className="mt-tabs" role="tablist">
-                <button role="tab" aria-selected={tab === "transcript"} className={tab === "transcript" ? "active" : ""} onClick={() => setTab("transcript")}>
+              {!noSpeech && <div className="mt-tabs" role="tablist">
+                <button role="tab" aria-selected={view === "transcript"} className={view === "transcript" ? "active" : ""} onClick={() => pickTab("transcript")}>
                   Transcript
                 </button>
-                <button role="tab" aria-selected={tab === "final"} className={tab === "final" ? "active" : ""} onClick={() => setTab("final")}>
+                <button role="tab" aria-selected={view === "final"} className={view === "final" ? "active" : ""} onClick={() => pickTab("final")}>
                   Clean text
                 </button>
-                <button role="tab" aria-selected={tab === "summary"} className={tab === "summary" ? "active" : ""} onClick={() => setTab("summary")}>
+                <button role="tab" aria-selected={view === "summary"} className={view === "summary" ? "active" : ""} onClick={() => pickTab("summary")}>
                   Summary
                 </button>
-                <button role="tab" aria-selected={tab === "notes"} className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>
+                <button role="tab" aria-selected={view === "notes"} className={view === "notes" ? "active" : ""} onClick={() => pickTab("notes")}>
                   Notes
                 </button>
-                <button role="tab" aria-selected={tab === "chat"} className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
+                <button role="tab" aria-selected={view === "chat"} className={view === "chat" ? "active" : ""} onClick={() => pickTab("chat")}>
                   Chat
                 </button>
-              </div>
-              {(tab === "transcript" || tab === "final") && <div className="mt-find">
+              </div>}
+              {!noSpeech && (view === "transcript" || view === "final") && <div className="mt-find">
                 <input
                   id="mt-find"
                   type="search"
@@ -1133,33 +1457,49 @@ export default function Meetings() {
                 />
                 {find.trim() && <span className="mt-find-count">{matches.length}</span>}
               </div>}
-              {(tab === "transcript" || tab === "final") && (
+              {!noSpeech && (view === "transcript" || view === "final") && (
                 <button className="mt-follow mt-follow-switch" role="switch" aria-checked={follow} aria-label="Follow playback"
                   title="Scroll to the line being played" onClick={() => setFollow(!follow)}>
                   <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
                   <span>Follow</span>
                 </button>
               )}
-              {tab === "summary" && meeting.summary && (
+              {view === "summary" && meeting.summary && (
                 <div className="mt-summary-actions">
                   <ReadButton id="summary" text={meeting.summary} className="mt-btn" />
-                  <button className="mt-btn" onClick={() => doExport("summary", "Summary")}>Copy</button>
                   <button className="mt-btn" disabled={!editable} onClick={() => rerun("summary")}>Summarize again</button>
                 </div>
               )}
             </div>
 
-            <MeetingNotes key={detail.folder} id={detail.id} folder={detail.folder} initial={detail.personalNotes ?? ""} hidden={tab !== "notes"} />
+            <MeetingNotes key={detail.folder} id={detail.id} folder={detail.folder} initial={detail.personalNotes ?? ""} hidden={view !== "notes"} />
 
-            {tab === "summary" && (
-              <div className="mt-summary">
+            {view === "summary" && (
+              <div className="mt-summary" ref={summaryRef}>
                 {state === "summarizing" ? (
                   <div className="mt-empty">
                     Summarizing{liveState && liveState.progress > 0 ? ` (${Math.round(liveState.progress * 100)}%)` : ""}… A long meeting is read in parts, then
                     summarized as a whole. You can close this window meanwhile.
                   </div>
                 ) : meeting.summary ? (
-                  <article className="mt-summary-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(meeting.summary) }} />
+                  <div className={`mt-summary-layout ${summaryDoc.toc.length > 1 ? "has-toc" : ""}`}>
+                    <article className="mt-summary-body" dangerouslySetInnerHTML={{ __html: summaryDoc.html }} />
+                    {summaryDoc.toc.length > 1 && (
+                      <nav className="mt-toc" aria-label="Summary sections">
+                        <div className="mt-toc-title">On this page</div>
+                        {summaryDoc.toc.map((t) => (
+                          <button
+                            key={t.id}
+                            className={`mt-toc-item l${Math.min(t.level, 3)} ${activeToc === t.id ? "active" : ""}`}
+                            aria-current={activeToc === t.id ? "location" : undefined}
+                            onClick={() => { setActiveToc(t.id); document.getElementById(t.id)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+                          >
+                            {t.text}
+                          </button>
+                        ))}
+                      </nav>
+                    )}
+                  </div>
                 ) : state === "asking" ? null : (
                   <div className="mt-empty">
                     <p>An overview, key points, decisions, action items and open questions, written by your AI profile.</p>
@@ -1175,11 +1515,33 @@ export default function Meetings() {
               </div>
             )}
 
-            {tab === "chat" && (
+            {view === "chat" && (
               <div className="mt-chat">
                 <section className="mt-chat-shell" aria-label="Meeting chat">
                   <div className="mt-chat-history" role="log" aria-label="Conversation history" ref={chatHistoryRef}
                     onScroll={(e) => { const el = e.currentTarget; chatAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
+                  {!meeting.notes?.length && !pendingAnswers.length && (
+                    <div className="mt-chat-empty">
+                      <span className="mt-empty-symbol"><Icon name="chat" /></span>
+                      <h3>Ask about this meeting</h3>
+                      <p>
+                        {meeting.segments.length
+                          ? "Answers come from this meeting's transcript and your Notes tab. Questions and answers are saved with the meeting."
+                          : "This meeting has no transcript yet, so answers can only use your Notes tab."}
+                      </p>
+                      <div className="mt-chat-model">
+                        <span>Answered by</span>
+                        {chatStatus?.active_profile ? <ModelPill status={chatStatus} /> : <span>your active AI profile</span>}
+                      </div>
+                      <div className="mt-ask-suggest">
+                        {MEETING_QUESTIONS.map((q) => (
+                          <button key={q} className="mt-chip" disabled={meeting.state === "recording"} onClick={() => { setAskDraft(q); document.querySelector<HTMLTextAreaElement>(".mt-ask-input")?.focus(); }}>
+                            {q}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {(meeting.notes ?? []).map((n) => (
                     <article key={n.id} className="mt-note">
                       <div className="mt-note-head">
@@ -1225,7 +1587,7 @@ export default function Meetings() {
                       maxLength={4000}
                       rows={2}
                       value={askDraft}
-                      placeholder="Ask a question about this meeting…"
+                      placeholder={meeting.state === "recording" ? "Available once the recording is saved" : "Ask a question about this meeting…"}
                       disabled={meeting.state === "recording"}
                       onChange={(e) => setAskDraft(e.target.value)}
                       onKeyDown={(e) => {
@@ -1239,20 +1601,11 @@ export default function Meetings() {
                         }
                       }}
                     />
-                    <button className="mt-btn mt-ask-go" type="submit" disabled={!askDraft.trim() || meeting.state === "recording"}>
+                    <button className="mt-btn mt-ask-go" type="submit" disabled={!askDraft.trim() || meeting.state === "recording"} title={askDraft.trim() ? "Send (Enter)" : "Type a question first"}>
                       {askReplace ? "Ask again" : "Send"}
                     </button>
                   </form>
                   {askReplace && <div className="mt-hint">Replaces the answer to “{askReplace.prompt}”. Esc to cancel.</div>}
-                  {!askDraft && !askReplace && !meeting.notes?.length && !pendingAnswers.length && (
-                    <div className="mt-ask-suggest">
-                      {MEETING_QUESTIONS.map((q) => (
-                        <button key={q} className="mt-chip" onClick={() => setAskDraft(q)}>
-                          {q}
-                        </button>
-                      ))}
-                    </div>
-                  )}
 
                   </div>
                 </section>
@@ -1260,7 +1613,7 @@ export default function Meetings() {
             )}
 
             <div
-              hidden={tab !== "transcript" && tab !== "final"}
+              hidden={view !== "transcript" && view !== "final"}
               className="mt-lines"
               ref={linesRef}
               onWheel={() => (userScrolledAt.current = Date.now())}
@@ -1268,7 +1621,7 @@ export default function Meetings() {
             >
               {lines.length === 0 && (
                 <div className="mt-empty">
-                  {tab === "final" ? (
+                  {view === "final" ? (
                     meeting.segments.length ? (
                       <>
                         No clean text yet.{" "}
@@ -1279,7 +1632,24 @@ export default function Meetings() {
                         )}
                       </>
                     ) : "The clean text comes after the transcript."
-                  ) : busyState(meeting.state) ? "The transcript shows here once the meeting is transcribed." : "Nothing was said (or the audio was silent)."}
+                  ) : busyState(meeting.state) ? "The transcript shows here once the meeting is transcribed." : (
+                    <div className="mt-silent" onClick={(e) => e.stopPropagation()}>
+                      <strong>No speech was found in this recording.</strong>
+                      <p>The audio may have been silent, or the wrong input was recorded. You can:</p>
+                      <div className="mt-silent-actions">
+                        <button className="mt-btn" disabled={!editable || !detail.audio} onClick={() => rerun("transcribe")}>Transcribe again</button>
+                        <button className="mt-btn" onClick={openMeetingSettings}>Check meeting settings</button>
+                        <button className="mt-btn danger" disabled={!editable} onClick={() => setConfirmDelete(true)}>Delete this recording</button>
+                      </div>
+                      {confirmDelete && (
+                        <div className="mt-silent-confirm">
+                          Delete this recording for good?
+                          <button className="mt-btn danger solid" onClick={remove}>Delete for good</button>
+                          <button className="mt-btn" onClick={() => setConfirmDelete(false)}>Keep</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {lines.map((l, i) => {
@@ -1299,7 +1669,7 @@ export default function Meetings() {
                     <div className="mt-who" onClick={(e) => e.stopPropagation()}>
                       {newTurn && (
                         <button
-                          className={`mt-who-name c${colorOf(meeting.speakers, l.speaker)}`}
+                          className={`mt-who-name c${groupColor(l.speaker)}`}
                           disabled={!editable}
                           title="Change the speaker of this line"
                           onClick={() => setLineMenu(lineMenu === i ? null : i)}
@@ -1315,9 +1685,9 @@ export default function Meetings() {
                       {lineMenu === i && (
                         <div className="mt-menu">
                           <div className="mt-menu-label">This line is from</div>
-                          {meeting.speakers.map((s) => (
-                            <button key={s.id} className={s.id === l.speaker ? "current" : ""} onClick={() => reassign(i, s.id)}>
-                              {s.name}
+                          {byShare.map((g) => (
+                            <button key={g.key} className={g.ids.includes(l.speaker) ? "current" : ""} onClick={() => reassign(i, g.ids.includes(l.speaker) ? l.speaker : g.main)}>
+                              {g.name}
                             </button>
                           ))}
                           <button onClick={() => reassign(i, "")}>+ A new speaker</button>
@@ -1364,7 +1734,7 @@ export default function Meetings() {
               })}
             </div>
 
-            <footer className="mt-player">
+            {!(noSpeech && !detail.audio) && <footer className={`mt-player ${noSpeech ? "silent" : ""}`}>
               {detail.audio ? (
                 <audio
                   ref={audioRef}
@@ -1382,13 +1752,14 @@ export default function Meetings() {
               <button className="mt-play" disabled={!detail.audio} onClick={toggle} title="Play/pause (Space)">
                 {playing ? "❚❚" : "▶"}
               </button>
-              <button className="mt-skip" disabled={!detail.audio} onClick={() => seek((audioRef.current?.currentTime ?? time) - 10)} title="Back 10 s (J)">
-                ↺10
+              <button className="mt-skip" disabled={!detail.audio} onClick={() => seek((audioRef.current?.currentTime ?? time) - 10)} title="Back 10 s (J)" aria-label="Back 10 seconds">
+                −10 s
               </button>
-              <button className="mt-skip" disabled={!detail.audio} onClick={() => seek((audioRef.current?.currentTime ?? time) + 10)} title="Forward 10 s (L)">
-                10↻
+              <button className="mt-skip" disabled={!detail.audio} onClick={() => seek((audioRef.current?.currentTime ?? time) + 10)} title="Forward 10 s (L)" aria-label="Forward 10 seconds">
+                +10 s
               </button>
               <span className="mt-clock">{clock(time)}</span>
+              {noSpeech ? <span className="mt-clock">/ {clock(meeting.durationMs / 1000 || length)}</span> : <>
               <input
                 className="mt-seek"
                 type="range"
@@ -1401,19 +1772,34 @@ export default function Meetings() {
                 aria-label="Position"
               />
               <span className="mt-clock">{clock(length || meeting.durationMs / 1000)}</span>
-              <select className="mt-speed" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title="Speed">
+              <select className="mt-speed" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title="Playback speed" aria-label="Playback speed">
                 {SPEEDS.map((s) => (
                   <option key={s} value={s}>
                     {s}×
                   </option>
                 ))}
               </select>
+              </>}
               {audioError && <span className="mt-audio-error">{audioError}</span>}
               {!detail.audio && meeting.state === "recording" && <span className="mt-audio-error">Recording…</span>}
-            </footer>
+            </footer>}
           </>
         )}
       </main>
     </div>
   );
+}
+
+/** Whether the page header shows (it hides at 720 px and below, styles.css). */
+function useWideHeader(): boolean {
+  const query = "(min-width: 721px)";
+  const [wide, setWide] = useState(() => (typeof window.matchMedia === "function" ? window.matchMedia(query).matches : true));
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(query);
+    const on = () => setWide(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return wide;
 }

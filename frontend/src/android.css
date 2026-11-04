@@ -109,6 +109,7 @@
   border-radius: var(--md-radius-field);
   font-size: 16px; /* also keeps the WebView from zooming in on focus */
 }
+.platform-android select { padding-right: 40px; max-width: none; background-position: calc(100% - 20px) 50%, calc(100% - 15px) 50%; }
 .platform-android textarea,
 .platform-android .pg-area { min-height: 120px; }
 .platform-android input[type="checkbox"],
@@ -246,6 +247,13 @@
 .platform-android .shell.narrow .mt-menu button { min-height: 56px; padding: 0 24px; border-radius: 0; font-size: 16px; }
 .platform-android .shell.narrow .mt-menu-label { padding: 12px 24px 4px; font-size: 14px; text-transform: none; letter-spacing: 0.1px; font-weight: 500; }
 .platform-android .shell.narrow .mt-menu-sep { margin: 8px 0; }
+/* The Speakers sheet: compact rows keep a 44 px touch target, not the 56 px of a plain menu item. */
+.platform-android .shell.narrow .mt-spk-panel { padding: 28px 8px calc(16px + env(safe-area-inset-bottom)); }
+.platform-android .shell.narrow .mt-spk-panel .mt-spk-name { min-height: 44px; padding: 0 8px; margin-left: -8px; border-radius: 8px; font-size: 16px; }
+.platform-android .shell.narrow .mt-spk-panel .mt-spk-more { min-height: 44px; width: 44px; padding: 0; border-radius: 22px; }
+.platform-android .shell.narrow .mt-spk-panel .mt-spk-menu button { min-height: 48px; padding: 0 14px; border-radius: 8px; font-size: 15px; }
+.platform-android .shell.narrow .mt-spk-panel .mt-voice button { min-height: 32px; width: 32px; padding: 0; border-radius: 50%; font-size: 12px; }
+.platform-android .shell.narrow .mt-spk-panel .mt-voice { padding-left: 14px; font-size: 14px; }
 
 /* The meeting's tabs on a phone: a scrolling tab row, and Find under it at full width. */
 .platform-android .shell.narrow .mt-tabs { overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; }
@@ -266,18 +274,17 @@
 .platform-android .shell.narrow .captions.page .cap-to-settings { display: none; }
 .platform-android .cap-history { font-size: 16px; }
 
-/* Dictation on a phone: a big round mic, the app's own surfaces. */
+/* Dictation on a phone: a roomy island with a big ghost, and the app's own surfaces. */
 .platform-android .shell.narrow .dictation.page { padding: 16px; }
-.platform-android .dictation.page .dict-pill { padding: 16px; gap: 12px; background: var(--bg-soft); border-radius: var(--md-radius-card); }
-.platform-android .dictation.page .dict-top { flex-wrap: wrap; gap: 12px; }
-.platform-android .dictation.page .dict-mic { width: 56px; height: 56px; border-radius: 50%; background: var(--accent); color: #fff; }
-.platform-android .dictation.page .dict-mic svg { width: 24px; height: 24px; }
-.platform-android .dictation.page .dict-mic.live { background: var(--danger); }
-.platform-android .dictation.page .dict-wave { flex: 1 1 100%; order: 9; min-height: 32px; background: transparent; }
-.platform-android .dictation.page .dict-text { background: var(--bg); border-radius: var(--md-radius-field); padding: 16px; min-height: 160px; font-size: 16px; }
+.platform-android .dictation.page .dict-island { min-height: 60px; padding: 8px 10px; gap: 10px; }
+.platform-android .dictation.page .dict-ghost { width: 46px; height: 46px; }
+.platform-android .dictation.page .dict-ghost .ghost { width: 36px; height: 36px; }
+.platform-android .dictation.page .dict-wave { min-height: 32px; }
+.platform-android .dictation.page .dict-live { background: var(--bg); border-radius: var(--md-radius-field); padding: 16px; min-height: 160px; font-size: 16px; }
+.platform-android .dictation.page .dict-live::before { display: none; }
 .platform-android .dictation.page .dict-hint { font-size: 14px; color: var(--muted); }
-.platform-android .dictation.page .dict-lang { min-height: 40px; border-radius: 20px; padding: 0 12px; }
-.platform-android .dictation.page .dict-btn { width: 40px; height: 40px; border-radius: 50%; }
+.platform-android .dictation.page .dict-chip { height: 40px; border-radius: 20px; padding: 0 14px; }
+.platform-android .dictation.page .dict-btn { width: 44px; height: 44px; }
 .platform-android .shell.narrow .mt-toolbar { flex-wrap: wrap; row-gap: 4px; }
 
 /* Summary on a phone: its actions only once there's a summary, in one row of

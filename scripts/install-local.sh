@@ -73,7 +73,13 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # Stop the running copy (the AppImage runtime and the app inside it).
 if pgrep -x ghostpen >/dev/null; then
   echo "Stopping the running GhostPen"
-  pkill -x ghostpen || true
+  # The app inside the AppImage first, then the runtime: a runtime stopped at
+  # the same time unmounts the image under the app, which then dies of SIGBUS
+  # while it shuts down (a "process crashed" report on every reinstall).
+  inner='^/tmp/\.mount_[^/]*/usr/bin/ghostpen'
+  pkill -f "$inner" || true
+  for _ in $(seq 50); do pgrep -f "$inner" >/dev/null || break; sleep 0.1; done
+  pkill -x ghostpen 2>/dev/null || true
   for _ in $(seq 50); do pgrep -x ghostpen >/dev/null || break; sleep 0.1; done
   pkill -9 -x ghostpen 2>/dev/null || true
 fi
