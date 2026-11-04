@@ -80,10 +80,8 @@ const Loaded = struct {
 extern fn ggml_set_abort_callback(callback: ?*const fn ([*:0]const u8) callconv(.c) void) ?*const fn ([*:0]const u8) callconv(.c) void;
 
 fn exitOnAbort(message: [*:0]const u8) callconv(.c) void {
-    var buf: [2304]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "ggml: {s}\n", .{std.mem.span(message)}) catch std.mem.span(message);
-    _ = std.c.write(2, line.ptr, line.len);
-    std.c._exit(70);
+    std.debug.print("ggml: {s}\n", .{std.mem.span(message)});
+    std.process.exit(70);
 }
 
 pub fn main(process_io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {

@@ -1360,7 +1360,8 @@ fn cpuProc(comptime T: type, name: [*:0]const u8) ?T {
     const dev = c.ggml_backend_dev_by_type(c.GGML_BACKEND_DEVICE_TYPE_CPU) orelse return null;
     const reg = c.ggml_backend_dev_backend_reg(dev) orelse return null;
     const f = c.ggml_backend_reg_get_proc_address(reg, name) orelse return null;
-    return @ptrCast(f);
+    // Function pointers are 4-aligned on aarch64 (macOS); `*anyopaque` is 1.
+    return @ptrCast(@alignCast(f));
 }
 
 /// The size of the file at `path` (0: none, or unreadable).
