@@ -402,6 +402,38 @@ export default function Menu() {
     setCursor((c) => Math.min(c, Math.max(0, menuItems.length - 1)));
   }, [menuItems.length]);
 
+  // Close (the × or Esc on the menu): stop what's running, then dismiss.
+  const closeMenu = () => {
+    if (view.kind === "reading") {
+      setReadStarting(false);
+      ttsStop().catch(() => {});
+      setVoiceState({ phase: "idle", message: "Stopped", progress: 0, voice: "" });
+    } else if (view.kind === "loading") {
+      cancelAi().catch(() => {});
+    }
+    setView({ kind: "menu" });
+    dismissMenu();
+  };
+
+  // Closed from outside (the window manager's close, e.g. Super+Q): the same
+  // clean-up as Esc. After a paste the backend already restored the clipboard,
+  // so the dismissal changes nothing then.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  useEffect(() => {
+    if (singleWindow) return;
+    const onHide = () => {
+      if (document.visibilityState !== "hidden") return;
+      const v = viewRef.current;
+      if (v.kind === "loading") cancelAi().catch(() => {});
+      if (v.kind === "reading") ttsStop().catch(() => {});
+      setView({ kind: "menu" });
+      dismissMenu();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, []);
+
   // ---- keyboard control --------------------------------------------------------------
   // Escape dismisses reading/the menu; other sub-views return to the menu first.
   useEffect(() => {
@@ -642,6 +674,11 @@ export default function Menu() {
           >
             <Icon name="settings" />
           </button>
+          {!singleWindow && (
+            <button className="icon-btn" title="Close (Esc)" aria-label="Close" onClick={() => closeMenu()}>
+              <Icon name="close" />
+            </button>
+          )}
         </span>
       </header>
 

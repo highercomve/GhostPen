@@ -1647,6 +1647,13 @@ fn setup() !void {
     handleArgs(launch_args);
 }
 
+/// models.free_gpu: the idle built-in model makes room for speech.
+fn freeGpuForSpeech(proc_io: std.Io) bool {
+    if (!local_llm.loaded() or local_llm.busyNow()) return false;
+    local_llm.unload(proc_io);
+    return true;
+}
+
 fn hasArg(args: []const []const u8, flag: []const u8) bool {
     for (args) |a| if (std.mem.eql(u8, a, flag)) return true;
     return false;
@@ -1724,6 +1731,7 @@ pub fn main(init: std.process.Init) !u8 {
     const tts_ready = tts.setUp(io, gpa, init.arena.allocator(), init.environ_map);
     self_exe = std.process.executablePathAlloc(io, init.arena.allocator()) catch null;
     @import("models.zig").helper_exe = self_exe;
+    @import("models.zig").free_gpu = &freeGpuForSpeech;
     ai.local_resolver = &resolveLocal;
     if (oriel.system_ai.available) ai.system_generate = &systemGenerate;
     // Whisper models other apps (GhostReel) downloaded are reused.
@@ -1835,9 +1843,13 @@ const windows_config: App.WindowOptions = .{
     .height = 720,
     .resizable = false,
     .decorations = false,
-    .always_on_top = true,
-    .skip_taskbar = true,
-    .placement = .{},
+    // Linux: a normal window (fixed size, so tiling compositors float it),
+    // not a layer surface: those three options make it one on Wayland, and
+    // the compositor's close (Hyprland's Super+Q) then skipped the menu and
+    // closed the window behind it. It takes the focus when shown either way.
+    .always_on_top = builtin.os.tag != .linux,
+    .skip_taskbar = builtin.os.tag != .linux,
+    .placement = if (builtin.os.tag == .linux) null else .{},
     // The page paints only its rounded panel (.menu): the corners show
     // what's behind the window.
     .transparent = true,

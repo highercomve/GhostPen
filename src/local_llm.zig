@@ -650,6 +650,11 @@ pub fn loaded() bool {
     return chat_slot.is_loaded.load(.acquire);
 }
 
+/// The chat or embedding model is answering a request right now.
+pub fn busyNow() bool {
+    return chat_slot.busy.load(.acquire) or embed_slot.busy.load(.acquire);
+}
+
 /// The embedding model is loaded right now.
 fn embeddingsLoaded() bool {
     return embed_slot.is_loaded.load(.acquire);

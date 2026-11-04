@@ -265,6 +265,12 @@ const Reply = struct {
     } = &.{},
 };
 
+/// Set by main.zig: unload the built-in model when it's loaded but idle, to
+/// make room on the GPU; true when it did. Speech is interactive (dictation
+/// re-transcribes every second), so a full GPU frees the idle chat model,
+/// which reloads on its next request, before speech falls back to the CPU.
+pub var free_gpu: ?*const fn (std.Io) bool = null;
+
 /// Send `req` (followed by `samples`) and wait for its answer, starting the
 /// runner if needed. When the GPU can't hold the model (the load fails, or
 /// ggml aborts the runner on a GPU allocation) it's retried once on the CPU.
@@ -275,6 +281,14 @@ fn request(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, req: Re
     return requestOnce(io, gpa, arena, req, samples) catch |err| switch (err) {
         error.ModelLoadFailed, error.GpuFailed => {
             if (cpu_only) return error.TranscribeFailed;
+            if (free_gpu) |free| if (free(io)) {
+                log.info("not enough GPU memory for the whisper model: unloaded the idle built-in model, retrying on the GPU", .{});
+                stop(io);
+                if (requestOnce(io, gpa, arena, req, samples)) |r| return r else |e| switch (e) {
+                    error.ModelLoadFailed, error.GpuFailed => {},
+                    else => return e,
+                }
+            };
             log.warn("not enough GPU memory for the whisper model; running it on the CPU", .{});
             stop(io);
             cpu_only = true;
