@@ -181,6 +181,17 @@ from the menu starts right away. Also from a terminal:
 ghostpen --say "Good morning" --lang es --voice ef_dora
 ```
 
+For scripts and agents, `ghostpen say` speaks through the running app (its
+voice is already loaded, and sayings from several agents take turns), or
+loads the voice itself when GhostPen isn't running. The text comes from the
+arguments or stdin; `ghostpen say --help` lists the options. The running app
+answers `POST /speak` (`{"input": "…", "lang"?, "voice"?}`) on its model
+service, and replies once it has finished speaking.
+
+```sh
+echo "The build is done" | ghostpen say
+```
+
 The voice is Oriel's `oriel.tts`: synthesis runs on the GPU where GhostPen
 was built with one (`-Dvulkan`, `-Dcuda`), else on
 the CPU, and the first sound comes after the first sentence. The first use

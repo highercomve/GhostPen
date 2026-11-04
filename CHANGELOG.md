@@ -2,7 +2,14 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-04
+
+### Highlights
+
+- A redesigned desktop app, from five rounds of review by a design council
+  of three models (6–6.5/10 at the start, 9.5–9.8/10 at the end): one visual
+  system in every window, Settings that saves as you go, a Playground with a
+  word diff, a reorganised Meetings window, and a new dictation overlay.
 
 ### Fixed
 
@@ -18,8 +25,65 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
   skip arrays, and its per-layer KV heads are one. The estimate (now only a
   fallback) reads them from the file.
 
+- Dictation crawled when the built-in model held the GPU: whisper ran out
+  of GPU memory on its first transcription and moved to the CPU for the
+  session, where live dictation re-transcribes every second. Now the idle
+  built-in model is unloaded and speech stays on the GPU (the chat model
+  reloads on its next request); the CPU is the fallback only while the
+  built-in model is answering.
+- The model service described the first built-in profile's model rather
+  than the active one: with that model deleted, `/props` and `/slots`
+  failed and clients (pi) fell back to an 8k context and cut every answer
+  short. It now follows the active profile, else the first one whose model
+  is present.
+- Proofread, Professional, Casual, Concise and Expand answer in the text's
+  own language (small models rewrote Spanish into English); a freeform
+  instruction keeps it too unless it asks for another.
+- On Linux the action menu is a normal (floating) window, not a layer
+  surface, so the compositor's close (Hyprland's Super+Q) closes the menu
+  instead of the window behind it. It also has a close button.
+- A dictation overlay that opened after its session started stayed on
+  "idle" while listening: the backend now says "listening" once the
+  microphone is open.
+- The whisper runner exits instead of aborting when the GPU is full (the
+  CPU retry is unchanged): no crash report each time.
+- Settings re-registered all three hotkeys on every save; only a changed
+  hotkey is registered again now.
+
 ### Changed
 
+- **One look across the app.** Summary and Meetings take the app's palette
+  and font (a serif only for reading text); every window shares a header
+  with the active profile and model as a pill; checkboxes, switches,
+  selects and disabled controls share one style.
+- **Settings** saves every change by itself (no Save button, no banners
+  explaining two save rules). Sections are grouped (AI, Speech, App);
+  Speech is split into Speech models, Captions, Meetings and Dictation, and
+  Window layout moved to a new General section. Expert controls (context,
+  memory offload, sampling) sit behind Advanced; the recommended model is
+  first; models found in other apps show their source app and size;
+  Connections offers "This computer only" or "Other devices on your network"
+  with a warning; deleting a model, voice, profile or custom action asks
+  first.
+- **Playground**: input and result side by side, a freeform instruction
+  bar, the action that produced the result named, and **Show changes**, a
+  word diff of the result against the input.
+- **Summary**: a practical empty state (what you can paste, what you get), a
+  Paste button, and reading controls only once there is a summary.
+- **Meetings**: speakers with the same name merged into one Speakers panel
+  (rename, treat as one person, remember a voice, merge, known voices);
+  a share-of-speech bar with a legend; meetings open on the clean text; an
+  "On this page" outline beside the summary; a recovery panel for recordings
+  with no speech; Delete in a ⋯ menu with confirmation.
+- **Dictation** is a "Ghost island": a dark capsule (cancel, a ghost that
+  follows your voice, waveform, timer, language, Proofread, finish) with the
+  live transcript above it and the keys below.
+- **Captions**: an audio level meter (`ghostpen://caption-level`), Record
+  meeting and Translate as switches, and a toolbar that shrinks to the
+  status and Stop when the pointer leaves.
+- **Action menu**: says where the text came from (selection or clipboard),
+  shows the number key of each action, groups Read and Translate apart, and
+  centres image mode.
 - A context too long for the whole model to fit on the GPU is shortened
   (down to 32k tokens) rather than moving layers to the CPU, which slows
   every token: Qwen3.5 9B with 7.4 GiB free runs at a 64k context at
@@ -36,6 +100,14 @@ This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
 ### Added
 
+- `ghostpen say [TEXT]`: speak aloud with the built-in voice, for scripts and
+  agents. It goes through the running app (POST /speak on the model service,
+  one saying after another), or speaks itself when GhostPen isn't running.
+- Shortcuts to open Meetings and Summarize a link (Settings → Actions,
+  unbound by default; also `ghostpen --meetings` and `ghostpen --summary`).
+- A Getting started card in the Playground and in Settings → AI profile.
+- `scripts/install-local.sh` stops the app before the AppImage runtime, so a
+  reinstall no longer crashes the running copy (SIGBUS).
 - `ghostpen --llm-helper --measure` and `scripts/estimator-check.sh`: the
   GPU memory every local model takes at 64k, 128k and 256k by llama.cpp's
   accounting, beside the estimate, and what the planner does with the free
