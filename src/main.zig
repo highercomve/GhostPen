@@ -1607,7 +1607,9 @@ fn setup() !void {
         .{ .label = "playground", .title = "GhostPen Playground", .url = "index.html#/playground", .width = 640, .height = 620, .visible = false, .hide_on_close = true },
         .{ .label = "meetings", .title = "GhostPen Meetings", .url = "index.html#/meetings", .width = 1040, .height = 760, .visible = false, .hide_on_close = true },
         .{ .label = "summary", .title = "GhostPen Summary", .url = "index.html#/summary", .width = 780, .height = 850, .visible = false, .hide_on_close = true },
-        .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 560, .height = 170, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
+        // Dictation needs the keyboard immediately for Enter/Esc. On Wayland,
+        // a non-focusing layer surface only accepts keys after pointer entry.
+        .{ .label = "dictation", .title = "GhostPen Dictation", .url = "index.html#/dictation", .width = 560, .height = 170, .resizable = false, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = true },
         .{ .label = "captions", .title = "GhostPen Captions", .url = "index.html#/captions", .width = 900, .height = 170, .decorations = false, .visible = false, .transparent = true, .always_on_top = true, .skip_taskbar = true, .placement = .{ .anchor = .bottom, .margin = 64 }, .hide_on_close = true, .focus_on_show = false },
     };
     for (windows) |w| {
