@@ -209,12 +209,20 @@ jobs:
           Add-Content $env:GITHUB_ENV "VULKAN_SDK=$root"
       - name: Package (setup.exe)
         run: oriel package -Dvulkan
-      # The raw executable is the in-app updater's Windows payload.
+      # The raw executable is the in-app updater's Windows payload. Oriel's
+      # package-executable step checks it (no dev agent) and strips it like
+      # the setup.exe copy; the flags are the ones `oriel package` adds
+      # (ReleaseSafe, portable x86-64-v3 CPU), so it is the same binary.
+      # Published files come only from zig-out/package, never zig-out/bin.
       - name: Updater payload
         shell: pwsh
         run: |
-          oriel build -Dvulkan
-          Copy-Item zig-out/bin/ghostpen.exe zig-out/package/ghostpen-x86_64-windows.exe
+          zig build package-executable -Doptimize=ReleaseSafe -Dcpu=x86_64_v3 -Dvulkan
+          if ($LASTEXITCODE -ne 0) { throw "zig build package-executable failed ($LASTEXITCODE)" }
+          $exe = @(Get-ChildItem zig-out/package -Filter 'ghostpen-*-x86_64-windows.exe')
+          if ($exe.Count -ne 1) { throw "expected one updater payload in zig-out/package, found $($exe.Count)" }
+          # The name sign-update and latest.json use (no version).
+          Move-Item $exe[0].FullName zig-out/package/ghostpen-x86_64-windows.exe
       - uses: actions/upload-artifact@v4
         with:
           name: dist-windows

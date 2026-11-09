@@ -2,6 +2,21 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.5.1] - 2026-11-09
+
+### Fixed
+
+- Dictation takes the keyboard as soon as it opens, so Enter and Esc work
+  without first moving the pointer over it (on Wayland a layer surface that
+  doesn't take focus only got keys after the pointer entered it).
+
+### Changed
+
+- Built on Oriel 0.20.15. Settings are read through the store's new owned
+  copies (`Store.get` with an allocator), and the release packages and the
+  Windows updater payload come from Oriel's packaging steps, which refuse a
+  binary that contains the development agent.
+
 ## [0.5.0] - 2026-11-04
 
 ### Highlights
