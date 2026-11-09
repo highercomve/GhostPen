@@ -86,8 +86,14 @@ fn readStore(io: std.Io, arena: std.mem.Allocator, gpa: std.mem.Allocator) Loade
     };
     store.auto_save = false; // reading never writes
     defer store.deinit();
-    if (store.get("settings")) |v| {
-        return .{ .settings = parse(arena, v) catch |err| {
+    const got = store.get(gpa, "settings") catch |err| {
+        std.log.err("settings: can't read the store ({s}); using defaults", .{@errorName(err)});
+        return .unreadable;
+    };
+    if (got) |owned| {
+        // parse copies everything it keeps into `arena` (alloc_always).
+        defer owned.deinit();
+        return .{ .settings = parse(arena, owned.value) catch |err| {
             std.log.err("settings: settings.json doesn't match the schema ({s}); using defaults until you save (the file is left as is)", .{@errorName(err)});
             return .unreadable;
         } };
@@ -125,8 +131,9 @@ fn importTauri(arena: std.mem.Allocator, gpa: std.mem.Allocator) ?Settings {
     const old = oriel.store.Store.openPath(gpa, tauri_path) catch return null;
     old.auto_save = false; // never write the other app's file
     defer old.deinit();
-    const v = old.get("settings") orelse return null;
-    const imported = parse(arena, v) catch return null;
+    const owned = (old.get(gpa, "settings") catch return null) orelse return null;
+    defer owned.deinit();
+    const imported = parse(arena, owned.value) catch return null;
     std.log.info("settings: imported from {s}", .{tauri_path});
     return imported;
 }
