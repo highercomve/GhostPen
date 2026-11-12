@@ -10,6 +10,10 @@
 //! worker so `tts_speak` returns at once (the UI follows "tts:state").
 //! One reading at a time: a newer `speak` or `stop` cancels the running one.
 //! The CLI (`--say`) uses `say` directly.
+//!
+//! `synthesize` makes the same speech without playing it (samples in memory,
+//! for `POST /v1/audio/speech` and `ghostpen say --out`); it never cuts a
+//! reading short.
 
 const std = @import("std");
 const oriel = @import("oriel");
@@ -42,6 +46,16 @@ pub fn espeakLanguageFor(target: []const u8) ?[]const u8 {
 pub fn languageFor(text: []const u8, lang: []const u8) []const u8 {
     if (lang.len == 0 or std.mem.eql(u8, lang, "auto")) return tts.guessLanguage(text);
     return espeakLanguageFor(lang) orelse lang;
+}
+
+/// Whether `id` is a voice of the catalog ("ef_dora"; not "auto" or "alloy").
+pub fn knownVoice(id: []const u8) bool {
+    return tts.findVoice(id) != null;
+}
+
+/// Whether `id` is a model of the catalog ("kokoro-82m-q8_0").
+pub fn knownModel(id: []const u8) bool {
+    return tts.findModel(id) != null;
 }
 
 /// The voice for `lang`: one of that language already on the device, else
@@ -226,6 +240,7 @@ pub fn speakMessage(err: anyerror) []const u8 {
         error.ModelLoadFailed => "Could not load the voice model: delete it in Settings → Voices and download it again.",
         error.VoiceFailed => "Could not load the voice: delete it in Settings → Voices and download it again.",
         error.LanguageFailed => "The voice can't read this language.",
+        error.NothingToSay => "There is nothing to read in this text.",
         else => "Could not generate or play the voice. Try reading again.",
     };
 }
@@ -240,6 +255,8 @@ pub const Request = struct {
     voice: []const u8 = "",
     /// A model id, or "" for the default (any on the device).
     model: []const u8 = "",
+    /// 1 = normal, 2 = twice as fast (0.25-4).
+    speed: f32 = 1.0,
 };
 
 const Plan = struct {
@@ -281,8 +298,14 @@ fn plan(req: Request) Plan {
         .voice = "system",
         .model_id = "",
         .voice_id = "",
-        .options = .{ .engine = .system, .lang = lang },
+        .options = .{ .engine = .system, .lang = lang, .speed = req.speed },
     };
+    return kokoroPlan(req, lang);
+}
+
+/// The Kokoro plan for `req` read in `lang`: the voice, and what must be
+/// downloaded first.
+fn kokoroPlan(req: Request, lang: []const u8) Plan {
     const voice = if (req.voice.len > 0) req.voice else voiceFor(lang);
     var model_id: []const u8 = "";
     if (req.model.len > 0) {
@@ -297,7 +320,7 @@ fn plan(req: Request) Plan {
         .voice = voice,
         .model_id = model_id,
         .voice_id = if (present(voice)) "" else voice,
-        .options = .{ .model = if (req.model.len > 0) req.model else "auto", .voice = voice, .lang = lang },
+        .options = .{ .model = if (req.model.len > 0) req.model else "auto", .voice = voice, .lang = lang, .speed = req.speed },
     };
 }
 
@@ -326,6 +349,7 @@ pub fn speak(req: Request) void {
         .lang = a.dupe(u8, req.lang) catch return dropOutOfMemory(job),
         .voice = a.dupe(u8, req.voice) catch return dropOutOfMemory(job),
         .model = a.dupe(u8, req.model) catch return dropOutOfMemory(job),
+        .speed = req.speed,
     };
     const t = std.Thread.spawn(.{}, runJob, .{job}) catch |err| {
         log.err("cannot start the reading: {s}", .{@errorName(err)});
@@ -464,6 +488,45 @@ pub fn sayQueued(gpa: std.mem.Allocator, req: Request) !tts.Result {
     const r = try tts.speak(gpa, req.text, p.options);
     logResult(r);
     return r;
+}
+
+/// Where `synthesize` reports what it does: on stderr for a command line, in
+/// the log for the server.
+pub const Progress = enum { print, log };
+
+fn note(progress: Progress, comptime fmt: []const u8, args: anytype) void {
+    switch (progress) {
+        .print => std.debug.print(fmt ++ "\n", args),
+        .log => log.info(fmt, args),
+    }
+}
+
+/// The speech for `req` as samples (`ghostpen say --out`, `POST
+/// /v1/audio/speech`), downloading the model and the voice first like `say`.
+/// Always Kokoro: the device's own voices cannot hand over samples. It
+/// plays nothing and never cuts a reading short: it takes its turn behind
+/// the one in progress (and a reading started meanwhile waits for it).
+/// Caller frees with `Audio.deinit(gpa)`.
+pub fn synthesize(gpa: std.mem.Allocator, req: Request, progress: Progress) !tts.Audio {
+    if (!ready) return error.NoDataDir;
+    const p = kokoroPlan(req, languageFor(req.text, req.lang));
+    for ([_][]const u8{ p.model_id, p.voice_id }) |id| {
+        if (id.len == 0) continue;
+        note(progress, "Downloading {s}…", .{label(id)});
+        fetch(id, null) catch |err| {
+            note(progress, "{s}", .{downloadMessage(err)});
+            return err;
+        };
+    }
+    note(progress, "GhostPen's voice: {s} ({s})…", .{ p.voice, p.lang });
+    const audio = tts.synthesize(gpa, req.text, p.options) catch |err| {
+        note(progress, "The voice failed: {s}", .{speakMessage(err)});
+        return err;
+    };
+    log.info("synthesized {s} ({s}) on {s}: load {d} ms, {d} chunks, {d:.1} s of audio in {d} ms", .{
+        audio.voice, audio.lang, audio.backend, audio.load_ms, audio.chunks, audio.audio_s, audio.synth_ms,
+    });
+    return audio;
 }
 
 // ---- the catalog for Settings → Voices -----------------------------------------------------

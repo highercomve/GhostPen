@@ -192,6 +192,31 @@ service, and replies once it has finished speaking.
 echo "The build is done" | ghostpen say
 ```
 
+To get the voice as audio instead of hearing it (a bot sending voice
+notes, a script making a recording), `ghostpen say --out nota.wav "Hola"`
+writes a WAV file (16-bit mono, 24 kHz) and plays nothing; `--out -` writes
+it to stdout. The running app makes it, as for `say`; without one, or with
+`--local`, this process loads the voice and synthesizes it. The same voice
+is the OpenAI speech API on the model service:
+
+```sh
+curl http://127.0.0.1:8771/v1/audio/speech -H 'Content-Type: application/json' \
+  -d '{"input": "Hola, esto es una prueba", "voice": "ef_dora"}' -o nota.wav
+```
+
+`POST /v1/audio/speech` takes `{"input", "voice"?, "response_format"?,
+"speed"?, "model"?}` and a `"lang"?` of GhostPen's own (an espeak language
+like `es`, or `French`; guessed from the text when absent). `voice` is a
+GhostPen voice id (`af_heart`, `ef_dora`...); `auto`, OpenAI's names
+(`alloy`...) and anything else mean the language's voice. `response_format`
+is `wav` (the default, `audio/wav`) or `pcm` (raw 16-bit little-endian mono
+at 24 kHz, `audio/pcm`); `mp3`, `opus`, `aac` and `flac` get a 400, so a
+caller that needs them converts the WAV (`ffmpeg -i nota.wav -c:a libopus
+nota.ogg` makes a Telegram voice note). `speed` is 0.25 to 4 and `input` up
+to 50 000 bytes. Requests take their turn behind what is being read aloud
+and are refused from browsers and foreign Host names like the other
+endpoints.
+
 The voice is Oriel's `oriel.tts`: synthesis runs on the GPU where GhostPen
 was built with one (`-Dvulkan`, `-Dcuda`), else on
 the CPU, and the first sound comes after the first sentence. The first use

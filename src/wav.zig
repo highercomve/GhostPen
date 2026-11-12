@@ -33,6 +33,30 @@ fn toI16(x: f32) i16 {
     return @intFromFloat(@round(v * 32767.0));
 }
 
+/// `samples` (mono, -1 to 1) as raw little-endian 16-bit PCM, the bytes of a
+/// WAV's data chunk. Caller frees.
+pub fn encodePcm16(a: std.mem.Allocator, samples: []const f32) ![]u8 {
+    const out = try a.alloc(u8, samples.len * 2);
+    fillPcm16(out, samples);
+    return out;
+}
+
+/// A whole mono 16-bit PCM WAV file in memory: the header and `samples`.
+/// Caller frees. `error.TooLong` past what the header's 32-bit size holds.
+pub fn encodeMono(a: std.mem.Allocator, samples: []const f32, rate: u32) ![]u8 {
+    if (samples.len > (std.math.maxInt(u32) - 36) / 2) return error.TooLong;
+    const out = try a.alloc(u8, header_len + samples.len * 2);
+    const h = header(1, rate, samples.len);
+    @memcpy(out[0..header_len], &h);
+    fillPcm16(out[header_len..], samples);
+    return out;
+}
+
+fn fillPcm16(dst: []u8, samples: []const f32) void {
+    std.debug.assert(dst.len == samples.len * 2);
+    for (samples, 0..) |x, i| std.mem.writeInt(i16, dst[i * 2 ..][0..2], toI16(x), .little);
+}
+
 /// A mono track being recorded. Not thread-safe: one capture thread owns it.
 pub const Writer = struct {
     file: std.Io.File,
@@ -334,4 +358,39 @@ test "readChannel rejects invalid channels and oversized frames" {
     try std.testing.expectError(error.BadChannel, readChannel(io, std.testing.allocator, f, i, 0, 0, 1));
     i.channels = 32769;
     try std.testing.expectError(error.UnsupportedFormat, readChannel(io, std.testing.allocator, f, i, 0, 0, 1));
+}
+
+test "encodeMono is a WAV that info and readChannel read back; encodePcm16 is its data" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const samples = [_]f32{ 0, 0.5, -0.5, 1.0, -1.0, 2.0, std.math.nan(f32) };
+    const bytes = try encodeMono(gpa, &samples, 24000);
+    defer gpa.free(bytes);
+    try std.testing.expectEqual(@as(usize, 44 + samples.len * 2), bytes.len);
+    try std.testing.expectEqualStrings("RIFF", bytes[0..4]);
+    try std.testing.expectEqual(@as(u32, 36 + samples.len * 2), std.mem.readInt(u32, bytes[4..8], .little));
+    try std.testing.expectEqual(@as(u32, samples.len * 2), std.mem.readInt(u32, bytes[40..44], .little));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "speech.wav", .data = bytes });
+    const f = try tmp.dir.openFile(io, "speech.wav", .{});
+    defer f.close(io);
+    const i = try info(io, f);
+    try std.testing.expectEqual(@as(u16, 1), i.channels);
+    try std.testing.expectEqual(@as(u32, 24000), i.rate);
+    try std.testing.expectEqual(@as(u64, samples.len), i.frames());
+    const back = try readChannel(io, gpa, f, i, 0, 0, samples.len);
+    defer gpa.free(back);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), back[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), back[4], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), back[5], 0.001); // clamped
+    try std.testing.expectEqual(@as(f32, 0), back[6]); // NaN is silence
+
+    const pcm = try encodePcm16(gpa, &samples);
+    defer gpa.free(pcm);
+    try std.testing.expectEqualSlices(u8, bytes[44..], pcm);
+    const empty = try encodeMono(gpa, &.{}, 24000);
+    defer gpa.free(empty);
+    try std.testing.expectEqual(@as(usize, 44), empty.len);
 }

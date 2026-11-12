@@ -16,6 +16,17 @@
 //!   `response_format`: `json` (default, `{"text": …}`), `text` (the raw
 //!   transcript), `verbose_json` (plus language, duration and timestamped
 //!   `segments: [{id, start, end, text}]`), `srt`, `vtt`.
+//! - `POST /v1/audio/speech`: the OpenAI speech API shape, with GhostPen's
+//!   Kokoro voice: a JSON body `{"input", "voice"?, "response_format"?,
+//!   "speed"?, "model"?}` plus `"lang"?` (an espeak language or a translate
+//!   target; guessed from the text when absent). `voice` is a GhostPen voice
+//!   id (`af_heart`, `ef_dora`); "auto", an OpenAI name (`alloy`) or any
+//!   other id means the language's voice. The answer is the audio, not
+//!   played: `audio/wav` (`response_format` `wav`, the default) or
+//!   `audio/pcm` (`pcm`: raw s16le mono, 24 kHz); mp3, opus, aac and flac
+//!   are refused with a 400. It takes its turn behind what is being read
+//!   aloud, and a reading started meanwhile waits for it.
+//! - `POST /speak`: GhostPen's own (`ghostpen say`): reads it aloud here.
 //! - `GET /v1/models`: the served model and these capabilities.
 //! - `GET /health`: `ok`.
 //! - `GET /metrics`: the built-in model's performance counters (tokens,
@@ -33,6 +44,7 @@ const main = @import("main.zig");
 const models = @import("models.zig");
 const model_server = @import("model_server.zig");
 const tts = @import("tts.zig");
+const wav = @import("wav.zig");
 
 const log = std.log.scoped(.stt_server);
 const gpa = std.heap.smp_allocator;
@@ -274,6 +286,8 @@ var chat_queued: std.atomic.Value(u32) = .init(0);
 /// Sayings waiting for the voice (POST /speak, `ghostpen say`).
 var speak_queued: std.atomic.Value(u32) = .init(0);
 var embed_queued: std.atomic.Value(u32) = .init(0);
+/// Speech requests waiting for the voice (POST /v1/audio/speech).
+var speech_queued: std.atomic.Value(u32) = .init(0);
 const max_queued = 4;
 
 const Reply = model_server.Reply;
@@ -333,6 +347,13 @@ fn handle(io: std.Io, arena: std.mem.Allocator, request: *std.http.Server.Reques
             .data => |body| try speakReply(arena, body),
             .refused => |r| r,
         };
+    } else if (std.mem.eql(u8, path, "/v1/audio/speech") and request.head.method == .POST) blk: {
+        if (!admit(&speech_queued, max_queued)) break :blk busy(arena, request, "busy: too many speech requests waiting, retry later");
+        defer _ = speech_queued.fetchSub(1, .acq_rel);
+        break :blk switch (try readJsonBody(io, arena, request)) {
+            .data => |body| try speechReply(arena, body),
+            .refused => |r| r,
+        };
     } else if (std.mem.eql(u8, path, "/v1/audio/transcriptions") and request.head.method == .POST) blk: {
         // Each request can hold hundreds of MB (the upload and its PCM) while
         // it waits for the one whisper model: a few at a time.
@@ -374,6 +395,66 @@ fn speakReply(arena: std.mem.Allocator, body: []const u8) !Reply {
         gpa.free(r.backend);
     }
     return .{ .body = try std.json.Stringify.valueAlloc(arena, .{ .voice = r.voice, .lang = r.lang, .seconds = r.audio_s }, .{}) };
+}
+
+/// The longest `input` of a speech request: the voice is shared with the
+/// readings in the windows, which wait while it works.
+const max_speech_input = 50_000;
+
+/// The `response_format`s a speech request may ask for (`/v1/models` lists them).
+const speech_formats = .{ "wav", "pcm" };
+
+/// A GhostPen voice id from OpenAI's `voice`: the id itself when the catalog
+/// has it, else "" (the language's voice): "auto", `alloy`, `nova`...
+fn speechVoice(name: []const u8) []const u8 {
+    const v = std.mem.trim(u8, name, " \t\r\n");
+    return if (tts.knownVoice(v)) v else "";
+}
+
+/// POST /v1/audio/speech: OpenAI's speech API on GhostPen's voice. The audio
+/// comes back as the body; nothing is played.
+fn speechReply(arena: std.mem.Allocator, body: []const u8) !Reply {
+    const Args = struct {
+        model: ?[]const u8 = null,
+        input: ?[]const u8 = null,
+        voice: ?[]const u8 = null,
+        response_format: ?[]const u8 = null,
+        speed: ?f32 = null,
+        lang: ?[]const u8 = null,
+    };
+    const a = std.json.parseFromSliceLeaky(Args, arena, body, .{ .ignore_unknown_fields = true }) catch
+        return model_server.errorReply(.bad_request, "expected {\"input\": \"text to say\", \"voice\"?, \"response_format\"?: \"wav\"|\"pcm\", \"speed\"?}", arena);
+    const text = std.mem.trim(u8, a.input orelse "", " \t\r\n");
+    if (text.len == 0) return model_server.errorReply(.bad_request, "nothing to say: \"input\" is empty", arena);
+    if (text.len > max_speech_input) return model_server.errorReply(.payload_too_large, "\"input\" is too long (50000 bytes at most)", arena);
+    const format = try std.ascii.allocLowerString(arena, std.mem.trim(u8, a.response_format orelse "", " "));
+    const pcm = std.mem.eql(u8, format, "pcm");
+    if (format.len > 0 and !pcm and !std.mem.eql(u8, format, "wav")) {
+        const message = try std.fmt.allocPrint(arena, "unsupported response_format \"{s}\": GhostPen answers only wav or pcm (raw 16-bit mono PCM)", .{format});
+        return model_server.errorReply(.bad_request, message, arena);
+    }
+    const speed = a.speed orelse 1.0;
+    if (!(speed >= 0.25 and speed <= 4.0)) return model_server.errorReply(.bad_request, "\"speed\" must be between 0.25 and 4", arena);
+    // The OpenAI model names ("tts-1") mean nothing here; a Kokoro model id does.
+    const model = if (a.model) |m| (if (tts.knownModel(m)) m else "") else "";
+
+    const audio = tts.synthesize(gpa, .{
+        .text = text,
+        .lang = std.mem.trim(u8, a.lang orelse "", " "),
+        .voice = speechVoice(a.voice orelse ""),
+        .model = model,
+        .speed = speed,
+    }, .log) catch |err| {
+        log.warn("speech: {s}", .{@errorName(err)});
+        return switch (err) {
+            error.NothingToSay => model_server.errorReply(.bad_request, tts.speakMessage(err), arena),
+            error.OutOfMemory => err,
+            else => model_server.errorReply(.service_unavailable, if (err == error.NoDataDir) "GhostPen has no voice here" else tts.speakMessage(err), arena),
+        };
+    };
+    defer audio.deinit(gpa);
+    if (pcm) return .{ .body = try wav.encodePcm16(arena, audio.samples), .content_type = "audio/pcm" };
+    return .{ .body = try wav.encodeMono(arena, audio.samples, audio.rate), .content_type = "audio/wav" };
 }
 
 fn busy(arena: std.mem.Allocator, request: *std.http.Server.Request, message: []const u8) Reply {
@@ -467,6 +548,8 @@ fn modelsBody(arena: std.mem.Allocator) ![]const u8 {
         .capabilities = .{
             .response_formats = .{ "json", "text", "verbose_json", "srt", "vtt" },
             .segments = true,
+            // POST /v1/audio/speech
+            .speech_formats = speech_formats,
         },
     });
     for (try model_server.modelEntries(arena)) |e| try js.write(e);
@@ -740,4 +823,40 @@ test hostAllowed {
     try std.testing.expect(isLoopback(try parseBind("127.0.0.1:8771")));
     try std.testing.expect(isLoopback(try parseBind("[::1]:8771")));
     try std.testing.expect(!isLoopback(try parseBind("0.0.0.0:8771")));
+}
+
+test speechVoice {
+    try std.testing.expectEqualStrings("ef_dora", speechVoice("ef_dora"));
+    try std.testing.expectEqualStrings("af_heart", speechVoice(" af_heart\n"));
+    // OpenAI's names, "auto" and what the catalog lacks: the language's voice.
+    try std.testing.expectEqualStrings("", speechVoice("alloy"));
+    try std.testing.expectEqualStrings("", speechVoice("auto"));
+    try std.testing.expectEqualStrings("", speechVoice("af_sky"));
+    try std.testing.expectEqualStrings("", speechVoice(""));
+}
+
+test "speechReply refuses what it can't answer before synthesizing" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const cases = [_]struct { body: []const u8, status: std.http.Status, needle: []const u8 }{
+        .{ .body = "{\"input\":\"Hola\",\"response_format\":\"mp3\"}", .status = .bad_request, .needle = "only wav or pcm" },
+        .{ .body = "{\"input\":\"Hola\",\"response_format\":\"Opus\"}", .status = .bad_request, .needle = "only wav or pcm" },
+        .{ .body = "{\"input\":\"Hola\",\"response_format\":\"flac\"}", .status = .bad_request, .needle = "\\\"flac\\\"" },
+        .{ .body = "{\"input\":\"  \"}", .status = .bad_request, .needle = "\"input\\\" is empty" },
+        .{ .body = "{}", .status = .bad_request, .needle = "is empty" },
+        .{ .body = "{\"input\":\"Hola\",\"speed\":9}", .status = .bad_request, .needle = "between 0.25 and 4" },
+        .{ .body = "{\"input\":\"Hola\",\"speed\":0}", .status = .bad_request, .needle = "between 0.25 and 4" },
+        .{ .body = "not json", .status = .bad_request, .needle = "expected" },
+        .{ .body = "{\"input\":5}", .status = .bad_request, .needle = "expected" },
+    };
+    for (cases) |c| {
+        const r = try speechReply(a, c.body);
+        try std.testing.expectEqual(c.status, r.status);
+        try std.testing.expect(std.mem.indexOf(u8, r.body, c.needle) != null);
+    }
+    const big = try a.alloc(u8, max_speech_input + 1);
+    @memset(big, 'a');
+    const body = try std.fmt.allocPrint(a, "{{\"input\":\"{s}\"}}", .{big});
+    try std.testing.expectEqual(std.http.Status.payload_too_large, (try speechReply(a, body)).status);
 }

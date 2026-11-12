@@ -204,7 +204,17 @@ From a terminal:
 
 ```
 ghostpen --say "Good morning" --lang es --voice ef_dora
+ghostpen say --lang es --out nota.wav "Hola, esto es una prueba"
 ```
+
+`ghostpen say --out FILE` saves the speech as a WAV file (16-bit mono,
+24 kHz) instead of playing it; `--out -` writes it to stdout. Other
+programs can ask the running GhostPen for the voice too: `POST
+/v1/audio/speech` on its model and speech service (`127.0.0.1:8771`) takes
+the OpenAI speech API's JSON (`input`, and optionally `voice`, `speed`,
+`lang`) and answers a WAV, or raw PCM with `"response_format": "pcm"`.
+A bot can turn that into a voice note, e.g. with `ffmpeg -i speech.wav -c:a
+libopus note.ogg`.
 
 The binaries that read aloud include espeak-ng (GPL-3.0-or-later) for
 pronunciation; GhostPen's own code stays MIT.
