@@ -2,6 +2,27 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.5.2] - 2026-11-11
+
+### Added
+
+- The built-in voice can hand over its audio instead of playing it.
+  `POST /v1/audio/speech` on the model and speech service is the OpenAI
+  speech API on the Kokoro voice (`{"input", "voice"?, "response_format"?,
+  "speed"?}` plus an optional `"lang"`): it answers `audio/wav` or, with
+  `"response_format": "pcm"`, raw 16-bit mono PCM at 24 kHz (other formats
+  get a 400), so a bot can send the voice as voice notes. It waits for a
+  reading in progress and never cuts it short. `/v1/models` lists the
+  formats under `speech_formats`.
+- `ghostpen say --out FILE` writes the speech to a WAV file instead of
+  speaking it (`--out -` for stdout), made by the running GhostPen or, with
+  `--local` or none running, by this process. `--speed` sets the rate.
+
+### Changed
+
+- Built on Oriel 0.20.17, whose `tts.synthesize` makes the speech in memory
+  for `/v1/audio/speech` and `ghostpen say --out`.
+
 ## [0.5.1] - 2026-11-09
 
 ### Fixed
