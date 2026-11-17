@@ -2,6 +2,21 @@
 
 This changelog follows the repository's release tags. There is no v0.2.1 tag.
 
+## [0.5.3] - 2026-11-17
+
+### Fixed
+
+- Speak (and every read aloud) no longer stops after the first words when
+  the built-in model holds most of the GPU. Right after an answer from a
+  large local model (Qwen3.5 9B at a 128k context), only the short first
+  chunk of the voice fit on the GPU and the rest of the text went unread;
+  now a chunk the GPU can't run is read on the CPU instead, and the next
+  reading tries the GPU again.
+
+### Changed
+
+- Built on Oriel 0.20.18, whose voice retries such a chunk on the CPU.
+
 ## [0.5.2] - 2026-11-11
 
 ### Added
