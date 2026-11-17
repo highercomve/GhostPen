@@ -24,6 +24,15 @@ Studio, OpenAI, OpenRouter, Groq, …; the default is a local Ollama with
 AppImage, the Windows installer and the macOS app update themselves
 (Settings → About & updates); deb and rpm installs say when a new version is out.
 
+On Linux, one command installs the AppImage for your user: it goes in `~/.local/bin`,
+with a menu entry and icons in `~/.local/share`. It picks the `-cuda` build when an
+NVIDIA GPU is present, and `--help` lists the options (a given version,
+`--no-cuda`, `--uninstall`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/highercomve/GhostPen/main/scripts/install.sh | bash
+```
+
 | | Package | Whisper and Built-in models run on |
 | --- | --- | --- |
 | Linux | AppImage, .deb, .rpm | any GPU through **Vulkan** (NVIDIA, AMD, Intel); the CPU without one |
